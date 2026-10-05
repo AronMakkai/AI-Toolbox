@@ -18131,14 +18131,27 @@ class TestCutMode(unittest.TestCase):
         cmd = App._cut_segment_cmd("in.mov", "out.mov", 24, 47, 24.0, True)
         self.assertIn("copy", cmd)
         self.assertNotIn("prores_ks", cmd)
-        ss = float(cmd[cmd.index("-ss") + 1])
-        to = float(cmd[cmd.index("-to") + 1])
-        self.assertGreater(ss, 24 / 24.0)
-        self.assertLess(ss, 25 / 24.0)
-        self.assertGreater(to, 47 / 24.0)
-        self.assertLess(to, 48 / 24.0)
-        # -ss before -i: the seek is on the input
-        self.assertLess(cmd.index("-ss"), cmd.index("-i"))
+        i_in = cmd.index("-i")
+        # a fast input seek before the shot, then the exact output-side
+        # window on the file's own clock
+        self.assertLess(cmd.index("-ss"), i_in)
+        self.assertIn("-copyts", cmd[i_in:])
+        out_ss = float(cmd[cmd.index("-ss", i_in) + 1])
+        out_to = float(cmd[cmd.index("-to", i_in) + 1])
+        self.assertGreater(out_ss, 23 / 24.0)
+        self.assertLess(out_ss, 24 / 24.0)
+        self.assertGreater(out_to, 47 / 24.0)
+        self.assertLess(out_to, 48 / 24.0)
+        self.assertIn("make_zero", cmd)
+
+    def test_an_intra_cut_uses_the_frames_own_timestamps_when_given(self):
+        """A trimmed movie does not start at t=0, so frame 24 is not
+        at 24/fps; the analysis records each frame's real time."""
+        cmd = App._cut_segment_cmd("in.mov", "out.mov", 24, 47, 24.0, True,
+                                   t_first=10.0, t_last=10.0 + 23 / 24.0)
+        i_in = cmd.index("-i")
+        out_ss = float(cmd[cmd.index("-ss", i_in) + 1])
+        self.assertAlmostEqual(out_ss, 10.0 - 0.5 / 24.0, places=4)
 
     def test_a_long_gop_source_is_picked_by_frame_index(self):
         """A copy would snap to the previous keyframe, so the frames
@@ -18211,6 +18224,18 @@ class TestCutMode(unittest.TestCase):
         self.assertIn('!= "cut"', seg)
         self.assertIn('winfo_ismapped()', seg)
         self.assertIn("_typing_in_field(", seg)
+
+    def test_the_viewer_seeks_the_recorded_timestamp(self):
+        """The reported 'it does not find the obvious cut': it had, but
+        the viewer fetched frames by index / fps on a movie trimmed
+        out of a longer one, whose clock does not start at zero, and
+        showed frames several away from the ones analysed."""
+        import inspect
+        body = inspect.getsource(App._cut_frame_image)
+        self.assertIn("self._cut_frame_time(i)", body)
+        self.assertIn("-copyts", body)
+        self.assertIn("showinfo", inspect.getsource(App._cut_scene_cmd))
+        self.assertIn("pts_time", inspect.getsource(App._cut_preview_worker))
 
     def test_the_analysis_streams_progress(self):
         import inspect
