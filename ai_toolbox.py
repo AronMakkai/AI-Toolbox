@@ -3973,7 +3973,7 @@ class App(tk.Tk):
            "shot with the frames copied in under their original names, "
            "so frame numbers are kept. Everything lands in a versioned "
            "ADW/CUT_vNN folder.\n\n", "body")
-        _w("Preview cuts\n", "param")
+        _w("Analyse movie\n", "param")
         _w("One ffmpeg pass scores how much of the picture changed on "
            "every frame (its scene score, 0\u20131). The frames are "
            "then drawn on the timeline in alternating shades, one shade "
@@ -3983,12 +3983,20 @@ class App(tk.Tk):
            "a cut.\n\n", "body_indent")
         _w("Sensitivity\n", "param")
         _w("Higher finds more cuts. The scores are kept, so dragging the "
-           "slider redraws the shots instantly without another pass. "
-           "0.70 is ffmpeg's customary threshold; raise it if a hard "
-           "cut is missed, lower it if a whip pan or a flash is being "
-           "cut. A single flash frame is never its own shot: a run "
-           "shorter than two frames is folded back into the shot it "
-           "interrupted.\n\n", "body_indent")
+           "slider redraws the shots instantly without another pass. A "
+           "frame counts as a cut when its change is a spike above the "
+           "frames around it \u2014 so on busy handheld footage, where "
+           "every frame changes a lot, a real cut still stands out. "
+           "Raise it if a hard cut is missed, lower it if a whip pan "
+           "is being cut. A single flash frame is never its own shot: "
+           "a run shorter than two frames is folded back into the shot "
+           "it interrupted.\n\n", "body_indent")
+        _w("Merge with next  /  Split here  /  Reset edits\n", "param")
+        _w("Hand corrections on top of the automatic result. Select a "
+           "shot in the list and Merge with next joins it to the one "
+           "after it; click a frame on the timeline and Split here "
+           "starts a new shot there. Both survive moving the slider "
+           "afterwards; Reset edits drops them.\n\n", "body_indent")
         _w("What the movie cut does to the pixels\n", "param")
         _w("ProRes, DNxHD and other all-intra codecs are stream-copied "
            "between the two frame times: the shot is the source's own "
@@ -6974,22 +6982,23 @@ class App(tk.Tk):
         self.cut_info.pack(anchor="w", pady=(3, 0))
 
         _ccd = self._card(self.exr_f_cut, "Cut detection")
-        tk.Label(_ccd, text="Higher finds more cuts. Start in the middle; "
-                 "raise it if a hard cut is missed, lower it if a flash "
-                 "or a whip pan is being cut.",
+        tk.Label(_ccd, text="Analyse once, then drag Sensitivity until the "
+                 "shots look right; fix any stragglers with Merge and "
+                 "Split. The analysis is kept, so the slider is instant.",
                  font=FSM, bg=S, fg=G, wraplength=300, justify="left",
                  anchor="w").pack(fill="x", pady=(0, 4))
         self.cut_sens_var = tk.DoubleVar(value=self.CUT_DEFAULT_SENSITIVITY)
         self._ff_slider_factory(_ccd)(
             "Sensitivity", self.cut_sens_var, 0.05, 0.95, 0.01,
             lambda v: f"{float(v):.2f}",
-            tip="The ffmpeg scene score a frame change must reach to\n"
-                "count as a cut is (1 \u2212 sensitivity): 0.70 here is\n"
-                "ffmpeg's usual 0.30 threshold. Shots shorter than\n"
+            tip="Higher finds more cuts. A frame counts as a cut when\n"
+                "its change stands out from the frames around it --\n"
+                "a spike above the local motion, however busy the\n"
+                "footage -- or is simply huge. Shots shorter than\n"
                 f"{self.CUT_MIN_SHOT_FRAMES} frames are merged into their\n"
                 "neighbour, so a single flash frame never becomes a shot.")
         self.cut_sens_var.trace_add("write", lambda *_: self._cut_rethreshold())
-        self.cut_preview_btn = self._mkbtn(_ccd, "\u2315  Preview cuts",
+        self.cut_preview_btn = self._mkbtn(_ccd, "\u2315  Analyse movie",
                                            self._cut_preview, bg="#0D0D0D",
                                            fg=W)
         tk.Label.configure(self.cut_preview_btn._lbl, width=0, pady=7)
@@ -7002,6 +7011,28 @@ class App(tk.Tk):
             activestyle="none")
         self.cut_list.pack(fill="x", pady=(4, 0))
         self.cut_list.bind("<<ListboxSelect>>", self._cut_goto)
+        # Hand corrections on top of the automatic result. They are
+        # kept as frames (forced starts, forbidden starts) so moving
+        # the slider afterwards does not throw them away.
+        self._cut_joins = set()
+        self._cut_splits = set()
+        _crow = tk.Frame(_ccd, bg=S); _crow.pack(fill="x", pady=(4, 0))
+        for _txt, _cmd, _tip in (
+                ("Merge with next", self._cut_merge_next,
+                 "Join the selected shot and the one after it: the\n"
+                 "automatic cut between them was not a cut."),
+                ("Split here", self._cut_split_here,
+                 "Start a new shot at the frame selected on the\n"
+                 "timeline: a cut the analysis missed."),
+                ("Reset edits", self._cut_reset_edits,
+                 "Drop every merge and split and go back to the\n"
+                 "automatic result.")):
+            _b = tk.Label(_crow, text=_txt, font=FSM, bg="#1A1A1A", fg=G,
+                          cursor="hand2", padx=8, pady=3,
+                          highlightthickness=1, highlightbackground=BD)
+            _b.pack(side="left", padx=(0, 4))
+            _b.bind("<Button-1>", lambda e, c=_cmd: c())
+            self._tooltip(_tip)(_b)
 
         self.cut_out = self._outinfo(self.exr_f_cut)
         self.cut_btn = self._runbtn(self.exr_f_cut, "Cut into shots",
@@ -7382,24 +7413,69 @@ class App(tk.Tk):
         n = max(scores) + 1
         return [scores.get(i, 0.0) for i in range(n)]
 
-    @staticmethod
-    def _cut_shots_from_scores(scores, sensitivity, min_len=2):
+    CUT_BASELINE_WINDOW = 12     # frames either side for the local baseline
+    CUT_SPIKE_RATIO = 3.0        # this many times its baseline = full strength
+    CUT_SCORE_FLOOR = 0.04       # below this nothing is a cut, however quiet
+
+    @classmethod
+    def _cut_strengths(cls, scores):
+        """Per-frame cut strength, 0..1, from the raw scene scores.
+
+        The raw score alone does not work on real footage: a handheld
+        or fast-cut sequence scores 0.2-0.3 on EVERY frame from motion
+        alone, and a genuine cut at 0.4 sits inside that noise, so no
+        single threshold separates the two. What distinguishes a cut
+        is that it is a SPIKE: far above the frames around it, whatever
+        their level. So each frame is measured against the median of
+        its neighbours: at its baseline the strength is 0, at
+        CUT_SPIKE_RATIO times its baseline it is 1. The baseline has a
+        floor of 0.01, so on a locked-off shot (baseline ~0) a modest
+        absolute change is still a strong spike; scores under
+        CUT_SCORE_FLOOR are never cuts at all, because there the ratio
+        would be measuring noise."""
+        n = len(scores)
+        if n == 0:
+            return []
+        w = cls.CUT_BASELINE_WINDOW
+        out = [0.0] * n
+        for i in range(1, n):
+            lo, hi = max(1, i - w), min(n, i + w + 1)
+            neigh = sorted(scores[j] for j in range(lo, hi) if j != i)
+            base = neigh[len(neigh) // 2] if neigh else 0.0
+            sc = float(scores[i])
+            if sc < cls.CUT_SCORE_FLOOR:
+                continue
+            ratio = sc / max(base, 0.01)
+            out[i] = max(0.0, min(1.0, (ratio - 1.0) / (cls.CUT_SPIKE_RATIO - 1.0)))
+        return out
+
+    @classmethod
+    def _cut_shots_from_scores(cls, scores, sensitivity, min_len=2,
+                               joins=(), splits=()):
         """[(first, last)] 0-based inclusive shot ranges.
 
-        A frame whose score reaches the threshold STARTS a shot. A
-        shot shorter than min_len is not a shot: it is folded back
-        into the one before it (a flash frame, a dropped-frame glitch,
-        a scene score spike on a hard whip)."""
+        A frame whose cut strength reaches (1 - sensitivity) STARTS a
+        shot. `splits` are frames the person forced to start a shot
+        and `joins` frames they forbade from starting one; both win
+        over the automatic decision. A shot shorter than min_len is
+        not a shot: it is folded back into the one before it (a flash
+        frame, a dropped-frame glitch) -- unless the person split it
+        there on purpose."""
         n = len(scores)
         if n == 0:
             return []
         thr = 1.0 - float(sensitivity)
-        starts = [0] + [i for i in range(1, n) if scores[i] >= thr]
+        strength = cls._cut_strengths(scores)
+        joins, splits = set(joins), set(splits)
+        starts = [0] + sorted(
+            i for i in range(1, n)
+            if (strength[i] >= thr and i not in joins) or i in splits)
         shots = []
         absorb_next = False
         for k, st in enumerate(starts):
             en = (starts[k + 1] - 1) if k + 1 < len(starts) else n - 1
-            if shots and ((en - st + 1) < min_len or absorb_next):
+            if shots and st not in splits and (
+                    (en - st + 1) < min_len or absorb_next):
                 # Too short to be a shot: it is a flash, and the frames
                 # after it are the same shot carrying on, so the cut
                 # that ends the flash is not a cut either -- the next
@@ -7431,6 +7507,20 @@ class App(tk.Tk):
             return (r.stdout or "").strip().splitlines()[0].strip()
         except Exception:
             return ""
+
+    @staticmethod
+    def _cut_probe_frames(path):
+        """Frame count for the progress bar; 0 when ffprobe cannot say
+        (some containers carry no count, then the bar just pulses)."""
+        try:
+            r = subprocess.run(
+                ["ffprobe", "-v", "error", "-select_streams", "v:0",
+                 "-count_packets", "-show_entries",
+                 "stream=nb_read_packets", "-of", "default=nw=1:nk=1",
+                 str(path)], capture_output=True, text=True)
+            return int((r.stdout or "0").strip().splitlines()[0])
+        except Exception:
+            return 0
 
     @classmethod
     def _cut_segment_cmd(cls, src, dst, first, last, fps, intra):
@@ -7497,6 +7587,8 @@ class App(tk.Tk):
         self.cut_names = names
         self._cut_scores = None
         self._cut_shots = []
+        self._cut_joins = set()
+        self._cut_splits = set()
         self._cut_out_dir = None
         self.cut_path_lbl.configure(text=path, fg=G)
         base = os.path.basename(path.rstrip(os.sep))
@@ -7524,7 +7616,7 @@ class App(tk.Tk):
         self.tc_hint_lbl.configure(text="")
         self._cut_draw_preview()
         self.log(self.elog, "Loaded: " + base, "ok")
-        self.log(self.elog, "Preview cuts to find the shots.", "hi")
+        self.log(self.elog, "Analyse movie to find the shots.", "hi")
 
     def _cut_preview(self):
         if self._cut_busy:
@@ -7561,19 +7653,37 @@ class App(tk.Tk):
 
     def _cut_preview_worker(self):
         try:
-            self.after(0, lambda: self.progress(None, "Scoring frame changes…"))
+            total = (len(self.cut_names) if not self.cut_is_movie
+                     else self._cut_probe_frames(self.cut_input))
+            self.after(0, lambda: self.progress(None, "Analysing…"))
             self.after(0, lambda: self.log(
                 self.elog, "ffmpeg is scoring every frame change…", "dim"))
             proc = subprocess.Popen(self._cut_scene_cmd(),
                                     stdout=subprocess.PIPE,
                                     stderr=subprocess.PIPE, text=True)
             self._cut_proc = proc
-            out, err = proc.communicate()
+            # Read as it comes: a reel is minutes of decoding, and a
+            # bar that moves is the difference between "working" and
+            # "hung". Every frame prints a `frame:N` line.
+            lines, seen, last = [], 0, 0
+            for line in proc.stdout:
+                lines.append(line)
+                if line.startswith("frame:"):
+                    seen += 1
+                    if total and seen - last >= max(1, total // 200):
+                        last = seen
+                        self.after(0, lambda a=seen, b=total: self.progress(
+                            min(0.99, a / b), f"Analysing  {a} / {b}"))
+                if self._cut_cancel:
+                    proc.kill()
+                    break
+            err = proc.stderr.read()
+            proc.wait()
             self._cut_proc = None
             if self._cut_cancel:
                 self.after(0, lambda: self.log(self.elog, "Cancelled.", "hi"))
                 return
-            scores = self._cut_parse_scene_scores(out)
+            scores = self._cut_parse_scene_scores("".join(lines))
             if not scores:
                 tail = (err or "").strip().splitlines()[-1:] or ["no output"]
                 raise RuntimeError(f"ffmpeg scored nothing — {tail[0]}")
@@ -7599,7 +7709,7 @@ class App(tk.Tk):
         self._cut_busy = False
         try:
             self.progress(0, "")
-            self.cut_preview_btn._lbl.configure(text="⌕  Preview cuts")
+            self.cut_preview_btn._lbl.configure(text="\u2315  Analyse movie")
         except Exception:
             pass
 
@@ -7618,11 +7728,14 @@ class App(tk.Tk):
             return
         self._cut_shots = self._cut_shots_from_scores(
             self._cut_scores, float(self.cut_sens_var.get()),
-            self.CUT_MIN_SHOT_FRAMES)
+            self.CUT_MIN_SHOT_FRAMES, self._cut_joins, self._cut_splits)
         n = len(self._cut_shots)
+        edits = len(self._cut_joins) + len(self._cut_splits)
         self.cut_summary_lbl.configure(
             text=f"{n} shot{'s' if n != 1 else ''} across "
-                 f"{len(self._cut_scores)} frame(s).",
+                 f"{len(self._cut_scores)} frame(s)"
+                 + (f", {edits} hand edit{'s' if edits != 1 else ''}."
+                    if edits else "."),
             fg="#66CC66" if n > 1 else "#DDAA44")
         self.cut_list.delete(0, "end")
         for k, (a, b) in enumerate(self._cut_shots, 1):
@@ -7633,6 +7746,55 @@ class App(tk.Tk):
                 text="alternating shades = shots     bright = first "
                      "frame of a shot")
             self.exr_frame_cb.refresh()
+
+    def _cut_selected_shot(self):
+        sel = self.cut_list.curselection()
+        if sel and sel[0] < len(self._cut_shots):
+            return sel[0]
+        # no list selection: the shot under the timeline playhead
+        return self._cut_shot_index(getattr(self, "_cut_idx", 0))
+
+    def _cut_merge_next(self):
+        """The selected shot and the one after it become one: the
+        frame the next shot started on is forbidden as a start."""
+        k = self._cut_selected_shot()
+        if k < 0 or k + 1 >= len(self._cut_shots):
+            self.log(self.elog, "Select a shot that has one after it.", "err")
+            return
+        st = self._cut_shots[k + 1][0]
+        self._cut_splits.discard(st)
+        self._cut_joins.add(st)
+        self._cut_rethreshold()
+        self.cut_list.selection_clear(0, "end")
+        self.cut_list.selection_set(k)
+        self.log(self.elog, f"Merged shot{k + 1} and shot{k + 2} "
+                 f"(no cut at frame {st + 1}).", "ok")
+
+    def _cut_split_here(self):
+        """A new shot starts on the frame selected on the timeline."""
+        i = getattr(self, "_cut_idx", None)
+        if i is None or not self._cut_scores or i <= 0:
+            self.log(self.elog, "Click the first frame of the new shot "
+                     "on the timeline, then Split here.", "err")
+            return
+        self._cut_joins.discard(i)
+        self._cut_splits.add(i)
+        self._cut_rethreshold()
+        k = self._cut_shot_index(i)
+        self.cut_list.selection_clear(0, "end")
+        if k >= 0:
+            self.cut_list.selection_set(k)
+        self.log(self.elog, f"Split: shot{k + 1} now starts at frame {i + 1}.",
+                 "ok")
+
+    def _cut_reset_edits(self):
+        if not (self._cut_joins or self._cut_splits):
+            return
+        self._cut_joins = set()
+        self._cut_splits = set()
+        self._cut_rethreshold()
+        self.log(self.elog, "Hand edits dropped; back to the automatic cuts.",
+                 "hi")
 
     def _cut_shot_index(self, i):
         for k, (a, b) in enumerate(self._cut_shots):
@@ -7725,7 +7887,7 @@ class App(tk.Tk):
         self._exr_set_view_labels(None)
         if not self.cut_input or not self.cut_names:
             cv.create_text(cw // 2, ch // 2,
-                text="Select a movie or a folder of frames, then Preview cuts",
+                text="Select a movie or a folder of frames, then Analyse movie",
                 font=FSM, fill=G)
             return
         i = max(0, min(len(self.cut_names) - 1,

@@ -17889,13 +17889,78 @@ class TestCutMode(unittest.TestCase):
         self.assertEqual(App._cut_shots_from_scores(sc, 0.7),
                          [(0, 19), (20, 34), (35, 59)])
 
-    def test_sensitivity_is_one_minus_the_ffmpeg_threshold(self):
-        sc = self._scores(60, {20: 0.4, 35: 0.5})
-        # sensitivity 0.5 -> threshold 0.5: the 0.4 cut no longer counts
-        self.assertEqual(App._cut_shots_from_scores(sc, 0.5),
-                         [(0, 34), (35, 59)])
+    def test_higher_sensitivity_finds_more_cuts_never_fewer(self):
+        import random
+        rnd = random.Random(11)
+        sc = [0.0] + [rnd.uniform(0.0, 0.3) for _ in range(199)]
+        for i in (40, 95, 150):
+            sc[i] = rnd.uniform(0.4, 0.9)
+        prev = None
+        for sens in (0.2, 0.4, 0.6, 0.8, 0.95):
+            n = len(App._cut_shots_from_scores(sc, sens))
+            if prev is not None:
+                self.assertGreaterEqual(n, prev, sens)
+            prev = n
+
+    # ── the strength: a spike over the local baseline ──
+    def _busy(self):
+        """Handheld footage: every frame 0.18-0.32 from motion alone,
+        three real cuts at 0.45-0.55, one two-frame flash."""
+        import random
+        rnd = random.Random(3)
+        sc = [0.0] + [rnd.uniform(0.18, 0.32) for _ in range(199)]
+        for i in (40, 95, 150):
+            sc[i] = rnd.uniform(0.45, 0.55)
+        sc[120] = sc[121] = 0.9
+        return sc
+
+    def test_busy_footage_cuts_are_found_and_motion_is_not(self):
+        """The reported failure: with an absolute threshold no slider
+        position separated 0.5 cuts from 0.3 motion. Against the local
+        baseline they are far apart."""
+        sc = self._busy()
+        st = App._cut_strengths(sc)
+        lo = min(st[i] for i in (40, 95, 150))
+        hi = max(v for i, v in enumerate(st)
+                 if i not in (40, 95, 150, 120, 121))
+        self.assertGreater(lo, hi + 0.15, (lo, hi))
+
+    def test_busy_footage_at_the_default_sensitivity(self):
+        self.assertEqual(
+            App._cut_shots_from_scores(self._busy(),
+                                       App.CUT_DEFAULT_SENSITIVITY),
+            [(0, 39), (40, 94), (95, 149), (150, 199)])
+
+    def test_a_locked_off_shot_still_sees_a_modest_cut(self):
+        """Baseline near zero: a 0.12 change is a huge spike there."""
+        import random
+        rnd = random.Random(5)
+        sc = [0.0] + [rnd.uniform(0.0, 0.015) for _ in range(99)]
+        sc[50] = 0.12
         self.assertEqual(App._cut_shots_from_scores(sc, 0.7),
-                         [(0, 19), (20, 34), (35, 59)])
+                         [(0, 49), (50, 99)])
+
+    def test_noise_under_the_floor_is_never_a_cut(self):
+        sc = [0.0] + [0.03] * 20 + [0.035] + [0.03] * 20
+        self.assertEqual(App._cut_strengths(sc)[21], 0.0)
+
+    # ── hand edits ──
+    def test_a_join_forbids_a_start_and_survives_the_slider(self):
+        sc = self._busy()
+        for sens in (0.6, 0.7, 0.8):
+            shots = App._cut_shots_from_scores(sc, sens, joins={95})
+            self.assertNotIn(95, [a for a, _ in shots], sens)
+
+    def test_a_split_forces_a_start_even_where_nothing_scored(self):
+        sc = self._busy()
+        shots = App._cut_shots_from_scores(sc, 0.7, splits={60})
+        self.assertIn((40, 59), shots)
+        self.assertIn((60, 94), shots)
+
+    def test_a_forced_split_is_not_folded_away_as_a_flash(self):
+        sc = [0.0] * 10
+        self.assertEqual(App._cut_shots_from_scores(sc, 0.7, splits={9}),
+                         [(0, 8), (9, 9)])
 
     def test_no_cuts_is_one_shot(self):
         self.assertEqual(App._cut_shots_from_scores([0.0] * 5, 0.7), [(0, 4)])
@@ -18010,8 +18075,20 @@ class TestCutMode(unittest.TestCase):
         self.assertIn("ADW_CS_SIDECAR", body)
         self.assertIn("shutil.copy2", body)
 
-    def test_the_default_sensitivity_is_ffmpegs_threshold(self):
-        self.assertAlmostEqual(1.0 - App.CUT_DEFAULT_SENSITIVITY, 0.30)
+    def test_the_edit_buttons_exist_and_the_input_pick_clears_them(self):
+        import inspect
+        body = inspect.getsource(App._tab_exr)
+        for txt in ('"Merge with next"', '"Split here"', '"Reset edits"'):
+            self.assertIn(txt, body)
+        acc = inspect.getsource(App._cut_accept)
+        self.assertIn("self._cut_joins = set()", acc)
+        self.assertIn("self._cut_splits = set()", acc)
+
+    def test_the_analysis_streams_progress(self):
+        import inspect
+        body = inspect.getsource(App._cut_preview_worker)
+        self.assertIn("for line in proc.stdout:", body)
+        self.assertNotIn("communicate()", body)
 
 
 class TestMovExrTabLayoutAndAnalysis(unittest.TestCase):
