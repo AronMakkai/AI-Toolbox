@@ -7412,6 +7412,10 @@ class App(tk.Tk):
                         "ffv1", "huffyuv", "v210", "cfhd", "hap")
 
     CUT_THUMB_W, CUT_THUMB_H = 96, 54   # analysis size; 5 KB a frame
+    # Named in the log so a stale build is obvious: three detectors in
+    # a row "made no difference" because the app being run was not
+    # the code being changed.
+    CUT_ANALYSER = "levelled difference v4"
 
     @classmethod
     def _cut_frame_change(cls, prev, cur):
@@ -7729,7 +7733,8 @@ class App(tk.Tk):
                      else self._cut_probe_frames(self.cut_input))
             self.after(0, lambda: self.progress(None, "Analysing…"))
             self.after(0, lambda: self.log(
-                self.elog, "ffmpeg is scoring every frame change…", "dim"))
+                self.elog, f"Analyser: {self.CUT_ANALYSER} — ffmpeg is "
+                "decoding, every frame change is being scored…", "dim"))
             import numpy as np
             proc = subprocess.Popen(self._cut_scene_cmd(),
                                     stdout=subprocess.PIPE,
