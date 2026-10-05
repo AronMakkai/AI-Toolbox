@@ -1,6 +1,6 @@
 #!/bin/bash
 # ─────────────────────────────────────────────────────────────────────
-#  AI-Toolbox — builds a native .app shell wrapper + DMG installer
+#  Studio Toolbox — builds a native .app shell wrapper + DMG installer
 #
 #  A real macOS .app bundle with a simple bash launcher inside, NOT a
 #  PyInstaller freeze -- PyInstaller kept breaking against a
@@ -15,7 +15,11 @@
 
 set -e
 DIR="$(cd "$(dirname "$0")" && pwd)"
-APP_NAME="AI-Toolbox"
+# Hyphenated on disk (bundle, executable, DMG) so no path needs quoting
+# in Finder, Terminal or the xattr hint below; the display name has the
+# space.
+APP_NAME="Studio-Toolbox"
+DISPLAY_NAME="Studio Toolbox"
 VERSION="1.0"
 TOOLBOX="$DIR/ai_toolbox.py"
 ICON="$DIR/AppIcon.icns"          # optional -- ignored if missing
@@ -32,7 +36,7 @@ fi
 
 echo ""
 echo "╔═══════════════════════════════════════╗"
-echo "║   AI-Toolbox $VERSION  — DMG Builder      ║"
+echo "║   Studio Toolbox $VERSION  — DMG Builder      ║"
 echo "╚═══════════════════════════════════════╝"
 echo ""
 
@@ -57,7 +61,7 @@ cat > "$APP/Contents/Info.plist" << PLIST
 <plist version="1.0">
 <dict>
     <key>CFBundleName</key><string>$APP_NAME</string>
-    <key>CFBundleDisplayName</key><string>$APP_NAME</string>
+    <key>CFBundleDisplayName</key><string>$DISPLAY_NAME</string>
     <key>CFBundleIdentifier</key><string>com.aronmakkai.aitoolbox</string>
     <key>CFBundleVersion</key><string>$VERSION</string>
     <key>CFBundleShortVersionString</key><string>$VERSION</string>
@@ -114,7 +118,7 @@ for c in "${CANDIDATES[@]}"; do
 done
 
 if [ -z "$PYTHON" ]; then
-    osascript -e 'display dialog "AI-Toolbox could not find a Python install with torch, opencv-python, numpy and Pillow already installed.\n\nActivate the conda environment this app was set up with, then relaunch from Terminal:\n\n  conda activate <your-env>\n  open /Applications/AI-Toolbox.app" with title "AI-Toolbox — Python not found" buttons {"OK"} default button 1 with icon caution'
+    osascript -e 'display dialog "Studio Toolbox could not find a Python install with torch, opencv-python, numpy and Pillow already installed.\n\nActivate the conda environment this app was set up with, then relaunch from Terminal:\n\n  conda activate <your-env>\n  open /Applications/Studio-Toolbox.app" with title "Studio Toolbox — Python not found" buttons {"OK"} default button 1 with icon caution'
     exit 1
 fi
 
@@ -134,9 +138,9 @@ echo "App bundle built: $APP"
 #    accepts "-" as a self-identity, no Apple account needed). This
 #    does NOT satisfy Gatekeeper's "identified developer" check, so
 #    first launch on another Mac still needs either right-click ->
-#    Open -> Open Anyway, or:  xattr -cr /Applications/AI-Toolbox.app
+#    Open -> Open Anyway, or:  xattr -cr /Applications/Studio-Toolbox.app
 #    What it DOES fix is a separate, more confusing failure --
-#    "AI-Toolbox is damaged and can't be opened" -- which unsigned
+#    "Studio Toolbox is damaged and can't be opened" -- which unsigned
 #    apps can hit depending on how they were zipped/AirDropped/
 #    uploaded, since that process can alter the bundle in ways an
 #    unsigned app has no signature to detect.
@@ -207,6 +211,6 @@ fi
 
 echo ""
 echo "Done — $DMG_NAME"
-echo "    Open DMG → drag AI-Toolbox to Applications → launch"
+echo "    Open DMG → drag Studio-Toolbox to Applications → launch"
 echo ""
 open "$DIR"

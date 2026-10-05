@@ -5,6 +5,39 @@ repository up next. Owner: Aron Makkai. It replaces a long chat in which
 the app was developed by sending files back and forth; from here on, work
 is committed to this repository.
 
+## Studio Toolbox (branch `studio-toolbox`)
+
+On 5 October 2026 the app was branched into **Studio Toolbox**: the
+same code with the four ADW modules removed — ADW-Blur (`rife`),
+ADW-CurveLock (`curve`), ADW-AreaLock (`area`) and ADW-Interpolate
+(`interp`). `main` stays AI-Toolbox. Everything below applies to both
+branches except where noted.
+
+What was removed: the four `_tab_*` builders, their `_rife_*`,
+`_curve_*`, `_area_*`, `_interp_*`, `_ip_*` methods, the Blur run/pick/
+PNG-cache cluster (`_rrun`, `_rpick*`, `_build_png_cache*`,
+`_adw_generate_extra_pairs`, `_dual_timeline`, …), the project save/
+load sections for `area`, `curve` and `rife` (an old project still
+loads; those sections are ignored), their manual pages in Setup, their
+demo steps, the Blur preset map, and their test classes.
+
+What stayed, because other modules call it: the RIFE engine
+(`_rife_inference_script`, `_rife_run_pair_stepped`, `_rife_upscale` —
+Fix Missing Frames and Upscale Studio), every `_vace_*` helper and the
+`VACE_*` constants (Fix Missing Frames, Expansion Studio, Upscale
+Studio), `_ip_pv_frame` / `_ip_source_is_encoded` / `_interp_luma_small`
+(the colour-aware frame reader and motion scan used by Fix Missing
+Frames and Paint Studio), and `_fal_*`. The Wan request settings that
+used to be Interpolate-tab widgets (`ip_vace_*_var`) are now created in
+`_vace_init_shared_settings`, called from `__init__` before `_build`.
+
+Branch numbers: pyflakes is **22** (was 64 on `main`); the full suite
+on this branch has 178 classes. `tests_baseline.txt` is per branch.
+
+The `ADW/` output root and the `ADW-Paint_vNN` folder name are
+unchanged on purpose — they are the on-disk convention existing
+projects rely on. Renaming them is in Open offers below.
+
 ## What this is
 
 AI-Toolbox is a Python/Tkinter desktop app for VFX work, run on macOS. It

@@ -1,6 +1,6 @@
 @echo off
 setlocal enabledelayedexpansion
-:: AI-Toolbox launcher for Windows
+:: Studio Toolbox launcher for Windows
 ::
 :: The same philosophy as the Mac build: no PyInstaller freeze, just a
 :: launcher that finds a Python already carrying this app's real
@@ -8,7 +8,7 @@ setlocal enabledelayedexpansion
 :: directly from wherever this .bat file sits. Place this file in the
 :: SAME folder as ai_toolbox.py.
 ::
-:: Double-click to run, or:  AI-Toolbox.bat
+:: Double-click to run, or:  Studio-Toolbox.bat
 
 set "DIR=%~dp0"
 set "SCRIPT=%DIR%ai_toolbox.py"
@@ -42,14 +42,14 @@ if not defined PYTHON (
 
 if not defined PYTHON (
     echo.
-    echo AI-Toolbox could not find a Python install with torch,
+    echo Studio Toolbox could not find a Python install with torch,
     echo opencv-python, numpy and Pillow already installed.
     echo.
     echo Activate the conda environment this app was set up with,
     echo then run this file again from that same Command Prompt:
     echo.
     echo     conda activate ^<your-env^>
-    echo     AI-Toolbox.bat
+    echo     Studio-Toolbox.bat
     echo.
     pause
     exit /b 1

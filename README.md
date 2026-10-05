@@ -1,16 +1,24 @@
-# AI-Toolbox
+# Studio Toolbox
 
 A Python/Tkinter desktop application for VFX workflows on macOS.
 
+Studio Toolbox is AI-Toolbox without the ADW modules (ADW-Blur,
+ADW-CurveLock, ADW-AreaLock, ADW-Interpolate). It lives on the
+`studio-toolbox` branch of this repository; `main` is AI-Toolbox.
+Project files (`.adwproj`) and Lens Studio presets are interchangeable
+between the two: an AI-Toolbox project opens here with its ADW sections
+ignored.
+
 ## Overview
 
-AI-Toolbox is a comprehensive VFX processing suite featuring:
+Studio Toolbox is a VFX processing suite featuring:
 
 - **Lens Studio** — Optical effects (chromatic aberration, bloom, vignette, grain)
 - **Expansion Studio** — SDR-to-HDR tone mapping with AI upsampling
 - **Upscale Studio** — Video upscaling (SeedVR2, FlashVSR, ESRGAN)
 - **Paint Studio** — Per-frame hand painting and smudging
-- Plus: MOV ↔ EXR conversion, temporal smoothing, segmentation, and more
+- **Fix Missing Frames** — rebuild dropped, black or held frames with RIFE or Wan VACE
+- Plus: MOV ↔ EXR conversion and SAM 3 segmentation
 
 ## Getting Started
 
@@ -37,7 +45,7 @@ comm -13 tests_baseline.txt n.txt  # must print nothing
 ```
 
 Maintain:
-- ✅ Exact pyflakes count at **64 warnings**
+- ✅ Exact pyflakes count at **22 warnings** on this branch (64 on `main`)
 - ✅ Test failures matching the baseline (28 expected failures)
 - ✅ Full test coverage for changes
 
@@ -48,4 +56,4 @@ macOS .dmg:
 bash build_dmg.sh
 ```
 
-Windows launcher: `AI-Toolbox.bat`
+Windows launcher: `Studio-Toolbox.bat`

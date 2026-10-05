@@ -1403,7 +1403,7 @@ class _SettableVal(_Val):
 
 class TestPresetStorage(unittest.TestCase):
     """The shared preset bar's storage layer, exercised without a
-    window. ADW-Blur and ADW-Organic both run through this."""
+    window. Lens Studio runs through this (so did ADW-Blur)."""
 
     def setUp(self):
         self._home = tempfile.mkdtemp()
@@ -1531,11 +1531,6 @@ class TestPresetRegistries(unittest.TestCase):
             with self.subTest(key=key):
                 self.assertIn(attr, attrs)
 
-    def test_blur_map_targets_exist_on_self(self):
-        attrs = self._assigned_attrs()
-        for key, attr in App.ADW_PRESET_VARS.items():
-            with self.subTest(key=key):
-                self.assertIn(attr, attrs)
 
     def test_organic_map_covers_every_look_parameter(self):
         """Anything in the params dict is part of the look, so it must
@@ -1550,13 +1545,15 @@ class TestPresetRegistries(unittest.TestCase):
                 with self.subTest(preset=name, key=key):
                     self.assertIn(key, App.ORGANIC_PRESET_VARS)
 
-    def test_the_two_tabs_use_different_files(self):
-        """Sharing one file would have ADW-Blur and ADW-Organic
-        overwriting each other's presets."""
+    def test_lens_studio_keeps_its_own_preset_file(self):
+        """The file name is what AI-Toolbox's Lens Studio writes, so
+        looks saved there load here. It must never fall back to the
+        old shared Blur file name, which would read Blur settings as
+        a look."""
         with open(SRC, encoding="utf-8") as fh:
             src = fh.read()
-        self.assertIn('"presets_adw.json"', src)
         self.assertIn('"presets_organic.json"', src)
+        self.assertNotIn('"presets_adw.json"', src)
 
     def test_solo_and_mute_are_not_saved_in_presets(self):
         """A saved look must not carry an inspection state, or loading
@@ -3909,8 +3906,12 @@ class TestPresetInterchange(unittest.TestCase):
     def test_another_tabs_presets_score_zero(self):
         """Apply skips keys it does not recognise, so without this the
         import would succeed and then do nothing at all."""
+        # The shape of an AI-Toolbox ADW-Blur preset file -- the one a
+        # person is most likely to point Lens Studio at by mistake.
         blur = [{"name": "b",
-                 "settings": {k: 1 for k in list(App.ADW_PRESET_VARS)[:8]}}]
+                 "settings": {k: 1 for k in ("rmult", "scale", "flow",
+                                             "upscale", "tta", "retime",
+                                             "blend_str", "falloff")}}]
         self.assertLess(
             App._preset_match_score(blur, App.ORGANIC_PRESET_VARS), 0.2)
 
@@ -4608,7 +4609,7 @@ class TestFixFramesRepair(unittest.TestCase):
         self.assertLess(src.index('("Expansion Studio",   "upscale")'),
                         src.index('("Fix Missing Frames", "fixframes")'))
         self.assertLess(src.index('("Fix Missing Frames", "fixframes")'),
-                        src.index('("ADW-CurveLock",      "curve")'))
+                        src.index('("SAM 3 — Segment",    "sam")'))
 
     def test_it_uses_the_shared_timeline_bar(self):
         with open(SRC, encoding="utf-8") as fh:
@@ -6947,7 +6948,6 @@ class TestExpansionStudioIsExpandOnly(unittest.TestCase):
                 self.assertIn(lbl, body)
 
 
-
 class TestNoMethodShadowing(unittest.TestCase):
     """A method whose name is also assigned as an instance attribute is
     shadowed the moment that attribute is set, and the call then lands
@@ -8941,7 +8941,7 @@ class TestVaceSharedFromOtherTabs(unittest.TestCase):
 
     def test_it_still_sits_beside_the_input_when_there_is_one(self):
         d = self._Stub(self.dir)._vace_work_dir()
-        self.assertIn("ADW", d)
+        self.assertIn("Studio-Toolbox_VACE", d)
         self.assertTrue(os.path.isdir(d))
 
     def test_the_fallback_is_scratch_not_the_cwd(self):
@@ -8951,16 +8951,22 @@ class TestVaceSharedFromOtherTabs(unittest.TestCase):
         self.assertTrue(d.startswith(tempfile.gettempdir()))
 
     def test_the_payload_settings_are_always_built(self):
-        """They live on the Interpolate tab, which is constructed at
-        startup -- so another tab borrowing them finds them present.
-        If that tab ever becomes lazily built, this breaks."""
+        """They used to live on the Interpolate tab; without that tab
+        they are created in _vace_init_shared_settings, which __init__
+        calls before any tab is built -- so every tab borrowing them
+        finds them present. If that ever becomes lazy, this breaks."""
         with open(SRC, encoding="utf-8") as fh:
             src = fh.read()
         for var in ("ip_vace_res_var", "ip_vace_steps_var",
-                    "ip_vace_prompt_var", "_ip_vace_cancel"):
+                    "ip_vace_prompt_var", "ip_vace_neg_var",
+                    "ip_vace_seed_var", "ip_vace_method_var",
+                    "_ip_vace_cancel"):
             with self.subTest(var=var):
                 self.assertRegex(src, r"self\." + var + r"\s*=")
-        self.assertIn("self._tab_interp()", src)
+        init = src[src.index("    def __init__(self, modules=None"):
+                   src.index("    def _vace_init_shared_settings")]
+        self.assertLess(init.index("self._vace_init_shared_settings()"),
+                        init.index("self._build()"))
 
 
 class TestAiExpansionCache(unittest.TestCase):
@@ -11870,11 +11876,11 @@ class TestVaceAspectAndColour(unittest.TestCase):
 
     # ── the colour matrix bug ──
     def test_the_source_encode_tags_bt709_explicitly(self):
-        """Two sibling functions -- _vace_build_plain_clip and
-        _vace_build_source_clip (the plain clip and the masked repair
-        clip) -- must both not be left to ffmpeg's own resolution-based
+        """The clip encoder -- _vace_build_source_clip (the masked
+        repair clip; its plain-clip sibling went with the Interpolate
+        tab) -- must not be left to ffmpeg's own resolution-based
         guess."""
-        for fn in (App._vace_build_plain_clip, App._vace_build_source_clip):
+        for fn in (App._vace_build_source_clip,):
             with self.subTest(fn=fn.__name__):
                 body = self._src(fn)
                 self.assertIn('"-colorspace", "bt709"', body)
@@ -12079,33 +12085,107 @@ class TestFixFramesRifeFirst(unittest.TestCase):
         self.assertIn("if tmp_in:", body[i:i + 60])
 
 
+class TestOldProjectsStillLoad(unittest.TestCase):
+    """An .adwproj saved by AI-Toolbox carries "area", "curve" and
+    "rife" sections. Studio Toolbox has none of those modules; the
+    file must still open, with everything else restored, rather than
+    failing on the first section it does not know."""
+
+    class _Stub(App):
+        def __init__(self):
+            self.got = []
+            self.restored = []
+            self._project_current_path = None
+            self._PROJECT_VAR_TYPES = (_FakeVar,)
+            self.sam_objects = None
+            self.sam_active_obj = 0
+            for fn in ("_usc_load_folder", "_ups_load_folder",
+                       "_sam_load_folder"):
+                setattr(self, fn, lambda d, fn=fn: self.got.append(fn))
+
+        def _project_restore_vars(self, data):
+            self.restored.append(data)
+
+        def setstatus(self, *a, **k):
+            pass
+
+    def setUp(self):
+        import zipfile, json
+        self.dir = tempfile.mkdtemp()
+        self.path = os.path.join(self.dir, "old.adwproj")
+        data = {"version": 1, "modules": {
+            "area":  {"folder": self.dir, "vars": {"area_x_var": 1},
+                      "active": 0, "area_list": [{"name": "A"}]},
+            "curve": {"folder": self.dir, "vars": {}, "active": 0,
+                      "curve_list": [{"name": "C"}]},
+            "rife":  {"folder": self.dir, "vars": {"rmult_var": 3}},
+            "upscale":  {"folder": self.dir, "vars": {"usc_a": 1}},
+            "upstudio": {"folder": self.dir, "vars": {"ups_a": 2}},
+            "sam": {"folder": self.dir, "vars": {"sam_a": 3},
+                    "objects": [{"pts": []}], "active_obj": 0},
+        }}
+        with zipfile.ZipFile(self.path, "w") as zf:
+            zf.writestr("project.json", json.dumps(data))
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def test_the_kept_modules_are_restored(self):
+        app = self._Stub()
+        with unittest.mock.patch.object(
+                sys.modules["ai_toolbox"].messagebox, "showerror") as err:
+            app._project_load(self.path)
+        err.assert_not_called()
+        self.assertEqual(app.got, ["_usc_load_folder", "_ups_load_folder",
+                                   "_sam_load_folder"])
+        self.assertEqual(app.restored,
+                         [{"usc_a": 1}, {"ups_a": 2}, {"sam_a": 3}])
+        self.assertEqual(app._project_current_path, self.path)
+
+    def test_the_adw_sections_are_ignored_not_restored(self):
+        app = self._Stub()
+        with unittest.mock.patch.object(
+                sys.modules["ai_toolbox"].messagebox, "showerror"):
+            app._project_load(self.path)
+        for d in app.restored:
+            self.assertNotIn("rmult_var", d)
+            self.assertNotIn("area_x_var", d)
+
+    def test_save_writes_no_adw_sections(self):
+        import inspect
+        body = inspect.getsource(App._project_save)
+        for key in ('["area"]', '["curve"]', '["rife"]'):
+            self.assertNotIn(key, body)
+
+
 class TestSetupRifeLabel(unittest.TestCase):
-    """The Setup & Install component row for the RIFE install was
-    labelled "ADW-Blur", which stopped being accurate the moment Fix
-    Missing Frames started using the same install for its own
-    single-frame repairs. Renamed to "RIFE"; the ADW-Blur TAB's own
-    header is a separate, legitimately-named thing and must stay
-    untouched."""
+    """The Setup & Install component row for the RIFE install is
+    labelled "RIFE" and names its one remaining consumer, Fix Missing
+    Frames: with the ADW-Blur tab gone, a description still crediting
+    it would send people looking for a tab that is not there."""
 
     def test_the_setup_component_row_says_rife_not_adw_blur(self):
         with open(SRC, encoding="utf-8") as fh:
             src = fh.read()
         self.assertIn('("rife",   "RIFE",', src)
 
-    def test_the_description_names_both_real_consumers(self):
+    def test_the_description_names_the_real_consumer(self):
         with open(SRC, encoding="utf-8") as fh:
             src = fh.read()
         i = src.index('("rife",   "RIFE",')
         seg = src[i:i + 200]
-        self.assertIn("ADW-Blur", seg)
+        self.assertNotIn("ADW-Blur", seg)
         self.assertIn("Fix Missing Frames", seg)
 
-    def test_the_adw_blur_tabs_own_header_is_untouched(self):
-        """That is the tab's real, correct name -- a different thing
-        entirely from the Setup component label above."""
+    def test_no_tab_bar_entry_or_tab_builder_for_the_adw_modules(self):
+        """Removed, not hidden: nothing should still build them."""
         with open(SRC, encoding="utf-8") as fh:
             src = fh.read()
-        self.assertIn('tk.Label(_rife_hdr, text="ADW-Blur",', src)
+        for key in ("curve", "area", "rife", "interp"):
+            with self.subTest(key=key):
+                self.assertNotIn(f'"{key}"),', src[src.index("def _tabbar"):
+                                                     src.index("def show(")])
+                self.assertNotIn(f"def _tab_{key}(", src)
 
     def test_rife_and_esrgan_module_sets_include_fixframes(self):
         """Both are now genuine Fix Missing Frames dependencies -- RIFE
@@ -13489,8 +13569,6 @@ class TestExrToMovAcceptsMxf(unittest.TestCase):
         self.assertIn("os.path.dirname(video_src)", body)
 
 
-
-
 class TestAiModelExportRebuilt(unittest.TestCase):
     """Following up on the revert: a preview canvas, exposure, and AI
     model presets (Seedance 2.5, MiniMax H3, LTX) are wanted after
@@ -14414,192 +14492,6 @@ class TestAiExportErrorVisibility(unittest.TestCase):
         self.assertIn("No such file or directory", tail)
 
 
-class TestInterpolateExrExposure(unittest.TestCase):
-    """Reported: an EXR converted from a MOV, loaded into
-    ADW-Interpolate, looks extremely dark. Root cause: _pv_frame (the
-    shared preview reader, 35 call sites across many tabs) decodes EXR
-    via ffmpeg's own tonemap=reinhard filter -- an HDR-to-SDR
-    COMPRESSOR, not an OETF. It does nothing to gamma-encode ordinary
-    scene-linear data for display, so a genuinely linear EXR (which
-    this app's own MOV -> EXR conversion can produce) shows the raw
-    linear numbers uncorrected: numerically much smaller than their
-    correctly display-encoded counterparts for the same apparent
-    brightness.
-
-    Fixed with a tab-local reader (_ip_pv_frame) rather than changing
-    the shared _pv_frame itself, which 35 call sites across many other
-    tabs depend on and which this fix has not individually audited.
-    ADW-Interpolate gains the same "EXR is" Display-encoded / Scene-
-    linear control Fix Missing Frames already has, since an EXR cannot
-    say which of the two it is holding and the app-wide default
-    (assume display-encoded, since tools like Kling/Seedance write
-    that way) does not hold for this app's own linear MOV -> EXR
-    output."""
-
-    class _Stub(App):
-        def __init__(self):
-            pass
-
-    class _V:
-        def __init__(self, v):
-            self.v = v
-
-        def get(self):
-            return self.v
-
-    @staticmethod
-    def _src(fn):
-        import inspect
-        return inspect.getsource(fn)
-
-    def setUp(self):
-        self.app = self._Stub()
-        self.path = "/mnt/user-data/uploads/cin_003_070_10650__2__EXR_00259.exr"
-
-    # ── the reader itself, against the real reported file ──
-    def test_scene_linear_produces_a_plausible_night_scene(self):
-        import numpy as np
-        self.app._ip_pv_lru = {}
-        self.app.ip_cs_var = self._V("Scene-linear")
-        img = self.app._ip_pv_frame(self.path)
-        arr = np.asarray(img).astype(np.float32) / 255.0
-        self.assertGreater(float(np.median(arr)), 0.03)
-
-    def test_display_encoded_reproduces_the_reported_extremely_dark_result(self):
-        """Not asserting this is WRONG in general -- only that the
-        setting genuinely changes the outcome, matching what was
-        actually reported before this fix existed at all."""
-        import numpy as np
-        self.app._ip_pv_lru = {}
-        self.app.ip_cs_var = self._V("Display-encoded")
-        img = self.app._ip_pv_frame(self.path)
-        arr = np.asarray(img).astype(np.float32) / 255.0
-        self.assertLess(float(np.median(arr)), 0.01)
-
-    def test_the_two_settings_genuinely_disagree(self):
-        import numpy as np
-        self.app._ip_pv_lru = {}
-        self.app.ip_cs_var = self._V("Scene-linear")
-        lin = np.asarray(self.app._ip_pv_frame(self.path)).astype(np.float32)
-        self.app._ip_pv_lru = {}
-        self.app.ip_cs_var = self._V("Display-encoded")
-        enc = np.asarray(self.app._ip_pv_frame(self.path)).astype(np.float32)
-        self.assertGreater(abs(float(lin.mean()) - float(enc.mean())), 10.0)
-
-    def test_a_non_exr_file_delegates_straight_to_pv_frame_unchanged(self):
-        body = self._src(App._ip_pv_frame)
-        i = body.index('!= ".exr"')
-        seg = body[max(0, i - 50):i + 80]
-        self.assertIn("return self._pv_frame(path)", seg)
-
-    def test_a_failed_read_falls_back_rather_than_crashing(self):
-        body = self._src(App._ip_pv_frame)
-        self.assertIn("if arr is None:", body)
-        i = body.index("if arr is None:")
-        self.assertIn("return self._pv_frame(path)", body[i:i + 100])
-
-    def test_the_reader_uses_the_apps_own_pipeline_not_ffmpeg_tonemap(self):
-        """Checked against the actual code, not the whole function
-        text -- the docstring legitimately names tonemap=reinhard,
-        explaining what this deliberately avoids, which a blanket
-        substring search would misread as still using it."""
-        body = self._src(App._ip_pv_frame)
-        self.assertIn("self._ff_read_frame(path)", body)
-        self.assertIn("self._ff_is_linear(", body)
-        self.assertIn("self._organic_linear_to_display(arr)", body)
-        self.assertNotIn('"-vf", "tonemap', body)
-        self.assertNotIn("subprocess.run([\"ffmpeg\"", body)
-
-    def test_the_reader_has_its_own_cache_separate_from_pv_frames(self):
-        """So bypassing _pv_frame's cache for EXRs does not mean
-        re-reading and re-converting on every scrub during playback."""
-        body = self._src(App._ip_pv_frame)
-        self.assertIn("_ip_pv_lru", body)
-
-    # ── the new UI control ──
-    def test_the_dropdown_exists_with_the_same_two_choices_as_ff(self):
-        body = self._src(App._tab_interp)
-        i = body.index('text="EXR is"')
-        seg = body[i:i + 400]
-        self.assertIn('"Display-encoded"', seg)
-        self.assertIn('"Scene-linear"', seg)
-
-    def test_the_dropdown_defaults_from_the_app_wide_setting(self):
-        body = self._src(App._tab_interp)
-        i = body.index("self.ip_cs_var = tk.StringVar(")
-        seg = body[i:i + 150]
-        self.assertIn("self._adw_source_is_encoded()", seg)
-
-    def test_changing_the_dropdown_clears_the_cache_and_redraws(self):
-        """An OrderedDict, not a plain {} -- _ip_pv_frame calls
-        .move_to_end() on a cache hit, which a plain dict does not
-        have. This exact line crashed in real use with "'dict' object
-        has no attribute 'move_to_end'" the first time a frame was
-        re-displayed after changing the dropdown, and is reproduced
-        directly in test_a_plain_dict_reset_crashes_on_second_access
-        below."""
-        body = self._src(App._ip_cs_changed)
-        self.assertIn("self._ip_pv_lru = collections.OrderedDict()", body)
-        self.assertIn("self._interp_show_frame(self.ip_idx)", body)
-
-    def test_a_plain_dict_reset_crashes_on_second_access(self):
-        """Reproduces the exact reported error directly: a plain {}
-        works for the FIRST load of a frame (nothing to hit
-        move_to_end for yet) and only breaks on the second access to
-        the same frame -- which is exactly the pattern of switching
-        the dropdown and then looking at the frame already on
-        screen."""
-        d = tempfile.mkdtemp()
-        try:
-            fname = "f.exr"
-            path = os.path.join(d, fname)
-            self.app._organic_write_exr(
-                path, __import__("numpy").full((4, 4, 3), 0.2, "float32"),
-                half=True)
-            self.app.ip_cs_var = self._V("Scene-linear")
-            self.app._ip_pv_lru = {}   # the OLD, buggy reset
-            self.app._ip_pv_frame(path)
-            with self.assertRaises(AttributeError):
-                self.app._ip_pv_frame(path)
-        finally:
-            shutil.rmtree(d, ignore_errors=True)
-
-    def test_the_fixed_reset_survives_repeat_access(self):
-        import collections
-        d = tempfile.mkdtemp()
-        try:
-            fname = "f.exr"
-            path = os.path.join(d, fname)
-            self.app._organic_write_exr(
-                path, __import__("numpy").full((4, 4, 3), 0.2, "float32"),
-                half=True)
-            self.app.ip_cs_var = self._V("Scene-linear")
-            self.app._ip_pv_lru = collections.OrderedDict()
-            self.app._ip_pv_frame(path)
-            self.app._ip_pv_frame(path)   # must not raise
-        finally:
-            shutil.rmtree(d, ignore_errors=True)
-
-    # ── the fix is scoped to this tab, not the shared function ──
-    def test_pv_frame_itself_is_untouched(self):
-        """The shared reader has 35 call sites across many tabs --
-        none of them were touched, only ADW-Interpolate's own calls
-        were redirected to the new tab-local reader."""
-        body = self._src(App._pv_frame)
-        self.assertIn('"tonemap=reinhard"', body)
-
-    def test_other_tabs_still_call_pv_frame_directly(self):
-        """Spot-checks a call site known to belong to a different tab
-        (well past ADW-Interpolate's own section) to confirm it was
-        not accidentally redirected too."""
-        import inspect
-        src = inspect.getsource(App)
-        # _ff_to_display (Fix Missing Frames) does not call _pv_frame
-        # at all -- but a genuinely separate tab's own preview call
-        # should still say self._pv_frame(, not self._ip_pv_frame(.
-        self.assertIn("self._pv_frame(path)", src)
-
-
 class TestMovToExrColorspaceSidecar(unittest.TestCase):
     """Following up on the ADW-Interpolate fix: reported dark in other
     modules too, correctly pointing at something more systemic. MOV ->
@@ -14864,877 +14756,11 @@ class _V:
         return self.v
 
 
-class TestFullImageMethod(unittest.TestCase):
-    """A third Method alongside Mask and Depth map: same whole-frame,
-    no-mask regeneration as Depth map, but skipping the depth-
-    estimation pass entirely and sending the real plate footage
-    directly as VACE's conditioning video. Shares Depth's endpoint and
-    request shape; only WHICH video gets built differs, and that
-    difference is decided before the shared payload/endpoint code ever
-    sees it."""
-
-    class _Stub(App):
-        def __init__(self):
-            pass
-
-    @staticmethod
-    def _src(fn):
-        import inspect
-        return inspect.getsource(fn)
-
-    def setUp(self):
-        self.app = self._Stub()
-
-    # ── endpoint / cost / plan wiring ──
-    def test_full_image_shares_depths_endpoint(self):
-        self.app.ip_vace_method_var = _V("full")
-        self.assertEqual(self.app._vace_active_endpoint(),
-                         App.VACE_ENDPOINT_DEPTH)
-
-    def test_depth_still_uses_the_same_endpoint(self):
-        """Not a regression -- full image is additive."""
-        self.app.ip_vace_method_var = _V("depth")
-        self.assertEqual(self.app._vace_active_endpoint(),
-                         App.VACE_ENDPOINT_DEPTH)
-
-    def test_inpainting_still_uses_its_own_endpoint(self):
-        self.app.ip_vace_method_var = _V("inpainting")
-        self.assertEqual(self.app._vace_active_endpoint(),
-                         App.VACE_ENDPOINT_INPAINTING)
-
-    def test_full_image_skips_the_depth_anything_surcharge(self):
-        """The whole point of Full image is being cheaper than Depth
-        map by skipping its extra fal call -- so its cost must NOT
-        include DEPTH_ANYTHING_RATE."""
-        self.app.ip_vace_method_var = _V("full")
-        plan = {"send_gap": 16, "gap": 16}   # 1 second at 16fps
-        cost = self.app._vace_cost(plan, "480p")
-        self.assertAlmostEqual(cost, App.VACE_RATE["480p"], places=6)
-
-    def test_depth_map_still_adds_its_surcharge(self):
-        self.app.ip_vace_method_var = _V("depth")
-        plan = {"send_gap": 16, "gap": 16}
-        cost = self.app._vace_cost(plan, "480p")
-        self.assertAlmostEqual(
-            cost, App.VACE_RATE["480p"] + App.DEPTH_ANYTHING_RATE,
-            places=6)
-
-    def test_full_image_gets_no_tether_padding(self):
-        """Tether is Mask-only: it works by sending extra frames with
-        an empty (keep) mask, and Full image has no mask mechanism at
-        all -- same as Depth."""
-        self.app.ip_vace_method_var = _V("full")
-        self.app.ip_vace_tether_var = _V("5")
-        self.app.ip_src_frames = None
-        self.app.ip_frames = [f"{i:05d}.png" for i in range(50)]
-        seg = {"in": 10, "out": 20}
-        plan = self.app._vace_plan(seg)
-        self.assertTrue(plan["ok"])
-        self.assertEqual(plan["send0"], 10)
-        self.assertEqual(plan["send1"], 20)
-
-    def test_mask_method_still_gets_tether_padding(self):
-        """Not a regression -- Mask's own Tether behaviour is untouched."""
-        self.app.ip_vace_method_var = _V("inpainting")
-        self.app.ip_vace_tether_var = _V("5")
-        self.app.ip_src_frames = None
-        self.app.ip_frames = [f"{i:05d}.png" for i in range(50)]
-        seg = {"in": 10, "out": 20}
-        plan = self.app._vace_plan(seg)
-        self.assertTrue(plan["ok"])
-        self.assertEqual(plan["send0"], 5)
-        self.assertEqual(plan["send1"], 25)
-
-    def test_mask_box_preview_is_none_for_full_image(self):
-        self.app.ip_vace_method_var = _V("full")
-        self.app.ip_segments = [{"in": 0, "out": 10, "name": "s1"}]
-        self.assertIsNone(self.app._interp_mask_box_at(5, (100, 100)))
-
-    def test_tether_preview_is_none_for_full_image(self):
-        self.app.ip_vace_method_var = _V("full")
-        self.assertIsNone(self.app._interp_tether_at(5))
-
-    # ── UI wiring ──
-    def test_full_image_radio_exists(self):
-        body = self._src(App._tab_interp)
-        self.assertIn('("full", "Full image")', body)
-
-    def test_full_image_hides_both_paint_and_depth_quality_rows(self):
-        body = self._src(App._tab_interp)
-        i = body.index("def _method_changed(")
-        seg = body[i:i + 700]
-        self.assertIn('else ()', seg)
-
-    # ── generation loop: shares Depth's plain-clip build, skips the
-    #    depth-estimation call, reuses the depth endpoint/payload ──
-    def test_full_image_reuses_the_plain_clip_no_depth_pass(self):
-        body = self._src(App._vace_generate)
-        i = body.index('if method in ("depth", "full"):')
-        seg = body[i:i + 1100]
-        self.assertIn("_vace_build_plain_clip", seg)
-        self.assertIn('if method == "depth":', seg)
-        self.assertIn("depth_mp4 = plain_mp4", seg)
-
-    def test_full_image_submits_to_the_depth_endpoint(self):
-        body = self._src(App._vace_generate)
-        i = body.rindex('if method in ("depth", "full"):')
-        seg = body[i:i + 500]
-        self.assertIn("endpoint=self.VACE_ENDPOINT_DEPTH", seg)
-        self.assertIn("_vace_depth_payload", seg)
-
-
-class TestStepsMeter(unittest.TestCase):
-    """Step now defaults to 60 (was 40, fal's own endpoint default is
-    30), and its numeric field grew a live box-meter next to it: one
-    half-height box per 5 steps, redrawn on every keystroke, so the
-    artist sees the quality/speed trade-off change shape rather than
-    reading a bare number."""
-
-    class _Stub(App):
-        def __init__(self):
-            pass
-
-    class _FakeCanvas:
-        def __init__(self):
-            self.rects = []
-
-        def delete(self, *_):
-            self.rects = []
-
-        def create_rectangle(self, *args, **kw):
-            self.rects.append((args, kw))
-
-    @staticmethod
-    def _src(fn):
-        import inspect
-        return inspect.getsource(fn)
-
-    def setUp(self):
-        self.app = self._Stub()
-        self.app.ip_steps_meter = self._FakeCanvas()
-
-    def test_default_is_50_the_endpoints_maximum(self):
-        """Was 60, which wan-22-vace-fun-a14b rejects outright."""
-        body = self._src(App._tab_interp)
-        self.assertIn('self.ip_vace_steps_var = tk.StringVar(value="50")',
-                      body)
-
-    def test_zero_steps_draws_nothing(self):
-        self.app.ip_vace_steps_var = _V("0")
-        self.app._interp_draw_step_meter()
-        self.assertEqual(len(self.app.ip_steps_meter.rects), 0)
-
-    def test_one_box_per_5_steps(self):
-        for steps, n in ((5, 1), (10, 2), (49, 9), (50, 10)):
-            with self.subTest(steps=steps):
-                self.app.ip_steps_meter = self._FakeCanvas()
-                self.app.ip_vace_steps_var = _V(str(steps))
-                self.app._interp_draw_step_meter()
-                self.assertEqual(len(self.app.ip_steps_meter.rects), n)
-
-    def test_capped_at_30_boxes(self):
-        self.app.ip_vace_steps_var = _V("1000")
-        self.app._interp_draw_step_meter()
-        self.assertEqual(len(self.app.ip_steps_meter.rects), 30)
-
-    def test_garbage_input_does_not_crash(self):
-        self.app.ip_vace_steps_var = _V("not a number")
-        self.app._interp_draw_step_meter()   # must not raise
-        self.assertEqual(len(self.app.ip_steps_meter.rects), 0)
-
-    def test_redraws_live_on_every_keystroke(self):
-        """A trace on the StringVar, not just a button/tab-away
-        handler -- the visual has to track typing itself."""
-        body = self._src(App._tab_interp)
-        i = body.index("self.ip_vace_steps_var.trace_add(")
-        seg = body[i:i + 120]
-        self.assertIn("_interp_draw_step_meter", seg)
-
-
-class TestScrubShowsGeneratedResultWithNoApplyStep(unittest.TestCase):
-    """The real complaint: Generate produced frames, but scrubbing the
-    timeline kept showing the untouched plate until Apply/Export had
-    been run -- an extra, unwanted step. _interp_result_frame now falls
-    back to a segment's own raw VACE result (self._ip_vace_result)
-    whenever there is no on-disk Export output yet, mapping position
-    exactly the way _vace_apply itself later splices: generated frame j
-    is the segment's (in + j)-th frame. Export/Apply, once it exists,
-    still wins -- this is only a fallback for what it hasn't covered."""
-
-    class _Stub(App):
-        def __init__(self):
-            self.ip_result_dir = None
-            self.ip_segments = []
-            self._ip_vace_result = {}
-            self.ip_active = 0
-            self._ip_seg_result_cache_key = None
-            self._ip_result_files = []
-            self._ip_result_dir_cached = None
-
-    def setUp(self):
-        self.app = self._Stub()
-        self.dir = tempfile.mkdtemp()
-
-    def tearDown(self):
-        shutil.rmtree(self.dir, ignore_errors=True)
-
-    def _make_result(self, n, prefix="g"):
-        d = tempfile.mkdtemp(dir=self.dir)
-        for i in range(n):
-            open(os.path.join(d, f"{prefix}_{i:03d}.png"), "wb").close()
-        return d
-
-    def test_generated_frames_map_positionally_into_the_segment(self):
-        d = self._make_result(3)
-        self.app.ip_segments = [{"name": "seg1", "in": 10, "out": 12}]
-        self.app._ip_vace_result = {"seg1": d}
-        got = [self.app._interp_result_frame(i) for i in (10, 11, 12)]
-        want = [os.path.join(d, f"g_{i:03d}.png") for i in range(3)]
-        self.assertEqual(got, want)
-
-    def test_frames_outside_the_segment_have_no_result(self):
-        d = self._make_result(3)
-        self.app.ip_segments = [{"name": "seg1", "in": 10, "out": 12}]
-        self.app._ip_vace_result = {"seg1": d}
-        self.assertIsNone(self.app._interp_result_frame(9))
-        self.assertIsNone(self.app._interp_result_frame(13))
-        self.assertIsNone(self.app._interp_result_frame(500))
-
-    def test_no_generated_result_yet_is_none(self):
-        self.app.ip_segments = [{"name": "seg1", "in": 10, "out": 12}]
-        self.assertIsNone(self.app._interp_result_frame(11))
-
-    def test_exported_output_on_disk_takes_priority(self):
-        """Once Export has actually run, its real, final, versioned
-        output wins over the still-cached per-segment result, even if
-        both exist."""
-        seg_dir = self._make_result(3, prefix="preexport")
-        self.app.ip_segments = [{"name": "seg1", "in": 10, "out": 12}]
-        self.app._ip_vace_result = {"seg1": seg_dir}
-        exported = tempfile.mkdtemp(dir=self.dir)
-        for i in range(20):
-            open(os.path.join(exported,
-                f"ADW-Interpolate.{i:05d}.exr"), "wb").close()
-        self.app.ip_result_dir = exported
-        got = self.app._interp_result_frame(11)
-        self.assertEqual(got, os.path.join(exported,
-            "ADW-Interpolate.00011.exr"))
-
-    def test_wipe_on_tracks_the_same_fallback(self):
-        self.app.ip_idx = 11
-        self.app.ip_segments = [{"name": "seg1", "in": 10, "out": 12}]
-        self.assertFalse(self.app._interp_wipe_on())
-        d = self._make_result(3)
-        self.app._ip_vace_result = {"seg1": d}
-        self.assertTrue(self.app._interp_wipe_on())
-
-    def test_default_render_prefers_generated_over_source(self):
-        """The literal fix: the picking logic no longer gates on the
-        Source/Result toggle at all -- it shows whatever
-        _interp_wipe_pair returned for res_pil whenever it exists."""
-        import inspect
-        body = inspect.getsource(App._interp_render)
-        self.assertIn(
-            "one = res_pil if res_pil is not None else src_pil", body)
-        self.assertNotIn('self._ip_view == "Result" and res_pil', body)
-
-
-class TestAreaLockManualRotation(unittest.TestCase):
-    """ADW-AreaLock: Nudge to Fix / Position Manually gained a rotate
-    handle (and a Rotation/Scale precision-slider pair) alongside the
-    existing translate (crosshair drag) and scale (scale-handle drag).
-    _area_similarity_matrix is the shared math -- a similarity
-    transform (rotate+scale about a centroid, then translate) that
-    both the mask warp and the clean-pixel warp in _area_place_keyframe
-    now go through, in place of the old plain scale-only matrix."""
-
-    class _Stub(App):
-        def __init__(self):
-            self._area_nudge_pos = None
-            self._area_nudge_half_extent = (40.0, 40.0)
-            self._area_nudge_scale = 1.0
-            self._area_nudge_rotation = 0.0
-
-    @staticmethod
-    def _src(fn):
-        import inspect
-        return inspect.getsource(fn)
-
-    def setUp(self):
-        self.app = self._Stub()
-
-    def test_zero_rotation_matches_old_plain_scale_translate(self):
-        import numpy as np
-        M = App._area_similarity_matrix((10.0, 20.0), (13.0, 24.0), 2.0, 0.0)
-        expected = np.float32([[2.0, 0, 10.0*(1-2.0) + 3.0],
-                                [0, 2.0, 20.0*(1-2.0) + 4.0]])
-        np.testing.assert_allclose(M, expected, atol=1e-5)
-
-    def test_90_degree_rotation_swaps_axes(self):
-        import numpy as np
-        # A point one unit "east" of the centroid should end up one
-        # unit "south" of it after a 90 degree clockwise (image-space)
-        # rotation with no scale or translate.
-        M = App._area_similarity_matrix((0.0, 0.0), (0.0, 0.0), 1.0, 90.0)
-        pt = np.array([1.0, 0.0, 1.0])
-        out = M @ pt
-        np.testing.assert_allclose(out, [0.0, 1.0], atol=1e-5)
-
-    def test_full_turn_is_identity_at_same_centroid(self):
-        import numpy as np
-        M = App._area_similarity_matrix((5.0, 5.0), (5.0, 5.0), 1.0, 360.0)
-        np.testing.assert_allclose(M, np.float32([[1, 0, 0], [0, 1, 0]]),
-                                    atol=1e-4)
-
-    def test_rot_handle_position_tracks_current_angle(self):
-        self.app._area_nudge_pos = (100.0, 100.0)
-        p0 = self.app._area_nudge_rot_handle_img_pos()
-        self.assertAlmostEqual(p0[0], 100.0, delta=0.01)
-        self.assertLess(p0[1], 100.0)  # "up" (smaller y) at rotation 0
-        self.app._area_nudge_rotation = 90.0
-        p90 = self.app._area_nudge_rot_handle_img_pos()
-        self.assertLess(p90[0], 100.0)  # swept to "west" at 90deg
-        self.assertAlmostEqual(p90[1], 100.0, delta=0.5)
-
-    def test_rot_handle_none_without_a_drag_position(self):
-        self.assertIsNone(self.app._area_nudge_rot_handle_img_pos())
-
-    def test_place_keyframe_threads_rotation_through(self):
-        import inspect
-        sig = inspect.signature(App._area_place_keyframe)
-        self.assertIn("rotation", sig.parameters)
-        sig2 = inspect.signature(App._area_snap_keyframe)
-        self.assertIn("rotation", sig2.parameters)
-        sig3 = inspect.signature(App._area_manual_keyframe)
-        self.assertIn("rotation", sig3.parameters)
-
-    def test_place_keyframe_uses_similarity_matrix_for_mask_and_pixels(self):
-        body = self._src(App._area_place_keyframe)
-        self.assertIn("self._area_similarity_matrix(", body)
-        self.assertNotIn("cx*(1-scale)", body)  # old plain-scale matrix gone
-
-    def test_canvas_release_passes_rotation_to_both_paths(self):
-        import inspect
-        body = inspect.getsource(App._area_canvas_release)
-        self.assertIn("rotation=self._area_nudge_rotation", body)
-
-    def test_rotation_slider_ui_exists_with_expected_range(self):
-        body = self._src(App._tab_area)
-        self.assertIn("self.area_rotation_var = tk.DoubleVar(value=0.0)", body)
-        self.assertIn('_area_mini_slider(_pos_row, "Rotation"', body)
-        self.assertIn("-180, 180, 1", body)
-
-    def test_modes_reset_rotation_to_zero_on_entry(self):
-        body_nudge = self._src(App._area_set_nudge_mode)
-        body_manpos = self._src(App._area_set_manpos_mode)
-        self.assertIn("self._area_nudge_rotation = 0.0", body_nudge)
-        self.assertIn("self._area_nudge_rotation = 0.0", body_manpos)
-
-
-class TestAreaLockOutputReachesPaint(unittest.TestCase):
-    """Bug report: ADW-Paint doesn't display/load images that
-    ADW-AreaLock renders. Root cause: _adw_propagate_output's
-    `attempts` list -- which every module's Run-finish uses to hand
-    its output folder to every OTHER module that can take a sequence
-    folder as input -- never included ADW-Paint (key 'smudge',
-    loader _smudge_load_folder), so AreaLock's finished render (and
-    every other module's) never reached ADW-Paint's tab at all."""
-
-    class _Stub(App):
-        def __init__(self):
-            pass
-
-    def setUp(self):
-        self.app = self._Stub()
-
-    def test_smudge_is_a_propagation_target(self):
-        import inspect
-        body = inspect.getsource(App._adw_propagate_output)
-        self.assertIn('"_smudge_load_folder"', body)
-        self.assertIn('"smudge"', body)
-
-    def test_area_output_actually_calls_the_paint_loader(self):
-        calls = []
-        self.app._smudge_load_folder = lambda d: calls.append(d)
-        self.app._curve_load_folder = lambda d: None
-        self.app._organic_load_folder = lambda d: None
-        self.app._rpick_load = lambda d: None
-        self.app._sam_load_folder = lambda d: None
-        self.app._usc_load_folder = lambda d: None
-        logs = []
-        self.app.log = lambda widget, msg, tag: logs.append((msg, tag))
-        self.app._adw_propagate_output("/tmp/some_area_output", "area", None)
-        self.assertEqual(calls, ["/tmp/some_area_output"])
-        self.assertTrue(any("Paint Studio" in m for m, _ in logs))
-
-    def test_source_module_never_reloads_its_own_output(self):
-        """When ADW-Paint itself is the source, it must not be in the
-        target list (loading a module's own output back into itself
-        is a no-op the old code already correctly skipped)."""
-        calls = []
-        self.app._smudge_load_folder = lambda d: calls.append(d)
-        self.app._curve_load_folder = lambda d: None
-        self.app._organic_load_folder = lambda d: None
-        self.app._rpick_load = lambda d: None
-        self.app._sam_load_folder = lambda d: None
-        self.app._usc_load_folder = lambda d: None
-        self.app.log = lambda widget, msg, tag: None
-        self.app._adw_propagate_output("/tmp/some_paint_output", "smudge", None)
-        self.assertEqual(calls, [])
-
-
-class TestAreaLockScalePreservedOnTemplateFallback(unittest.TestCase):
-    """Bug report: ADW-AreaLock doesn't track (scale) objects moving
-    closer to / further from camera -- looks stuck at the original
-    size. Root cause: _area_resolve_transform_raw's disagreement
-    branch threw away point-tracking's own scale/rotation estimate
-    and replaced it with a hardcoded identity-scale, zero-rotation
-    matrix built only from template matching's dx/dy (template
-    matching is translation-only, it never tests other scales). Any
-    frame where point-tracking's scale-bearing result disagreed with
-    the fixed-size template match -- which a real push/pull is
-    exactly the sort of thing to trigger -- silently snapped the
-    stencil back to 1.0x. Fixed to keep point tracking's rotation/
-    scale and only borrow template matching's translation, and to
-    carry forward the last resolved scale when point tracking fails
-    outright instead of assuming identity."""
-
-    class _Stub(App):
-        def __init__(self):
-            pass
-
-    def setUp(self):
-        self.app = self._Stub()
-
-    @staticmethod
-    def _src(fn):
-        import inspect
-        return inspect.getsource(fn)
-
-    def test_disagreement_branch_keeps_point_scale_not_identity(self):
-        body = self._src(App._area_resolve_transform_raw)
-        self.assertIn("_area_decompose_M(M_pt)", body)
-        self.assertIn("self._area_recompose_M(tm_dx, tm_dy, _th0, _sc0)", body)
-        self.assertNotIn(
-            'M_final, used = np.float32([[1,0,tm_dx],[0,1,tm_dy]]), "template"\n'
-            '        elif pt_ok and not tm_ok:', body)
-
-    def test_template_only_branch_carries_forward_last_scale(self):
-        body = self._src(App._area_resolve_transform_raw)
-        self.assertIn('a_.get("_area_last_srt"', body)
-
-    def test_resolve_stores_last_resolved_scale_for_next_call(self):
-        body = self._src(App._area_resolve_transform_raw)
-        self.assertIn('a_["_area_last_srt"] = (_th1, _sc1)', body)
-
-    def test_end_to_end_disagreement_preserves_scale(self):
-        """Directly exercises the fixed branch: point tracking reports
-        a confidently-scaled-up match (scale ~1.8) whose position
-        disagrees with a fixed-size template match's dx/dy (as a real
-        push-in would produce, since the template patch never grows).
-        The old code would have collapsed the result to scale 1.0;
-        the fix should preserve ~1.8."""
-        import numpy as np
-        a_ = {"search_radius": 25, "keyframes": None}
-        ref_mask = np.zeros((50, 50), dtype=bool)
-        ref_mask[10:20, 10:20] = True
-        ref_features = np.zeros((10, 1, 2), dtype=np.float32)  # non-None, len>=1
-        ref_gray = np.zeros((50, 50), dtype=np.uint8)
-        target_gray = np.zeros((50, 50), dtype=np.uint8)
-
-        M_pt = self.app._area_recompose_M(40.0, 5.0, 0.0, 1.8)  # far from tm_dx/dy
-        self.app._area_track_transform = (
-            lambda *a, **k: (M_pt, 8, 10))  # pt_ratio 0.8, but disagreement wins
-        self.app._area_template_match_near = (
-            lambda *a, **k: (2.0, 2.0, 0.9))  # confident but plain translation
-
-        M_final, ok, warped = self.app._area_resolve_transform_raw(
-            a_, 5, 0, ref_mask, ref_features, ref_gray, target_gray)
-        self.assertTrue(ok)
-        _, _, _theta, scale = App._area_decompose_M(M_final)
-        self.assertAlmostEqual(scale, 1.8, delta=0.05)
-        # position should come from the template match, not point-track
-        self.assertAlmostEqual(float(M_final[0, 2]), 2.0, delta=0.5)
-
-
-class TestAreaLockPaintAdditiveAcrossLift(unittest.TestCase):
-    """Bug report: painting the mask isn't additive/subtractive --
-    only Lift should commit. Within a single Paint session this
-    already worked (strokes OR/AND into _area_paint_accum_mask), but
-    _area_set_paint_mode(True) always reset that accumulator to None,
-    even when the current frame already had a lifted ref_mask. So
-    touching up an already-lifted area (reopen Paint, add a stroke or
-    two, Lift again) silently replaced the whole previous shape with
-    just the new strokes -- the bug the report describes. Fixed by
-    seeding the accumulator from the current frame's existing mask
-    when Paint Mode is switched on."""
-
-    class _Stub(App):
-        def __init__(self):
-            pass
-
-    def setUp(self):
-        self.app = self._Stub()
-
-    def test_set_paint_mode_seeds_from_existing_keyframe_mask(self):
-        body = None
-        import inspect
-        body = inspect.getsource(App._area_set_paint_mode)
-        self.assertIn("existing", body)
-        self.assertIn("self._area_paint_accum_mask = (", body)
-
-    def test_reopening_paint_preserves_previously_lifted_mask(self):
-        import numpy as np
-        old_mask = np.zeros((20, 20), dtype=bool)
-        old_mask[2:6, 2:6] = True
-        self.app.area_list = [{
-            "keyframes": {3: {"ref_mask": old_mask}},
-            "ref_mask": old_mask, "ref_frame_idx": 3,
-        }]
-        self.app.area_active = 0
-        self.app.area_mode = "edit"
-
-        class _FakeCB:
-            def current(self_inner): return 3
-        self.app.area_frame_cb = _FakeCB()
-
-        class _FakeCanvas:
-            def configure(self_inner, **kw): pass
-        self.app.area_canvas = _FakeCanvas()
-
-        class _FakeBtn:
-            def configure(self_inner, **kw): pass
-        self.app.area_paint_btn = _FakeBtn()
-        self.app.area_log_txt = None
-        self.app.log = lambda *a, **k: None
-        self.app._area_set_nudge_mode = lambda on: None
-        self.app._area_nudge_scale_mode = False
-
-        self.app._area_set_paint_mode(True)
-        self.assertIsNotNone(self.app._area_paint_accum_mask)
-        np.testing.assert_array_equal(
-            self.app._area_paint_accum_mask, old_mask)
-        # it must be a copy, not the same array the keyframe still holds
-        self.assertIsNot(self.app._area_paint_accum_mask, old_mask)
-
-    def test_fresh_area_with_no_mask_still_starts_blank(self):
-        self.app.area_list = [{"keyframes": None, "ref_mask": None}]
-        self.app.area_active = 0
-        self.app.area_mode = "edit"
-
-        class _FakeCB:
-            def current(self_inner): return -1
-        self.app.area_frame_cb = _FakeCB()
-
-        class _FakeCanvas:
-            def configure(self_inner, **kw): pass
-        self.app.area_canvas = _FakeCanvas()
-
-        class _FakeBtn:
-            def configure(self_inner, **kw): pass
-        self.app.area_paint_btn = _FakeBtn()
-        self.app.area_log_txt = None
-        self.app.log = lambda *a, **k: None
-        self.app._area_set_nudge_mode = lambda on: None
-        self.app._area_nudge_scale_mode = False
-
-        self.app._area_set_paint_mode(True)
-        self.assertIsNone(self.app._area_paint_accum_mask)
-
-
-class TestAreaLockNudgeToFixDetectsScale(unittest.TestCase):
-    """Follow-up bug report #1: 'Nudge to Fix' jumps to the correct
-    POSITION but never resizes the stencil (fixed by adding a multi-
-    scale matcher). Follow-up bug report #2: making Nudge to Fix
-    itself always auto-search scale made ordinary position-only
-    recoveries noticeably less reliable -- more candidate sizes means
-    more ways to confidently match the wrong repeat on periodic/
-    textured content. Resolution: Nudge to Fix is back to the
-    original single-scale (translation-only) matcher, and the new
-    scale search lives ONLY in the separate, opt-in 'Nudge + Scale'
-    button/mode (_area_set_nudge_scale_mode /
-    _area_snap_keyframe_autoscale, tested below)."""
-
-    class _Stub(App):
-        def __init__(self):
-            pass
-
-    def setUp(self):
-        self.app = self._Stub()
-
-    @staticmethod
-    def _src(fn):
-        import inspect
-        return inspect.getsource(fn)
-
-    def test_snap_keyframe_is_back_to_single_scale(self):
-        """Nudge to Fix itself must NOT auto-search scale anymore --
-        that regressed ordinary position recovery."""
-        body = self._src(App._area_snap_keyframe)
-        self.assertIn("_area_template_match_near(", body)
-        self.assertNotIn("_area_template_match_multiscale(", body)
-
-    def test_autoscale_variant_uses_multiscale_match(self):
-        body = self._src(App._area_snap_keyframe_autoscale)
-        self.assertIn("_area_template_match_multiscale(", body)
-
-    def test_autoscale_variant_multiplies_auto_scale_by_handle_scale(self):
-        body = self._src(App._area_snap_keyframe_autoscale)
-        self.assertIn("scale=found_scale * scale", body)
-
-    def test_multiscale_match_detects_a_larger_target(self):
-        """Build a small textured patch, place a 1.6x-scaled copy of
-        it in a target frame, and confirm the matcher reports ~1.6,
-        not 1.0 (which is all the old single-scale matcher could ever
-        return)."""
-        import numpy as np
-        import cv2
-        rng = np.random.default_rng(0)
-        patch = rng.integers(0, 255, size=(30, 30), dtype=np.uint8)
-        ref_gray = np.zeros((120, 120), dtype=np.uint8)
-        ref_gray[45:75, 45:75] = patch
-        ref_mask = np.zeros((120, 120), dtype=bool)
-        ref_mask[45:75, 45:75] = True
-
-        scaled = cv2.resize(patch, (48, 48), interpolation=cv2.INTER_LINEAR)
-        target_gray = np.zeros((120, 120), dtype=np.uint8)
-        ty0, tx0 = 30, 30
-        target_gray[ty0:ty0+48, tx0:tx0+48] = scaled
-
-        found_dx, found_dy, found_scale, score = (
-            self.app._area_template_match_multiscale(
-                ref_gray, ref_mask, target_gray, 0.0, 0.0, search_radius=40))
-        self.assertIsNotNone(found_dx)
-        self.assertGreater(score, 0.55)
-        self.assertAlmostEqual(found_scale, 1.6, delta=0.15)
-
-    def test_degenerate_mask_still_reports_minus_two(self):
-        import numpy as np
-        empty_mask = np.zeros((10, 10), dtype=bool)
-        gray = np.zeros((10, 10), dtype=np.uint8)
-        dx, dy, sc, score = self.app._area_template_match_multiscale(
-            gray, empty_mask, gray, 0.0, 0.0, search_radius=10)
-        self.assertIsNone(dx)
-        self.assertEqual(score, -2.0)
-        self.assertEqual(sc, 1.0)
-
-
-class TestAreaLockNudgeScaleButton(unittest.TestCase):
-    """The requested UI split: a separate 'Nudge + Scale' button/mode
-    alongside Nudge to Fix and Position, sharing the same drag
-    mechanics (crosshair/scale handle/rotate handle) but routing to
-    _area_snap_keyframe_autoscale on release instead of the now-
-    single-scale _area_snap_keyframe."""
-
-    class _Stub(App):
-        def __init__(self):
-            self._area_nudge_mode = False
-            self._area_manpos_mode = False
-            self._area_nudge_scale_mode = False
-            self._area_paint_mode = False
-            self._area_rot_dragging = False
-            self._area_scale_dragging = False
-            self._area_nudge_pos = None
-            self._area_nudge_origin = None
-            self._area_nudge_scale = 1.0
-            self._area_nudge_rotation = 0.0
-            self.area_mode = "edit"
-
-    @staticmethod
-    def _src(fn):
-        import inspect
-        return inspect.getsource(fn)
-
-    def setUp(self):
-        self.app = self._Stub()
-
-    def test_button_and_mode_exist_in_ui(self):
-        body = self._src(App._tab_area)
-        self.assertIn('"Nudge + Scale"', body)
-        self.assertIn("self._area_set_nudge_scale_mode(True)", body)
-
-    def test_modes_are_mutually_exclusive(self):
-        set_nudge = self._src(App._area_set_nudge_mode)
-        set_manpos = self._src(App._area_set_manpos_mode)
-        set_scale = self._src(App._area_set_nudge_scale_mode)
-        self.assertIn('"_area_nudge_scale_mode"', set_nudge)
-        self.assertIn('"_area_nudge_scale_mode"', set_manpos)
-        self.assertIn('"_area_nudge_mode"', set_scale)
-        self.assertIn('"_area_manpos_mode"', set_scale)
-
-    def test_release_in_scale_mode_calls_autoscale_variant(self):
-        calls = {}
-        self.app.area_list = [{"search_radius": 25}]
-        self.app.area_active = 0
-
-        class _FakeCB:
-            def current(self_inner): return 4
-        self.app.area_frame_cb = _FakeCB()
-
-        import numpy as np
-        self.app.area_img_base = _FakeImg(np.zeros((10, 10, 3), dtype=np.uint8))
-        self.app._area_nudge_scale_mode = True
-        self.app._area_nudge_pos = (5.0, 5.0)
-        self.app._area_nudge_origin = (3.0, 3.0)
-
-        def _fake_autoscale(a_, cur_idx, target_gray, dx, dy, **kw):
-            calls["called"] = (cur_idx, round(dx, 2), round(dy, 2))
-            return False, "not actually applying in this test"
-        self.app._area_snap_keyframe_autoscale = _fake_autoscale
-        self.app._area_set_nudge_scale_mode = lambda on: None
-        self.app._area_redraw = lambda *a, **k: None
-        self.app.area_log_txt = None
-        self.app.log = lambda *a, **k: None
-
-        class _E:
-            x = y = 0
-        self.app._area_canvas_release(_E())
-        self.assertEqual(calls.get("called"), (4, 2.0, 2.0))
-
-
 class _FakeImg:
     def __init__(self, arr):
         self._arr = arr
     def __array__(self, dtype=None, copy=None):
         return self._arr
-
-
-class TestAreaLockAnchorScaleSurvivesReload(unittest.TestCase):
-    """Nudge + Scale (and the scale/rotate handles generally) looked
-    like they worked -- the mask visibly resized/rotated right after
-    release -- but the resize vanished as soon as the project was
-    saved and reloaded: _area_anchor_rgb's from-scratch reconstruction
-    (used because the numpy anchor_rgb pixels aren't JSON-serialisable)
-    only ever recovered a plain (dx, dy) translate from the two mask
-    centroids, silently dropping whatever scale/rotation actually
-    placed the anchor. This is exactly what the user's 'Nudge scale
-    dos not work, it appears to do nothing' matches once a project
-    save/reload is in the loop. Fixed by stashing the (scale, rotation)
-    _area_place_keyframe actually used as `srt` on the keyframe,
-    serialising/deserialising it like everything else, and having
-    _area_anchor_rgb's reconstruction rebuild the SAME similarity
-    transform instead of a same-size, unrotated guess."""
-
-    class _Stub(App):
-        def __init__(self):
-            pass
-
-    def setUp(self):
-        self.app = self._Stub()
-
-    def test_place_keyframe_stores_srt_on_the_anchor(self):
-        import numpy as np
-        h = w = 120
-        src_mask = np.zeros((h, w), dtype=bool)
-        src_mask[30:60, 30:60] = True
-        a_ = {"keyframes": {0: {"ref_mask": src_mask, "anchor": False,
-                                 "src_frame": None}},
-              "ref_mask": src_mask}
-        rng = np.random.default_rng(1)
-        fake_rgb = (rng.random((h, w, 3)) * 255).astype(np.uint8)
-        self.app._area_load_ref = lambda idx: (fake_rgb, None)
-        self.app._area_detect_features = lambda gray, mask: np.zeros((8, 2), dtype=np.float32)
-        self.app.area_img_base = _FakeImg(fake_rgb[:, :, 0])  # any array; gray conv doesn't matter here
-        self.app.area_img_base = None  # keep target_gray None; not exercised by this check
-        ok, msg = self.app._area_place_keyframe(
-            a_, 5, 0, src_mask, 0.0, 0.0, min_features=0,
-            allow_low_texture=True, scale=1.6, rotation=25.0)
-        self.assertTrue(ok, msg)
-        kf = a_["keyframes"][5]
-        self.assertIn("srt", kf)
-        self.assertEqual(kf["srt"], (1.6, 25.0))
-
-    def test_serialize_then_deserialize_round_trips_srt(self):
-        import numpy as np, zipfile, io
-        h = w = 80
-        mask = np.zeros((h, w), dtype=bool)
-        mask[10:40, 10:40] = True
-        a_ = {"keyframes": {
-                  0: {"ref_mask": mask, "anchor": False, "src_frame": None,
-                      "mask_path": None, "ref_features": None},
-                  3: {"ref_mask": mask, "anchor": True, "src_frame": 0,
-                      "mask_path": None, "ref_features": None,
-                      "anchor_rgb": np.zeros((h, w, 3), dtype=np.uint8),
-                      "srt": (1.6, 25.0)},
-              },
-              "ref_mask": mask, "mask_path": None, "ref_features": None}
-        buf = io.BytesIO()
-        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-            ser = self.app._project_serialize_area_entry(a_, 0, zf, {})
-        self.assertEqual(ser["keyframes"]["3"]["srt"], [1.6, 25.0])
-        buf.seek(0)
-        with zipfile.ZipFile(buf, "r") as zf:
-            reloaded = self.app._project_deserialize_area_entry(ser, zf)
-        self.assertEqual(reloaded["keyframes"][3]["srt"], (1.6, 25.0))
-        self.assertIsNone(reloaded["keyframes"][3]["anchor_rgb"])
-
-    def test_old_projects_without_srt_default_to_identity(self):
-        import numpy as np, zipfile, io
-        h = w = 80
-        mask = np.zeros((h, w), dtype=bool)
-        mask[10:40, 10:40] = True
-        old_style_kf = {"mask_path": None, "ref_features": None,
-                         "src_frame": 0, "anchor": True}
-        with zipfile.ZipFile(io.BytesIO(), "w") as zf:
-            pass
-        buf = io.BytesIO()
-        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-            pass
-        buf.seek(0)
-        with zipfile.ZipFile(buf, "a") as zf:
-            reloaded_kfs = self.app._project_deserialize_area_entry(
-                {"keyframes": {"3": old_style_kf}}, zf)
-        self.assertEqual(reloaded_kfs["keyframes"][3]["srt"], (1.0, 0.0))
-
-    def test_anchor_rgb_reconstruction_recovers_true_scale_and_rotation(self):
-        """End-to-end: build an anchor with a real 1.6x/25deg
-        transform, drop its cached anchor_rgb (as a reload would),
-        and confirm _area_anchor_rgb's from-scratch reconstruction
-        matches the original pixels almost exactly -- not the old
-        translate-only guess, which is way off."""
-        import numpy as np, cv2
-        h = w = 140
-        src_mask = np.zeros((h, w), dtype=bool)
-        src_mask[40:80, 40:80] = True
-        rng = np.random.default_rng(2)
-        fake_rgb = (rng.random((h, w, 3)) * 255).astype(np.uint8)
-        self.app._area_load_ref = lambda idx: (fake_rgb, None)
-
-        scale, rotation = 1.6, 25.0
-        c_src = self.app._area_mask_centroid(src_mask)
-        mshift = self.app._area_similarity_matrix(c_src, c_src, scale, rotation)
-        anch_mask = cv2.warpAffine(
-            (src_mask.astype(np.uint8)) * 255, mshift, (w, h)) > 127
-        c_new = self.app._area_mask_centroid(anch_mask)
-        pshift = self.app._area_similarity_matrix(c_src, c_new, scale, rotation)
-        correct_rgb = cv2.warpAffine(fake_rgb, pshift, (w, h),
-            flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
-
-        a_ = {"keyframes": {
-            0: {"ref_mask": src_mask, "anchor": False, "src_frame": None},
-            7: {"ref_mask": anch_mask, "anchor": True, "src_frame": 0,
-                "anchor_rgb": None,  # simulates post-reload state
-                "srt": (scale, rotation)},
-        }}
-
-        recon = self.app._area_anchor_rgb(a_, 7)
-        self.assertIsNotNone(recon)
-        mean_abs_diff = float(np.abs(
-            recon.astype(np.int32) - correct_rgb.astype(np.int32)).mean())
-        self.assertLess(mean_abs_diff, 0.5)
-
-        # And the OLD (translate-only) approach would have been way off,
-        # confirming this genuinely exercises the fixed code path rather
-        # than a scale/rotation that happened not to matter.
-        cs = self.app._area_mask_centroid(src_mask)
-        ca = self.app._area_mask_centroid(anch_mask)
-        dx, dy = ca[0] - cs[0], ca[1] - cs[1]
-        old_shift = np.float32([[1, 0, dx], [0, 1, dy]])
-        old_recon = cv2.warpAffine(fake_rgb, old_shift, (w, h),
-            flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
-        old_diff = float(np.abs(
-            old_recon.astype(np.int32) - correct_rgb.astype(np.int32)).mean())
-        self.assertGreater(old_diff, 20.0)
 
 
 class _FakeWidget:
@@ -16284,8 +15310,7 @@ class TestUpscaleStudio(unittest.TestCase):
         class S(App):
             def __init__(s):
                 s.got = []
-                for fn in ("_curve_load_folder", "_area_load_folder",
-                           "_organic_load_folder", "_rpick_load",
+                for fn in ("_organic_load_folder",
                            "_sam_load_folder", "_ups_load_folder",
                            "_usc_load_folder", "_smudge_load_folder"):
                     setattr(s, fn, lambda d, fn=fn: s.got.append(fn))
@@ -16300,7 +15325,7 @@ class TestUpscaleStudio(unittest.TestCase):
         b._adw_propagate_output("/out", "upscale", None)
         self.assertNotIn("_ups_load_folder", b.got)
         self.assertNotIn("_usc_load_folder", b.got)
-        self.assertIn("_curve_load_folder", b.got)
+        self.assertIn("_organic_load_folder", b.got)
 
     def test_the_viewer_renders_only_the_visible_part(self):
         from PIL import Image
@@ -16587,7 +15612,6 @@ class TestWanFailureDoesNotLookLikeAStall(unittest.TestCase):
         self.assertIn('eta["t0"] = None', seg)
 
 
-
 class TestOneProgressBar(unittest.TestCase):
     """One bar, not two: the studios' bars under Run are gone, and the
     window's own bar at the bottom has the same pixelated look."""
@@ -16662,7 +15686,6 @@ class TestOneProgressBar(unittest.TestCase):
         self.assertLessEqual(len(labels[0]), 90)
 
 
-
 class TestVaceStepsWithinTheEndpointLimit(unittest.TestCase):
     """Reported: every Wan inpaint preview failed with fal's validation
     error "num_inference_steps: Input should be less than or equal to
@@ -16683,14 +15706,15 @@ class TestVaceStepsWithinTheEndpointLimit(unittest.TestCase):
     def test_every_payload_uses_the_clamp(self):
         import inspect
         src = inspect.getsource(App)
+        # Two payload builders: _vace_payload (Fix Missing Frames, Wan
+        # inpaint) and Expansion Studio's own. The Interpolate tab's
+        # third went with that tab.
         self.assertEqual(src.count('"num_inference_steps": self._vace_steps()'),
-                         3)
+                         2)
         self.assertNotIn('"num_inference_steps": int(', src)
 
     def test_the_limit_is_fals(self):
         self.assertEqual(App.VACE_MAX_STEPS, 50)
-
-
 
 
 class TestFalHoldOnTheBar(unittest.TestCase):
@@ -17754,7 +16778,9 @@ class TestHotkeysSurviveADropdown(unittest.TestCase):
             src = fh.read()
         # the one remaining use is inside the helper itself
         self.assertEqual(src.count("isinstance(w, (tk.Entry, tk.Text))"), 1)
-        self.assertGreaterEqual(src.count("self._typing_in_field("), 7)
+        # Paint Studio, Lens Studio and SAM 3 each guard their hotkeys;
+        # CurveLock and AreaLock took four guards with them.
+        self.assertGreaterEqual(src.count("self._typing_in_field("), 3)
 
     def test_clicking_the_paint_canvas_takes_the_keyboard(self):
         import inspect
@@ -18477,7 +17503,6 @@ class TestLensStudioInputColour(unittest.TestCase):
                       self._src(App._organic_load_folder))
         self.assertIn("self._organic_in_refresh_label()",
                       self._src(App._organic_show_frame))
-
 
 
 class TestLensStudioCancelRender(unittest.TestCase):
