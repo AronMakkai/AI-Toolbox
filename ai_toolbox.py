@@ -7912,8 +7912,19 @@ class App(tk.Tk):
             a, b = self._cut_shots[k]
             st = getattr(self, "_cut_strength", None) or []
             cs = st[i] if i < len(st) else 0.0
+            # The raw numbers too: `change` is this frame against the
+            # one before it, `typical` the median change of its
+            # neighbours. A cut whose change is not well above typical
+            # is why a strength reads 0.00 on noisy footage.
+            sc = self._cut_scores or []
+            raw = sc[i] if i < len(sc) else 0.0
+            w = self.CUT_BASELINE_WINDOW
+            neigh = sorted(sc[j] for j in range(max(1, i - w), min(len(sc), i + w + 1))
+                           if j != i)
+            typ = neigh[len(neigh) // 2] if neigh else 0.0
             self.log(self.elog, f"Frame {i + 1}: shot{k + 1} "
-                     f"({a + 1}–{b + 1}), cut strength {cs:.2f}"
+                     f"({a + 1}–{b + 1})  change {raw:.3f}  typical "
+                     f"{typ:.3f}  strength {cs:.2f}"
                      + (f" — Sensitivity {min(1.0, 1 - cs + 0.01):.2f} would cut here"
                         if 0.0 < cs < 1.0 and i != a else ""), "dim")
 
