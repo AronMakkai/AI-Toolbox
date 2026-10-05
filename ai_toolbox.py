@@ -3754,7 +3754,7 @@ class App(tk.Tk):
            "display-encoded, so no output-space conversion is needed.\n", "body_indent")
         _end()
 
-        _end = _sec("CUT — Splitting a reel into shots")
+        _end = _sec("And..CUT! — Splitting a reel into shots")
         _w("Loads a long movie, or one EXR sequence holding several "
            "shots, and splits it at the cuts. A movie becomes one file "
            "per shot, named after the input: reel_shot1.mov, "
@@ -6153,24 +6153,24 @@ class App(tk.Tk):
 
         self.exr_mode = "to_exr"
 
-        self.exr_tog_a = self._mkbtn(tog, "MOV  →  EXR",
+        self.exr_tog_a = self._mkbtn(tog, "MOV → EXR",
             lambda: self._exr_set_mode("to_exr"), bg="#1A0808", fg="#CC4444")
-        tk.Label.configure(self.exr_tog_a._lbl, width=0, pady=8, padx=5)
+        tk.Label.configure(self.exr_tog_a._lbl, width=0, pady=8, padx=2)
         self.exr_tog_a.pack(side="left", fill="x", expand=True)
 
-        self.exr_tog_b = self._mkbtn(tog, "EXR  →  MOV",
+        self.exr_tog_b = self._mkbtn(tog, "EXR → MOV",
             lambda: self._exr_set_mode("to_mov"), bg="#0D0D0D", fg=G)
-        tk.Label.configure(self.exr_tog_b._lbl, width=0, pady=8, padx=5)
+        tk.Label.configure(self.exr_tog_b._lbl, width=0, pady=8, padx=2)
         self.exr_tog_b.pack(side="left", fill="x", expand=True)
 
-        self.exr_tog_c = self._mkbtn(tog, "Video  →  Video",
+        self.exr_tog_c = self._mkbtn(tog, "Video → Video",
             lambda: self._exr_set_mode("transcode"), bg="#0D0D0D", fg=G)
-        tk.Label.configure(self.exr_tog_c._lbl, width=0, pady=8, padx=5)
+        tk.Label.configure(self.exr_tog_c._lbl, width=0, pady=8, padx=2)
         self.exr_tog_c.pack(side="left", fill="x", expand=True)
 
-        self.exr_tog_d = self._mkbtn(tog, "CUT",
+        self.exr_tog_d = self._mkbtn(tog, "And..CUT!",
             lambda: self._exr_set_mode("cut"), bg="#0D0D0D", fg=G)
-        tk.Label.configure(self.exr_tog_d._lbl, width=0, pady=8, padx=5)
+        tk.Label.configure(self.exr_tog_d._lbl, width=0, pady=8, padx=2)
         self.exr_tog_d.pack(side="left", fill="x", expand=True)
 
         # ── Mode frames in a grid holder (atomic swap, no flash) ─────
