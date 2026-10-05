@@ -7418,26 +7418,35 @@ class App(tk.Tk):
         """How different two consecutive thumbnails are, 0..1, in a way
         that does not depend on how bright the picture is.
 
-        ffmpeg's own `scene` score is an absolute pixel difference
-        over the full 0-255 range. On a night exterior with letterbox
-        bars most of the frame is black on both sides of a cut, so a
-        cut that is obvious to the eye scored 0.03 -- under the noise
-        floor -- and no sensitivity could reach it.
+        The mean absolute difference between the two frames -- what
+        editing tools' scene detection has always used -- after each
+        frame is levelled on its own: its 2nd..95th percentile range
+        stretched to 0..1. A night exterior is then compared at the
+        same contrast as daylight, which is what ffmpeg's own `scene`
+        score (an absolute difference over 0-255) could not do: on a
+        letterboxed night reel an obvious cut scored 0.03 there.
 
-        This is 1 minus the rank correlation of the two frames'
-        pixels: whether the PICTURE is the same, not how much light
-        changed. Ranks rather than values because an editorial reel
-        carries burn-ins -- a timecode, a shot name -- that on a dark
-        frame are the brightest thing in it and identical on both
-        sides of a cut; by value they dominate and hide the cut, by
-        rank they are a few top places and do not. Rows and columns
-        that are black in both frames (letterbox and pillarbox bars)
-        are cropped off first for the same reason.
-
-        A flat frame (black, a hold on white) has no picture to
-        correlate: flat against flat is 0, flat against anything else
-        is 1 -- the cut into or out of black."""
+        Why these particular pieces:
+        - Rows and columns black in BOTH frames are cropped off first:
+          letterbox bars are identical across every cut and would
+          dilute the difference.
+        - The 95th percentile, not the max, sets the top of the range,
+          so a burn-in (timecode, shot name, a stock-footage
+          watermark), bright and in the same place on both frames,
+          clips to 1 on both sides and contributes nothing.
+        - A light blur first: H.264 noise in near-black regions is
+          large relative to the stretched content and would otherwise
+          read as change on every frame.
+        - Each frame levelled on its own, not the pair together, so an
+          exposure ramp or flicker (the same picture, scaled) reads as
+          nothing. A frame with no range left is flat (black, a hold
+          on white): flat against flat is 0, flat against a picture
+          is 1 -- the cut into or out of black.
+        Rank correlation was tried and dropped: on dark H.264 the
+        ranks of near-black pixels are compression noise, so it saw
+        structure that was not there and flagged frames everywhere."""
         import numpy as np
+        import cv2
         a = np.asarray(prev, dtype=np.uint8).reshape(cls.CUT_THUMB_H, cls.CUT_THUMB_W)
         b = np.asarray(cur, dtype=np.uint8).reshape(cls.CUT_THUMB_H, cls.CUT_THUMB_W)
         both = np.maximum(a, b)
@@ -7446,20 +7455,20 @@ class App(tk.Tk):
         if len(rows) >= 4 and len(cols) >= 4:
             a = a[rows[0]:rows[-1] + 1, cols[0]:cols[-1] + 1]
             b = b[rows[0]:rows[-1] + 1, cols[0]:cols[-1] + 1]
-        a = a.astype(np.float32).ravel(); b = b.astype(np.float32).ravel()
-        fa, fb = a.std() < 3.0, b.std() < 3.0     # ~3 grey levels of contrast
-        if fa and fb:
-            return 0.0
-        if fa or fb:
-            return 1.0
+        a = cv2.GaussianBlur(a, (0, 0), 1.2).astype(np.float32)
+        b = cv2.GaussianBlur(b, (0, 0), 1.2).astype(np.float32)
 
-        def _ranks(x):
-            r = np.empty(x.size, dtype=np.float32)
-            r[np.argsort(x, kind="stable")] = np.arange(x.size, dtype=np.float32)
-            return r - (x.size - 1) / 2.0
-        ra, rb = _ranks(a), _ranks(b)
-        corr = float((ra * rb).sum() / np.sqrt((ra * ra).sum() * (rb * rb).sum()))
-        return max(0.0, min(1.0, 1.0 - corr))
+        def _level(x):
+            lo, hi = np.percentile(x, 2), np.percentile(x, 95)
+            if hi - lo < 6:
+                return None
+            return np.clip((x - lo) / (hi - lo), 0.0, 1.0)
+        la, lb = _level(a), _level(b)
+        if la is None and lb is None:
+            return 0.0
+        if la is None or lb is None:
+            return 1.0
+        return float(min(1.0, np.abs(la - lb).mean() * 2.5))
 
     CUT_BASELINE_WINDOW = 12     # frames either side for the local baseline
     CUT_SPIKE_RATIO = 8.0        # this many times its baseline = full strength
@@ -7527,6 +7536,11 @@ class App(tk.Tk):
         starts = [0] + sorted(
             i for i in range(1, n)
             if (strength[i] >= thr and i not in joins) or i in splits)
+        # The first run has no previous shot to fold into, so a cut
+        # within min_len of the start (an I-frame's different noise,
+        # a leader) is dropped: the first shot starts at frame 0.
+        while len(starts) > 1 and starts[1] < min_len and starts[1] not in splits:
+            del starts[1]
         shots = []
         absorb_next = False
         for k, st in enumerate(starts):
@@ -7881,7 +7895,7 @@ class App(tk.Tk):
         # A candidate the slider is not yet taking: dim gold, so what
         # raising Sensitivity would add is visible before it is done.
         st = getattr(self, "_cut_strength", None)
-        if st and i < len(st) and st[i] >= 0.12 and i not in self._cut_joins:
+        if st and i < len(st) and st[i] >= 0.25 and i not in self._cut_joins:
             return "#6B5A1A"
         return "#5A1515" if k % 2 == 0 else "#2E2E4A"
 

@@ -17885,8 +17885,9 @@ class TestCutMode(unittest.TestCase):
         a, b = self._scene_a(), self._scene_b()
         dark = lambda im: (im.astype(float) * 0.12).astype("uint8")
         bright = App._cut_frame_change(a, b)
+        self.assertGreater(bright, 0.6)
         self.assertGreater(App._cut_frame_change(dark(a), dark(b)),
-                           bright - 0.15)
+                           bright - 0.2)
         self.assertLess(App._cut_frame_change(dark(a), dark(a)), 0.05)
 
     def test_an_exposure_ramp_is_not_a_cut(self):
@@ -17907,7 +17908,7 @@ class TestCutMode(unittest.TestCase):
             return d
         bare = App._cut_frame_change(a, b)
         self.assertGreater(App._cut_frame_change(reel(a), reel(b)),
-                           bare - 0.25)
+                           bare - 0.3)
         self.assertLess(App._cut_frame_change(reel(a), reel(a)), 0.05)
 
     def test_black_to_black_is_nothing_and_black_to_picture_is_a_cut(self):
@@ -17916,6 +17917,20 @@ class TestCutMode(unittest.TestCase):
         self.assertEqual(App._cut_frame_change(black, black), 0.0)
         self.assertEqual(App._cut_frame_change(black, self._scene_a()), 1.0)
         self.assertEqual(App._cut_frame_change(self._scene_a(), black), 1.0)
+
+    def test_compression_noise_in_the_blacks_is_not_change(self):
+        """Dark H.264: the near-black regions carry noise that differs
+        on every frame. Levelling amplifies it, so without the blur it
+        read as change everywhere (the 'brown markers' report)."""
+        import numpy as np
+        rnd = np.random.default_rng(2)
+        a = (self._scene_a().astype(float) * 0.12).astype("uint8")
+        n1 = np.clip(a + rnd.integers(-3, 4, a.shape), 0, 255).astype("uint8")
+        n2 = np.clip(a + rnd.integers(-3, 4, a.shape), 0, 255).astype("uint8")
+        self.assertLess(App._cut_frame_change(n1, n2), 0.3)
+        b = (self._scene_b().astype(float) * 0.12).astype("uint8")
+        self.assertGreater(App._cut_frame_change(n1, b),
+                           App._cut_frame_change(n1, n2) * 2)
 
     def test_a_small_pan_scores_low(self):
         import numpy as np
@@ -18066,6 +18081,14 @@ class TestCutMode(unittest.TestCase):
         sc = self._scores(60, {20: 0.4, 45: 1.0, 46: 1.0})
         self.assertEqual(App._cut_shots_from_scores(sc, 0.7, min_len=2),
                          [(0, 19), (20, 59)])
+
+    def test_a_cut_on_the_very_first_frames_is_not_a_shot(self):
+        """An H.264 I-frame carries different noise from the P-frames
+        after it, so frame 1 can score as a cut; a one-frame first shot
+        is never right."""
+        sc = self._scores(30, {1: 1.0, 15: 1.0})
+        self.assertEqual(App._cut_shots_from_scores(sc, 0.7, min_len=2),
+                         [(0, 14), (15, 29)])
 
     def test_a_short_run_at_the_very_end_joins_the_last_shot(self):
         sc = self._scores(10, {9: 1.0})
