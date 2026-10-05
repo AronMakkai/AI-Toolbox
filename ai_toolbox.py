@@ -3965,6 +3965,39 @@ class App(tk.Tk):
            "display-encoded, so no output-space conversion is needed.\n", "body_indent")
         _end()
 
+        _end = _sec("CUT — Splitting a reel into shots")
+        _w("Loads a long movie, or one EXR sequence holding several "
+           "shots, and splits it at the cuts. A movie becomes one file "
+           "per shot, named after the input: reel_shot1.mov, "
+           "reel_shot2.mov \u2026 A sequence becomes one subfolder per "
+           "shot with the frames copied in under their original names, "
+           "so frame numbers are kept. Everything lands in a versioned "
+           "ADW/CUT_vNN folder.\n\n", "body")
+        _w("Preview cuts\n", "param")
+        _w("One ffmpeg pass scores how much of the picture changed on "
+           "every frame (its scene score, 0\u20131). The frames are "
+           "then drawn on the timeline in alternating shades, one shade "
+           "per shot, with the first frame of each shot lit blue; the "
+           "list gives every shot's frame range. Click a frame to see "
+           "it beside the frame before it \u2014 the only way to judge "
+           "a cut.\n\n", "body_indent")
+        _w("Sensitivity\n", "param")
+        _w("Higher finds more cuts. The scores are kept, so dragging the "
+           "slider redraws the shots instantly without another pass. "
+           "0.70 is ffmpeg's customary threshold; raise it if a hard "
+           "cut is missed, lower it if a whip pan or a flash is being "
+           "cut. A single flash frame is never its own shot: a run "
+           "shorter than two frames is folded back into the shot it "
+           "interrupted.\n\n", "body_indent")
+        _w("What the movie cut does to the pixels\n", "param")
+        _w("ProRes, DNxHD and other all-intra codecs are stream-copied "
+           "between the two frame times: the shot is the source's own "
+           "bytes, nothing is re-encoded. H.264 / HEVC are long-GOP, "
+           "where a copy can only start on a keyframe, so those shots "
+           "are picked by frame index and written as ProRes 422 HQ "
+           "instead. The log says which happened.\n", "body_indent")
+        _end()
+
         _w("\n", "body")
 
         # ── UPSCALE STUDIO ────────────────────────────────────────────────
@@ -6354,6 +6387,9 @@ class App(tk.Tk):
         cv = getattr(self, "e2m_preview_canvas", None)
         if cv is None:
             return
+        if getattr(self, "exr_mode", "to_exr") == "cut":
+            self._cut_draw_preview()
+            return
         lin = getattr(self, "_e2m_lin", None)
         m2e = self._exr_use_m2e()
         cv.delete("all")
@@ -6633,8 +6669,9 @@ class App(tk.Tk):
             font=("Futura", 14), bg=BG, fg=W).pack(anchor="w")
         tk.Label(lf,
             text=("Converts MOV video files to EXR image sequences for VFX "
-                  "pipelines, or converts EXR sequences back to a ProRes MOV "
-                  "for review and delivery."),
+                  "pipelines, converts EXR sequences back to a ProRes MOV "
+                  "for review and delivery, or cuts a long movie or "
+                  "sequence into its shots."),
             font=FM, bg=BG, fg=G,
             wraplength=360, justify="left", anchor="w"
         ).pack(anchor="w", padx=16, pady=(2, 8))
@@ -6647,18 +6684,23 @@ class App(tk.Tk):
 
         self.exr_tog_a = self._mkbtn(tog, "MOV  →  EXR",
             lambda: self._exr_set_mode("to_exr"), bg="#1A0808", fg="#CC4444")
-        tk.Label.configure(self.exr_tog_a._lbl, width=0, pady=8)
+        tk.Label.configure(self.exr_tog_a._lbl, width=0, pady=8, padx=5)
         self.exr_tog_a.pack(side="left", fill="x", expand=True)
 
         self.exr_tog_b = self._mkbtn(tog, "EXR  →  MOV",
             lambda: self._exr_set_mode("to_mov"), bg="#0D0D0D", fg=G)
-        tk.Label.configure(self.exr_tog_b._lbl, width=0, pady=8)
+        tk.Label.configure(self.exr_tog_b._lbl, width=0, pady=8, padx=5)
         self.exr_tog_b.pack(side="left", fill="x", expand=True)
 
         self.exr_tog_c = self._mkbtn(tog, "Video  →  Video",
             lambda: self._exr_set_mode("transcode"), bg="#0D0D0D", fg=G)
-        tk.Label.configure(self.exr_tog_c._lbl, width=0, pady=8)
+        tk.Label.configure(self.exr_tog_c._lbl, width=0, pady=8, padx=5)
         self.exr_tog_c.pack(side="left", fill="x", expand=True)
+
+        self.exr_tog_d = self._mkbtn(tog, "CUT",
+            lambda: self._exr_set_mode("cut"), bg="#0D0D0D", fg=G)
+        tk.Label.configure(self.exr_tog_d._lbl, width=0, pady=8, padx=5)
+        self.exr_tog_d.pack(side="left", fill="x", expand=True)
 
         # ── Mode frames in a grid holder (atomic swap, no flash) ─────
         _mh = tk.Frame(lf, bg=BG)
@@ -6901,6 +6943,73 @@ class App(tk.Tk):
         self.x264_jump = self._jump_btn_widget(self.exr_f_x264,
                                              self._x264_out_dir)
 
+        # ── Mode D: CUT ───────────────────────────────────────────────
+        # A long delivery -- a whole reel as one movie, or one EXR
+        # sequence of several shots -- split at its cuts. ffmpeg scores
+        # every frame change once (the scene score, 0..1); the slider
+        # then only re-thresholds the stored scores, so dragging it
+        # redraws the shots on the timeline live without another pass
+        # over the footage.
+        self.exr_f_cut = tk.Frame(_mh, bg=BG)
+        self.exr_f_cut.grid(row=0, column=0, sticky="ew")
+        self.exr_f_cut.grid_remove()
+        self.cut_input = None          # movie path or sequence folder
+        self.cut_is_movie = False
+        self.cut_names = []            # sequence frame names, or decoded
+        self._cut_scores = None        # per-frame scene score, after Preview
+        self._cut_shots = []           # [(first, last)] 0-based inclusive
+        self._cut_busy = False
+        self._cut_cancel = False
+        self._cut_fps = 24.0
+        self._cut_out_dir = None
+
+        self.cut_path_lbl = self._path_bar(self.exr_f_cut)
+        _ccin = self._card(self.exr_f_cut, "Input")
+        _cpk, self.cut_lbl = self._picker(
+            _ccin, "\U0001F3AC  Click to select a movie, or an EXR folder")
+        _cpk.bind("<Button-1>", self._cut_pick)
+        self.cut_lbl.bind("<Button-1>", self._cut_pick)
+        self.cut_info = tk.Label(_ccin, text="", font=FSM, bg=S, fg=G,
+                                 anchor="w", wraplength=290, justify="left")
+        self.cut_info.pack(anchor="w", pady=(3, 0))
+
+        _ccd = self._card(self.exr_f_cut, "Cut detection")
+        tk.Label(_ccd, text="Higher finds more cuts. Start in the middle; "
+                 "raise it if a hard cut is missed, lower it if a flash "
+                 "or a whip pan is being cut.",
+                 font=FSM, bg=S, fg=G, wraplength=300, justify="left",
+                 anchor="w").pack(fill="x", pady=(0, 4))
+        self.cut_sens_var = tk.DoubleVar(value=self.CUT_DEFAULT_SENSITIVITY)
+        self._ff_slider_factory(_ccd)(
+            "Sensitivity", self.cut_sens_var, 0.05, 0.95, 0.01,
+            lambda v: f"{float(v):.2f}",
+            tip="The ffmpeg scene score a frame change must reach to\n"
+                "count as a cut is (1 \u2212 sensitivity): 0.70 here is\n"
+                "ffmpeg's usual 0.30 threshold. Shots shorter than\n"
+                f"{self.CUT_MIN_SHOT_FRAMES} frames are merged into their\n"
+                "neighbour, so a single flash frame never becomes a shot.")
+        self.cut_sens_var.trace_add("write", lambda *_: self._cut_rethreshold())
+        self.cut_preview_btn = self._mkbtn(_ccd, "\u2315  Preview cuts",
+                                           self._cut_preview, bg="#0D0D0D",
+                                           fg=W)
+        tk.Label.configure(self.cut_preview_btn._lbl, width=0, pady=7)
+        self.cut_preview_btn.pack(fill="x", pady=(6, 0))
+        self.cut_summary_lbl = tk.Label(_ccd, text="Not analysed yet.",
+            font=FM, bg=S, fg=G, anchor="w", justify="left", wraplength=300)
+        self.cut_summary_lbl.pack(fill="x", pady=(6, 0))
+        self.cut_list = tk.Listbox(_ccd, bg="#0D0D0D", fg=W, font=FM,
+            height=6, highlightthickness=0, bd=0, selectbackground=BD,
+            activestyle="none")
+        self.cut_list.pack(fill="x", pady=(4, 0))
+        self.cut_list.bind("<<ListboxSelect>>", self._cut_goto)
+
+        self.cut_out = self._outinfo(self.exr_f_cut)
+        self.cut_btn = self._runbtn(self.exr_f_cut, "Cut into shots",
+                                    self._cut_run)
+        self.cut_btn.configure(state="disabled")
+        self.cut_jump = self._jump_btn_widget(
+            self.exr_f_cut, lambda: self._cut_out_dir or "")
+
         # Show default mode
         self._exr_set_mode("to_exr")
 
@@ -7048,8 +7157,9 @@ class App(tk.Tk):
                                     fg="#666666")
         self.tc_hint_lbl.pack(side="right")
         _erow = tk.Frame(_etb, bg=BG); _erow.pack(fill="x")
-        self.exr_frame_cb = self._timeline(_erow, self._tc_select_frame,
-            fill=True, get_frame_color=self._tc_frame_color,
+        self.exr_tl_lbl = _ehdr.winfo_children()[0]
+        self.exr_frame_cb = self._timeline(_erow, self._exr_timeline_select,
+            fill=True, get_frame_color=self._exr_frame_color,
             taller=True, show_numbers=True)
 
         self.log(self.elog, "Select a video file or EXR folder to begin.", "hi")
@@ -7213,6 +7323,532 @@ class App(tk.Tk):
         if sc < 0.2:
             return None             # clean: leave the timeline's own dark
         return self._motion_tint_color(1.0 - sc)
+
+    def _exr_frame_color(self, i):
+        if getattr(self, "exr_mode", "to_exr") == "cut":
+            return self._cut_frame_color(i)
+        return self._tc_frame_color(i)
+
+    def _exr_timeline_select(self, i):
+        if getattr(self, "exr_mode", "to_exr") == "cut":
+            return self._cut_select_frame(i)
+        return self._tc_select_frame(i)
+
+    # ═══ CUT — split a movie or sequence into shots ═══════════════════
+    # ffmpeg's `scene` score is the fraction of the picture that changed
+    # between a frame and the one before it, 0..1. Every frame is scored
+    # ONCE (Preview); the sensitivity slider only re-thresholds the
+    # stored scores, so it redraws instantly. A cut is a frame whose
+    # score reaches (1 - sensitivity), with runs shorter than
+    # CUT_MIN_SHOT_FRAMES merged into the previous shot so a single
+    # flash frame, which scores high going in AND coming out, does not
+    # become a two-frame shot of its own.
+    CUT_DEFAULT_SENSITIVITY = 0.70      # = ffmpeg's customary 0.30 threshold
+    CUT_MIN_SHOT_FRAMES = 2
+    CUT_MOVIE_EXTS = (".mov", ".mp4", ".mxf", ".mkv", ".m4v", ".avi",
+                      ".mpg", ".mpeg")
+    # Codecs where every frame is a keyframe, so a stream copy cut on
+    # any frame is exact. Anything else is long-GOP and is re-encoded
+    # to ProRes 422 HQ so the shot starts on the frame asked for, not
+    # on the previous keyframe.
+    CUT_INTRA_CODECS = ("prores", "dnxhd", "mjpeg", "rawvideo", "qtrle",
+                        "ffv1", "huffyuv", "v210", "cfhd", "hap")
+
+    @staticmethod
+    def _cut_parse_scene_scores(text):
+        """ffmpeg `metadata=print` output -> [score per frame].
+
+        Lines come in pairs, `frame:N ...` then `lavfi.scene_score=S`.
+        Frame 0 has no previous frame and prints no score; any frame
+        missing a score reads as 0.0 so the list length always equals
+        the frame count."""
+        import re
+        scores = {}
+        cur = None
+        for line in text.splitlines():
+            m = re.match(r"\s*frame:(\d+)", line)
+            if m:
+                cur = int(m.group(1))
+                scores.setdefault(cur, 0.0)
+                continue
+            m = re.search(r"lavfi\.scene_score=([0-9.eE+-]+)", line)
+            if m and cur is not None:
+                try:
+                    scores[cur] = float(m.group(1))
+                except ValueError:
+                    pass
+        if not scores:
+            return []
+        n = max(scores) + 1
+        return [scores.get(i, 0.0) for i in range(n)]
+
+    @staticmethod
+    def _cut_shots_from_scores(scores, sensitivity, min_len=2):
+        """[(first, last)] 0-based inclusive shot ranges.
+
+        A frame whose score reaches the threshold STARTS a shot. A
+        shot shorter than min_len is not a shot: it is folded back
+        into the one before it (a flash frame, a dropped-frame glitch,
+        a scene score spike on a hard whip)."""
+        n = len(scores)
+        if n == 0:
+            return []
+        thr = 1.0 - float(sensitivity)
+        starts = [0] + [i for i in range(1, n) if scores[i] >= thr]
+        shots = []
+        absorb_next = False
+        for k, st in enumerate(starts):
+            en = (starts[k + 1] - 1) if k + 1 < len(starts) else n - 1
+            if shots and ((en - st + 1) < min_len or absorb_next):
+                # Too short to be a shot: it is a flash, and the frames
+                # after it are the same shot carrying on, so the cut
+                # that ends the flash is not a cut either -- the next
+                # run joins the previous shot too.
+                absorb_next = (en - st + 1) < min_len
+                shots[-1] = (shots[-1][0], en)
+            else:
+                absorb_next = False
+                shots.append((st, en))
+        return shots
+
+    @staticmethod
+    def _cut_shot_name(base, k):
+        return f"{base}_shot{k}"
+
+    @classmethod
+    def _cut_codec_is_intra(cls, codec_name):
+        c = (codec_name or "").lower()
+        return any(c.startswith(x) for x in cls.CUT_INTRA_CODECS)
+
+    @staticmethod
+    def _cut_probe_codec(path):
+        try:
+            r = subprocess.run(
+                ["ffprobe", "-v", "error", "-select_streams", "v:0",
+                 "-show_entries", "stream=codec_name",
+                 "-of", "default=nw=1:nk=1", str(path)],
+                capture_output=True, text=True)
+            return (r.stdout or "").strip().splitlines()[0].strip()
+        except Exception:
+            return ""
+
+    @classmethod
+    def _cut_segment_cmd(cls, src, dst, first, last, fps, intra):
+        """ffmpeg argv for one shot, frames `first`..`last` inclusive.
+
+        intra=True (ProRes, DNxHD, ...): every frame is a keyframe, so
+        a stream copy between the two timestamps is exact AND
+        lossless -- the shot is the source's own bytes, no generation
+        lost. The in point sits a hundredth of a frame past the first
+        frame's time and the out point a hundredth short of the frame
+        after the last, so float rounding can never land on the
+        neighbouring frame.
+
+        Otherwise (H.264, HEVC, ...) a copy would snap to the previous
+        keyframe, so the frames are picked by index with `select` and
+        re-encoded to ProRes 422 HQ. Audio is trimmed with the same
+        bounds either way."""
+        fps = float(fps)
+        if intra:
+            t0 = (first + 0.01) / fps
+            t1 = (last + 0.99) / fps
+            return ["ffmpeg", "-y", "-ss", f"{t0:.6f}", "-to", f"{t1:.6f}",
+                    "-i", src, "-map", "0", "-c", "copy", dst]
+        t0 = first / fps
+        t1 = (last + 1) / fps
+        return ["ffmpeg", "-y", "-i", src,
+                "-vf", f"select='between(n,{first},{last})',setpts=N/FRAME_RATE/TB",
+                "-af", f"atrim={t0:.6f}:{t1:.6f},asetpts=N/SR/TB",
+                "-r", f"{fps:g}",
+                "-c:v", "prores_ks", "-profile:v", "3",
+                "-pix_fmt", "yuv422p10le", "-c:a", "pcm_s16le", dst]
+
+    def _cut_pick(self, _e=None):
+        """A movie, or -- on cancel -- a folder of frames. Same idiom as
+        the Video -> Video picker."""
+        path = filedialog.askopenfilename(
+            title="Select a movie to cut into shots",
+            filetypes=[("Video", " ".join("*" + e
+                                          for e in self.CUT_MOVIE_EXTS)),
+                       ("All", "*.*")])
+        if path:
+            self._cut_accept(path, True)
+            return
+        folder = filedialog.askdirectory(
+            title="Select a folder of frames to cut into shots")
+        if folder:
+            self._cut_accept(folder, False)
+
+    def _cut_accept(self, path, is_movie):
+        if is_movie:
+            if not os.path.isfile(path):
+                self.log(self.elog, f"Not a file: {path}", "err")
+                return
+            names = []
+        else:
+            names = sorted(n for n in os.listdir(path)
+                           if os.path.splitext(n)[1].lower()
+                           in self.FF_SOURCE_EXTS)
+            if not names:
+                self.log(self.elog, "No frames in that folder.", "err")
+                return
+        self.cut_input = path
+        self.cut_is_movie = is_movie
+        self.cut_names = names
+        self._cut_scores = None
+        self._cut_shots = []
+        self._cut_out_dir = None
+        self.cut_path_lbl.configure(text=path, fg=G)
+        base = os.path.basename(path.rstrip(os.sep))
+        self.cut_lbl.configure(text="OK  " + base, fg=GR)
+        if is_movie:
+            self._cut_fps = self._ff_probe_fps(path)
+            codec = self._cut_probe_codec(path)
+            kind = ("intra, cut exactly" if self._cut_codec_is_intra(codec)
+                    else "long-GOP, shots re-encoded to ProRes 422 HQ")
+            self.cut_info.configure(
+                text=f"{fmt(os.path.getsize(path))}   {codec or '?'}   "
+                     f"{self._cut_fps:g} fps   ({kind})")
+        else:
+            self.cut_info.configure(
+                text=f"{len(names)} frame(s)   "
+                     f"{os.path.splitext(names[0])[1].upper()}")
+        root = os.path.dirname(path) if is_movie else path
+        self.cut_out.configure(
+            text=self._adw_peek_next_version_dir(root, "CUT") + "/", fg=W)
+        self.cut_summary_lbl.configure(text="Not analysed yet.", fg=G)
+        self.cut_list.delete(0, "end")
+        self.cut_btn.configure(state="disabled")
+        self.cut_jump.configure(state="disabled")
+        self.exr_frame_cb.set_frames(names)
+        self.tc_hint_lbl.configure(text="")
+        self._cut_draw_preview()
+        self.log(self.elog, "Loaded: " + base, "ok")
+        self.log(self.elog, "Preview cuts to find the shots.", "hi")
+
+    def _cut_preview(self):
+        if self._cut_busy:
+            self._cut_cancel = True
+            return
+        if not self.cut_input:
+            self.log(self.elog, "Choose a movie or a folder first.", "err")
+            return
+        self._cut_busy = True
+        self._cut_cancel = False
+        self.cut_preview_btn._lbl.configure(text="✕  Cancel")
+        threading.Thread(target=self._cut_preview_worker, daemon=True).start()
+
+    def _cut_scene_cmd(self):
+        """One ffmpeg pass that prints the scene score of every frame.
+
+        A movie is read directly. A folder of frames goes through the
+        concat demuxer from a list file, which takes any mix of names
+        and extensions this tab reads and needs no glob support in the
+        ffmpeg build; `-r` gives the one-frame "movies" a common clock."""
+        if self.cut_is_movie:
+            inp = ["-i", self.cut_input]
+        else:
+            lst = os.path.join(tempfile.gettempdir(), "adw_cut_list.txt")
+            with open(lst, "w", encoding="utf-8") as fh:
+                for n in self.cut_names:
+                    q = os.path.join(self.cut_input, n).replace("'", "'\\''")
+                    fh.write(f"file '{q}'\n")
+            inp = ["-r", "24", "-f", "concat", "-safe", "0", "-i", lst]
+        return (["ffmpeg", "-nostats", "-hide_banner", "-v", "error"] + inp
+                + ["-an", "-vf",
+                   "select='gte(scene,0)',metadata=print:file=-",
+                   "-f", "null", "-"])
+
+    def _cut_preview_worker(self):
+        try:
+            self.after(0, lambda: self.progress(None, "Scoring frame changes…"))
+            self.after(0, lambda: self.log(
+                self.elog, "ffmpeg is scoring every frame change…", "dim"))
+            proc = subprocess.Popen(self._cut_scene_cmd(),
+                                    stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE, text=True)
+            self._cut_proc = proc
+            out, err = proc.communicate()
+            self._cut_proc = None
+            if self._cut_cancel:
+                self.after(0, lambda: self.log(self.elog, "Cancelled.", "hi"))
+                return
+            scores = self._cut_parse_scene_scores(out)
+            if not scores:
+                tail = (err or "").strip().splitlines()[-1:] or ["no output"]
+                raise RuntimeError(f"ffmpeg scored nothing — {tail[0]}")
+            if self.cut_is_movie:
+                names = [str(i + 1) for i in range(len(scores))]
+            else:
+                names = list(self.cut_names)
+                if len(scores) != len(names):
+                    self.after(0, lambda a=len(scores), b=len(names): self.log(
+                        self.elog, f"ffmpeg read {a} frame(s) of {b}; "
+                        "scores are matched from the first frame.", "err"))
+                    scores = (scores + [0.0] * len(names))[:len(names)]
+            self._cut_scores = scores
+            self.after(0, lambda n=names: self._cut_scored(n))
+        except Exception as ex:
+            msg = str(ex)
+            self.after(0, lambda m=msg: self.log(
+                self.elog, f"Preview failed: {m}", "err"))
+        finally:
+            self.after(0, self._cut_reset_btn)
+
+    def _cut_reset_btn(self):
+        self._cut_busy = False
+        try:
+            self.progress(0, "")
+            self.cut_preview_btn._lbl.configure(text="⌕  Preview cuts")
+        except Exception:
+            pass
+
+    def _cut_scored(self, names):
+        self.cut_names = names
+        self.exr_frame_cb.set_frames(names)
+        self._cut_rethreshold()
+        self.cut_btn.configure(state="normal")
+        self.log(self.elog, f"Scored {len(names)} frame(s). Drag "
+                 "Sensitivity to change where the cuts fall.", "ok")
+
+    def _cut_rethreshold(self):
+        """Slider -> shots -> list, summary, timeline. Cheap: no
+        footage is touched, only the stored scores."""
+        if self._cut_scores is None:
+            return
+        self._cut_shots = self._cut_shots_from_scores(
+            self._cut_scores, float(self.cut_sens_var.get()),
+            self.CUT_MIN_SHOT_FRAMES)
+        n = len(self._cut_shots)
+        self.cut_summary_lbl.configure(
+            text=f"{n} shot{'s' if n != 1 else ''} across "
+                 f"{len(self._cut_scores)} frame(s).",
+            fg="#66CC66" if n > 1 else "#DDAA44")
+        self.cut_list.delete(0, "end")
+        for k, (a, b) in enumerate(self._cut_shots, 1):
+            self.cut_list.insert(
+                "end", f"shot{k}   {a + 1} – {b + 1}   ({b - a + 1} fr)")
+        if getattr(self, "exr_mode", "") == "cut":
+            self.tc_hint_lbl.configure(
+                text="alternating shades = shots     bright = first "
+                     "frame of a shot")
+            self.exr_frame_cb.refresh()
+
+    def _cut_shot_index(self, i):
+        for k, (a, b) in enumerate(self._cut_shots):
+            if a <= i <= b:
+                return k
+        return -1
+
+    def _cut_frame_color(self, i):
+        """Two alternating shades so neighbouring shots read as blocks,
+        the first frame of each shot lit so a one-frame shift is
+        visible at a glance."""
+        if not self._cut_shots:
+            return None
+        k = self._cut_shot_index(i)
+        if k < 0:
+            return None
+        if i == self._cut_shots[k][0] and i != 0:
+            return "#4488CC"
+        return "#5A1515" if k % 2 == 0 else "#2E2E4A"
+
+    def _cut_select_frame(self, i):
+        self._cut_idx = i
+        self._cut_draw_preview()
+        k = self._cut_shot_index(i)
+        if k >= 0:
+            a, b = self._cut_shots[k]
+            sc = (self._cut_scores[i] if self._cut_scores
+                  and i < len(self._cut_scores) else 0.0)
+            self.log(self.elog, f"Frame {i + 1}: shot{k + 1} "
+                     f"({a + 1}–{b + 1}), change score {sc:.2f}", "dim")
+
+    def _cut_goto(self, _e=None):
+        sel = self.cut_list.curselection()
+        if not sel or sel[0] >= len(self._cut_shots):
+            return
+        i = self._cut_shots[sel[0]][0]
+        self.exr_frame_cb.select(i)
+        self._cut_select_frame(i)
+
+    def _cut_frame_image(self, i):
+        """PIL RGB of frame i for the preview. A folder reads the frame
+        through the shared viewer cache; a movie has no files, so the
+        one frame is pulled out by index into scratch and cached by
+        (movie, mtime, i)."""
+        if not self.cut_is_movie:
+            return self._pv_frame(os.path.join(self.cut_input, self.cut_names[i]))
+        from PIL import Image
+        import collections
+        if not hasattr(self, "_cut_pv_lru"):
+            self._cut_pv_lru = collections.OrderedDict()
+        try:
+            mt = os.path.getmtime(self.cut_input)
+        except OSError:
+            mt = 0
+        key = (self.cut_input, mt, i)
+        lru = self._cut_pv_lru
+        if key in lru:
+            lru.move_to_end(key)
+            return lru[key]
+        out = os.path.join(tempfile.gettempdir(), "adw_cut_preview")
+        os.makedirs(out, exist_ok=True)
+        png = os.path.join(out, f"f{i:06d}.png")
+        t = i / float(self._cut_fps or 24.0)
+        # Seek to just before the frame, then pick it by index from
+        # there: -ss before -i is fast, and the select makes it exact.
+        subprocess.run(["ffmpeg", "-y", "-v", "error",
+                        "-ss", f"{max(0.0, t - 1.0):.6f}",
+                        "-i", self.cut_input,
+                        "-vf", f"select='gte(t,{t:.6f})',scale=640:-2",
+                        "-frames:v", "1", png], capture_output=True)
+        img = Image.open(png).convert("RGB") if os.path.exists(png) else None
+        if img is not None:
+            lru[key] = img
+            while len(lru) > 32:
+                lru.popitem(last=False)
+        return img
+
+    def _cut_draw_preview(self):
+        """The viewer in CUT mode: the selected frame and the one before
+        it side by side, which is the only way to judge a cut -- a
+        single frame cannot show that anything changed."""
+        from PIL import ImageTk
+        cv = getattr(self, "e2m_preview_canvas", None)
+        if cv is None:
+            return
+        cv.delete("all")
+        cv.update_idletasks()
+        cw = cv.winfo_width() or 400
+        ch = cv.winfo_height() or 180
+        self._exr_set_view_labels(None)
+        if not self.cut_input or not self.cut_names:
+            cv.create_text(cw // 2, ch // 2,
+                text="Select a movie or a folder of frames, then Preview cuts",
+                font=FSM, fill=G)
+            return
+        i = max(0, min(len(self.cut_names) - 1,
+                       getattr(self, "_cut_idx", 0)))
+        try:
+            cur = self._cut_frame_image(i)
+            prev = self._cut_frame_image(i - 1) if i > 0 else None
+        except Exception as ex:
+            cv.create_text(cw // 2, ch // 2, text=f"Could not read frame {i + 1}: {ex}",
+                           font=FSM, fill=G)
+            return
+        if cur is None:
+            cv.create_text(cw // 2, ch // 2, text=f"Could not read frame {i + 1}",
+                           font=FSM, fill=G)
+            return
+        half = (cw - 24) // 2 if prev is not None else cw - 16
+        tiles = [(prev, f"{i}  (before)")] if prev is not None else []
+        tiles.append((cur, f"{i + 1}" + ("  (first frame of a shot)"
+                     if self._cut_shots and self._cut_shot_index(i) >= 0
+                     and self._cut_shots[self._cut_shot_index(i)][0] == i
+                     and i != 0 else "")))
+        self._cut_preview_imgs = []
+        x = 8
+        for img, label in tiles:
+            w, h = img.size
+            sc = min(half / w, (ch - 24) / h, 1.0)
+            im = img.resize((max(1, int(w * sc)), max(1, int(h * sc))))
+            tkimg = ImageTk.PhotoImage(im)
+            self._cut_preview_imgs.append(tkimg)
+            cv.create_image(x + half // 2, (ch - 8) // 2 + 4, image=tkimg,
+                            anchor="center")
+            cv.create_text(x + half // 2, ch - 8, text=label, font=FM,
+                           fill=G, anchor="s")
+            x += half + 8
+
+    def _cut_run(self):
+        if self._cut_busy or not self._cut_shots:
+            return
+        self._cut_busy = True
+        self._cut_cancel = False
+        self.cut_btn.configure(state="disabled")
+        self.setstatus("Cutting…", R)
+        shots = list(self._cut_shots)
+        threading.Thread(target=self._cut_worker, args=(shots,),
+                         daemon=True).start()
+
+    def _cut_worker(self, shots):
+        try:
+            src = self.cut_input
+            root = os.path.dirname(src) if self.cut_is_movie else src
+            out = self._adw_versioned_output_dir(root, "CUT")
+            base = os.path.splitext(os.path.basename(src.rstrip(os.sep)))[0] \
+                if self.cut_is_movie else os.path.basename(src.rstrip(os.sep))
+            self.after(0, lambda o=out: self.log(self.elog, "Created: " + o, "ok"))
+            n = len(shots)
+            if self.cut_is_movie:
+                # A stream copy keeps the container; a re-encode is
+                # ProRes, which wants .mov.
+                intra = self._cut_codec_is_intra(self._cut_probe_codec(src))
+                ext = (os.path.splitext(src)[1].lower() or ".mov") if intra \
+                    else ".mov"
+                if not intra:
+                    self.after(0, lambda: self.log(
+                        self.elog, "Long-GOP source: each shot is "
+                        "re-encoded to ProRes 422 HQ so it starts on the "
+                        "exact frame.", "hi"))
+                for k, (a, b) in enumerate(shots, 1):
+                    if self._cut_cancel:
+                        break
+                    dst = os.path.join(out, self._cut_shot_name(base, k) + ext)
+                    self.after(0, lambda k=k, n=n: self.progress(
+                        (k - 1) / n, f"Writing shot {k} / {n}"))
+                    r = subprocess.run(self._cut_segment_cmd(
+                        src, dst, a, b, self._cut_fps, intra),
+                        capture_output=True, text=True)
+                    if r.returncode != 0:
+                        tail = (r.stderr or "").strip().splitlines()[-1:]
+                        raise RuntimeError(
+                            f"shot{k}: {tail[0] if tail else 'ffmpeg failed'}")
+                    self.after(0, lambda d=dst, a=a, b=b: self.log(
+                        self.elog, f"✓ {os.path.basename(d)}   "
+                        f"frames {a + 1}–{b + 1}", "ok"))
+            else:
+                import shutil
+                sidecar = os.path.join(src, self.ADW_CS_SIDECAR)
+                for k, (a, b) in enumerate(shots, 1):
+                    if self._cut_cancel:
+                        break
+                    d = os.path.join(out, self._cut_shot_name(base, k))
+                    os.makedirs(d, exist_ok=True)
+                    for j in range(a, b + 1):
+                        nm = self.cut_names[j]
+                        shutil.copy2(os.path.join(src, nm), os.path.join(d, nm))
+                        if (j - a) % 10 == 0:
+                            self.after(0, lambda k=k, n=n, j=j, a=a, b=b:
+                                       self.progress((k - 1 + (j - a) / (b - a + 1)) / n,
+                                                     f"Copying shot {k} / {n}"))
+                    if os.path.isfile(sidecar):
+                        # the colour tag travels with every shot
+                        shutil.copy2(sidecar, os.path.join(d, self.ADW_CS_SIDECAR))
+                    self.after(0, lambda d=d, a=a, b=b: self.log(
+                        self.elog, f"✓ {os.path.basename(d)}/   "
+                        f"frames {a + 1}–{b + 1}", "ok"))
+            self._cut_out_dir = out
+            if self._cut_cancel:
+                self.after(0, lambda: (self.log(self.elog, "Cancelled.", "err"),
+                                       self.setstatus("Cancelled", RB)))
+            else:
+                self.after(0, lambda n=n: (
+                    self.log(self.elog, f"Done — {n} shot(s) in {out}", "ok"),
+                    self.setstatus("Complete", GR),
+                    self.cut_jump.configure(state="normal")))
+        except Exception as ex:
+            msg = str(ex)
+            self.after(0, lambda m=msg: (
+                self.log(self.elog, f"Cut failed: {m}", "err"),
+                self.setstatus("Error", RB)))
+        finally:
+            def _done():
+                self._cut_busy = False
+                self.progress(-1)
+                self.cut_btn.configure(state="normal")
+            self.after(0, _done)
 
     # ── H.265 → H.264 ────────────────────────────────────────────────
 
@@ -8663,16 +9299,34 @@ class App(tk.Tk):
             self.after(0, self._exr_redraw_preview)
         panes = {"to_exr": self.exr_f_to_exr,
                  "to_mov": self.exr_f_to_mov,
-                 "transcode": self.exr_f_x264}
+                 "transcode": self.exr_f_x264,
+                 "cut": self.exr_f_cut}
         togs = {"to_exr": self.exr_tog_a,
                 "to_mov": self.exr_tog_b,
-                "transcode": self.exr_tog_c}
+                "transcode": self.exr_tog_c,
+                "cut": self.exr_tog_d}
         for key, pane in panes.items():
             (pane.grid() if key == mode else pane.grid_remove())
         for key, btn in togs.items():
             on = (key == mode)
             btn.configure(bg="#1A0808" if on else "#0D0D0D",
                           fg="#CC4444" if on else G)
+        # The one timeline strip serves two analyses: CUT shows its
+        # shots, every other mode the temporal-consistency result.
+        tl = getattr(self, "exr_frame_cb", None)
+        if tl is not None:
+            if mode == "cut":
+                tl.set_frames(self.cut_names)
+                self.exr_tl_lbl.configure(text="Shots")
+                self.tc_hint_lbl.configure(
+                    text="alternating shades = shots     bright = first "
+                         "frame of a shot" if self._cut_shots else "")
+            else:
+                tl.set_frames(getattr(self, "_tc_frames", []) or [])
+                self.exr_tl_lbl.configure(text="Analysed frames")
+                self.tc_hint_lbl.configure(
+                    text="blue = cut     yellow \u2192 red = worsening"
+                    if getattr(self, "_tc_result", None) else "")
 
     def _epick(self, e=None):
         p = filedialog.askopenfilename(

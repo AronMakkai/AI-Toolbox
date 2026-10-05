@@ -17845,6 +17845,175 @@ class TestMovToExrDropdownNames(unittest.TestCase):
         self.assertIn('"sRGB" in out_enc.get()', run)
 
 
+class TestCutMode(unittest.TestCase):
+    """The fourth MOV <-> EXR mode: a long movie or sequence split
+    into its shots. ffmpeg scores every frame change once; the slider
+    re-thresholds the stored scores. What matters most is that the
+    shot ranges are right down to the frame, because every file or
+    folder written is named from them."""
+
+    SAMPLE = (
+        "frame:0    pts:0       pts_time:0\n"
+        "frame:1    pts:512     pts_time:0.04\n"
+        "lavfi.scene_score=0.012000\n"
+        "frame:2    pts:1024    pts_time:0.08\n"
+        "lavfi.scene_score=0.410000\n"
+        "frame:3    pts:1536    pts_time:0.12\n"
+        "lavfi.scene_score=0.003000\n")
+
+    # ── parsing ──
+    def test_scores_line_up_with_frame_numbers(self):
+        self.assertEqual(App._cut_parse_scene_scores(self.SAMPLE),
+                         [0.0, 0.012, 0.41, 0.003])
+
+    def test_the_first_frame_has_no_score_and_reads_as_zero(self):
+        """ffmpeg prints no score for frame 0 (nothing to compare it
+        with); it must still occupy index 0 or every shot shifts."""
+        sc = App._cut_parse_scene_scores(self.SAMPLE)
+        self.assertEqual(sc[0], 0.0)
+        self.assertEqual(len(sc), 4)
+
+    def test_empty_output_is_an_empty_list(self):
+        self.assertEqual(App._cut_parse_scene_scores(""), [])
+        self.assertEqual(App._cut_parse_scene_scores("garbage\n"), [])
+
+    # ── thresholding ──
+    def _scores(self, n, cuts):
+        sc = [0.0] * n
+        for i, v in cuts.items():
+            sc[i] = v
+        return sc
+
+    def test_cuts_start_shots_and_ranges_are_inclusive(self):
+        sc = self._scores(60, {20: 0.4, 35: 0.5})
+        self.assertEqual(App._cut_shots_from_scores(sc, 0.7),
+                         [(0, 19), (20, 34), (35, 59)])
+
+    def test_sensitivity_is_one_minus_the_ffmpeg_threshold(self):
+        sc = self._scores(60, {20: 0.4, 35: 0.5})
+        # sensitivity 0.5 -> threshold 0.5: the 0.4 cut no longer counts
+        self.assertEqual(App._cut_shots_from_scores(sc, 0.5),
+                         [(0, 34), (35, 59)])
+        self.assertEqual(App._cut_shots_from_scores(sc, 0.7),
+                         [(0, 19), (20, 34), (35, 59)])
+
+    def test_no_cuts_is_one_shot(self):
+        self.assertEqual(App._cut_shots_from_scores([0.0] * 5, 0.7), [(0, 4)])
+
+    def test_no_frames_is_no_shots(self):
+        self.assertEqual(App._cut_shots_from_scores([], 0.7), [])
+
+    def test_a_flash_frame_is_not_two_cuts(self):
+        """One white frame scores high going in AND coming out. It is
+        neither a shot of its own nor the start of a new one: the
+        frames after it are the same shot carrying on."""
+        sc = self._scores(60, {20: 0.4, 45: 1.0, 46: 1.0})
+        self.assertEqual(App._cut_shots_from_scores(sc, 0.7, min_len=2),
+                         [(0, 19), (20, 59)])
+
+    def test_a_short_run_at_the_very_end_joins_the_last_shot(self):
+        sc = self._scores(10, {9: 1.0})
+        self.assertEqual(App._cut_shots_from_scores(sc, 0.7, min_len=2),
+                         [(0, 9)])
+
+    def test_a_real_two_frame_shot_survives_at_min_len_2(self):
+        sc = self._scores(10, {4: 0.9, 6: 0.9})
+        self.assertEqual(App._cut_shots_from_scores(sc, 0.7, min_len=2),
+                         [(0, 3), (4, 5), (6, 9)])
+
+    def test_every_frame_belongs_to_exactly_one_shot(self):
+        import random
+        rnd = random.Random(7)
+        for _ in range(50):
+            n = rnd.randint(1, 80)
+            sc = [rnd.random() for _ in range(n)]
+            sc[0] = 0.0
+            shots = App._cut_shots_from_scores(sc, rnd.random(),
+                                               rnd.randint(1, 4))
+            covered = [i for a, b in shots for i in range(a, b + 1)]
+            self.assertEqual(covered, list(range(n)), (sc, shots))
+
+    # ── naming and the ffmpeg command ──
+    def test_shot_names_count_from_one(self):
+        self.assertEqual(App._cut_shot_name("reel", 1), "reel_shot1")
+        self.assertEqual(App._cut_shot_name("reel", 12), "reel_shot12")
+
+    def test_intra_codecs_are_recognised(self):
+        for c in ("prores", "prores_ks", "dnxhd", "mjpeg", "v210"):
+            self.assertTrue(App._cut_codec_is_intra(c), c)
+        for c in ("h264", "hevc", "mpeg4", "vp9", "", None):
+            self.assertFalse(App._cut_codec_is_intra(c), c)
+
+    def test_an_intra_source_is_stream_copied_between_its_own_frames(self):
+        """Lossless: the shot is the source's bytes. The in point sits
+        just past the first frame's time and the out point just short
+        of the frame after the last, so rounding cannot grab a
+        neighbour."""
+        cmd = App._cut_segment_cmd("in.mov", "out.mov", 24, 47, 24.0, True)
+        self.assertIn("copy", cmd)
+        self.assertNotIn("prores_ks", cmd)
+        ss = float(cmd[cmd.index("-ss") + 1])
+        to = float(cmd[cmd.index("-to") + 1])
+        self.assertGreater(ss, 24 / 24.0)
+        self.assertLess(ss, 25 / 24.0)
+        self.assertGreater(to, 47 / 24.0)
+        self.assertLess(to, 48 / 24.0)
+        # -ss before -i: the seek is on the input
+        self.assertLess(cmd.index("-ss"), cmd.index("-i"))
+
+    def test_a_long_gop_source_is_picked_by_frame_index(self):
+        """A copy would snap to the previous keyframe, so the frames
+        are selected by index and re-encoded as ProRes 422 HQ."""
+        cmd = App._cut_segment_cmd("in.mp4", "out.mov", 24, 47, 25.0, False)
+        vf = cmd[cmd.index("-vf") + 1]
+        self.assertIn("between(n,24,47)", vf)
+        self.assertIn("prores_ks", cmd)
+        self.assertEqual(cmd[cmd.index("-profile:v") + 1], "3")
+        self.assertNotIn("copy", cmd)
+
+    # ── wiring ──
+    def test_the_toggle_has_a_fourth_mode(self):
+        import inspect
+        body = inspect.getsource(App._tab_exr)
+        self.assertIn('self.exr_tog_d = self._mkbtn(tog, "CUT"', body)
+        i = body.index("self.exr_f_cut = tk.Frame")
+        self.assertIn("self.exr_f_cut.grid_remove()", body[i:i + 300])
+
+    def test_the_switcher_knows_cut(self):
+        import inspect
+        body = inspect.getsource(App._exr_set_mode)
+        self.assertIn('"cut": self.exr_f_cut', body)
+        self.assertIn('"cut": self.exr_tog_d', body)
+
+    def test_the_timeline_is_shared_and_dispatches_by_mode(self):
+        import inspect
+        body = inspect.getsource(App._tab_exr)
+        self.assertIn("get_frame_color=self._exr_frame_color", body)
+        self.assertIn("self._exr_timeline_select", body)
+        for fn in (App._exr_frame_color, App._exr_timeline_select):
+            self.assertIn('== "cut"', inspect.getsource(fn))
+
+    def test_the_viewer_routes_to_the_cut_preview(self):
+        import inspect
+        body = inspect.getsource(App._e2m_draw_preview)
+        self.assertIn("self._cut_draw_preview()", body)
+
+    def test_the_slider_rethresholds_without_touching_footage(self):
+        import inspect
+        body = inspect.getsource(App._cut_rethreshold)
+        for forbidden in ("subprocess", "ffmpeg", "_pv_frame", "open("):
+            self.assertNotIn(forbidden, body)
+
+    def test_the_sequence_cut_carries_the_colour_sidecar(self):
+        import inspect
+        body = inspect.getsource(App._cut_worker)
+        self.assertIn("ADW_CS_SIDECAR", body)
+        self.assertIn("shutil.copy2", body)
+
+    def test_the_default_sensitivity_is_ffmpegs_threshold(self):
+        self.assertAlmostEqual(1.0 - App.CUT_DEFAULT_SENSITIVITY, 0.30)
+
+
 class TestMovExrTabLayoutAndAnalysis(unittest.TestCase):
     """MOV <-> EXR: panels that resize like the other modules', a real
     preview for MOV -> EXR, Expansion Studio's histogram, Upscale
