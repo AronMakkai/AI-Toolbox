@@ -18167,7 +18167,7 @@ class TestCutMode(unittest.TestCase):
     def test_the_toggle_has_a_fourth_mode(self):
         import inspect
         body = inspect.getsource(App._tab_exr)
-        self.assertIn('self.exr_tog_d = self._mkbtn(tog, "CUT"', body)
+        self.assertIn('self.exr_tog_d = self._mkbtn(tog, "And..CUT!"', body)
         i = body.index("self.exr_f_cut = tk.Frame")
         self.assertIn("self.exr_f_cut.grid_remove()", body[i:i + 300])
 
