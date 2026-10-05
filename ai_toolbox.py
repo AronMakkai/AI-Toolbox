@@ -7051,16 +7051,20 @@ class App(tk.Tk):
             return 0
 
     @classmethod
-    def _cut_segment_cmd(cls, src, dst, first, last, fps, intra):
+    def _cut_segment_cmd(cls, src, dst, first, last, fps, intra,
+                         t_first=None, t_last=None):
         """ffmpeg argv for one shot, frames `first`..`last` inclusive.
 
         intra=True (ProRes, DNxHD, ...): every frame is a keyframe, so
-        a stream copy between the two timestamps is exact AND
-        lossless -- the shot is the source's own bytes, no generation
-        lost. The in point sits a hundredth of a frame past the first
-        frame's time and the out point a hundredth short of the frame
-        after the last, so float rounding can never land on the
-        neighbouring frame.
+        a stream copy is exact AND lossless -- the shot is the source's
+        own bytes, no generation lost. The form matters: a fast input
+        seek to a second before the shot, then OUTPUT-side -ss/-to on
+        the file's own clock (-copyts). Input-side -to was measured
+        from the first packet copied, which on a trimmed movie is a
+        hidden pre-roll frame, so every shot came out a frame short;
+        output-side -ss drops packets before it, so the in point sits
+        half a frame BEFORE the first frame and the out point half a
+        frame after the last. The output's clock is then re-zeroed.
 
         Otherwise (H.264, HEVC, ...) a copy would snap to the previous
         keyframe, so the frames are picked by index with `select` and
@@ -7068,10 +7072,17 @@ class App(tk.Tk):
         bounds either way."""
         fps = float(fps)
         if intra:
-            t0 = (first + 0.01) / fps
-            t1 = (last + 0.99) / fps
-            return ["ffmpeg", "-y", "-ss", f"{t0:.6f}", "-to", f"{t1:.6f}",
-                    "-i", src, "-map", "0", "-c", "copy", dst]
+            # t_first / t_last: the frames' own timestamps from the
+            # analysis (a trimmed movie does not start at t=0); the
+            # frame rate only when there are none.
+            tf = t_first if t_first is not None else first / fps
+            tl = t_last if t_last is not None else last / fps
+            t0 = tf - 0.5 / fps
+            t1 = tl + 0.5 / fps
+            return ["ffmpeg", "-y", "-ss", f"{max(0.0, t0 - 1.0):.6f}",
+                    "-i", src, "-copyts", "-ss", f"{t0:.6f}", "-to", f"{t1:.6f}",
+                    "-map", "0", "-c", "copy",
+                    "-avoid_negative_ts", "make_zero", dst]
         t0 = first / fps
         t1 = (last + 1) / fps
         return ["ffmpeg", "-y", "-i", src,
@@ -7117,6 +7128,8 @@ class App(tk.Tk):
         self._cut_shots = []
         self._cut_joins = set()
         self._cut_splits = set()
+        self._cut_pts = []
+        self._cut_pv_lru = __import__("collections").OrderedDict()
         self._cut_out_dir = None
         self.cut_path_lbl.configure(text=path, fg=G)
         base = os.path.basename(path.rstrip(os.sep))
@@ -7174,10 +7187,12 @@ class App(tk.Tk):
                     q = os.path.join(self.cut_input, n).replace("'", "'\\''")
                     fh.write(f"file '{q}'\n")
             inp = ["-r", "24", "-f", "concat", "-safe", "0", "-i", lst]
-        return (["ffmpeg", "-nostats", "-hide_banner", "-v", "error"] + inp
+        # -v info, not error: showinfo reports at info level and its
+        # per-frame timestamps are what the viewer seeks to.
+        return (["ffmpeg", "-nostats", "-hide_banner", "-v", "info"] + inp
                 + ["-an", "-vf",
                    f"scale={self.CUT_THUMB_W}:{self.CUT_THUMB_H}:flags=area,"
-                   "format=gray",
+                   "format=gray,showinfo",
                    "-f", "rawvideo", "-pix_fmt", "gray", "-"])
 
     def _cut_preview_worker(self):
@@ -7193,6 +7208,27 @@ class App(tk.Tk):
                                     stdout=subprocess.PIPE,
                                     stderr=subprocess.PIPE)
             self._cut_proc = proc
+            # showinfo prints every decoded frame's timestamp on stderr.
+            # Those, not frame_index / fps, are what the viewer and the
+            # stream-copy cut seek to: a movie trimmed out of a longer
+            # one keeps the original's timestamps (its first frame is
+            # not at t=0, and frames before t=0 are not decoded at
+            # all), so a time computed from the index landed the viewer
+            # several frames from the frame the analysis scored -- a
+            # cut found correctly then LOOKED missed. Read on a thread
+            # so neither pipe can fill and stall the other.
+            import re as _re
+            pts, err_tail = [], []
+            _pts_re = _re.compile(r"pts_time:\s*(-?[0-9.]+)")
+            def _drain():
+                for raw in proc.stderr:
+                    line = raw.decode("utf-8", "replace")
+                    m = _pts_re.search(line)
+                    if m and "showinfo" in line:
+                        pts.append(float(m.group(1)))
+                    elif "showinfo" not in line and line.strip():
+                        err_tail.append(line.strip())
+            _t = threading.Thread(target=_drain, daemon=True); _t.start()
             # Read frame by frame as they come: a reel is minutes of
             # decoding, and a bar that moves is the difference between
             # "working" and "hung". Each frame is one fixed-size block.
@@ -7214,15 +7250,23 @@ class App(tk.Tk):
                 if self._cut_cancel:
                     proc.kill()
                     break
-            err = proc.stderr.read().decode("utf-8", "replace")
             proc.wait()
+            _t.join(timeout=10)
             self._cut_proc = None
             if self._cut_cancel:
                 self.after(0, lambda: self.log(self.elog, "Cancelled.", "hi"))
                 return
             if not scores:
-                tail = (err or "").strip().splitlines()[-1:] or ["no output"]
+                tail = err_tail[-1:] or ["no output"]
                 raise RuntimeError(f"ffmpeg decoded nothing — {tail[0]}")
+            # One timestamp per scored frame; if showinfo and the
+            # pixel stream ever disagree in count, fall back to the
+            # frame rate for the missing ones rather than misalign.
+            fps = float(self._cut_fps or 24.0)
+            if len(pts) < len(scores):
+                base = pts[-1] if pts else 0.0
+                pts += [base + (k + 1) / fps for k in range(len(scores) - len(pts))]
+            self._cut_pts = pts[:len(scores)]
             if self.cut_is_movie:
                 names = [str(i + 1) for i in range(len(scores))]
             else:
@@ -7420,13 +7464,16 @@ class App(tk.Tk):
         out = os.path.join(tempfile.gettempdir(), "adw_cut_preview")
         os.makedirs(out, exist_ok=True)
         png = os.path.join(out, f"f{i:06d}.png")
-        t = i / float(self._cut_fps or 24.0)
-        # Seek to just before the frame, then pick it by index from
-        # there: -ss before -i is fast, and the select makes it exact.
+        t = self._cut_frame_time(i)
+        half = 0.5 / float(self._cut_fps or 24.0)
+        # Seek to just before the frame (fast: -ss before -i), keep
+        # the file's own timestamps (-copyts, so `t` in the filter is
+        # the same clock the analysis recorded), and take the first
+        # frame at or after the recorded time.
         subprocess.run(["ffmpeg", "-y", "-v", "error",
                         "-ss", f"{max(0.0, t - 1.0):.6f}",
-                        "-i", self.cut_input,
-                        "-vf", f"select='gte(t,{t:.6f})',scale=640:-2",
+                        "-i", self.cut_input, "-copyts",
+                        "-vf", f"select='gte(t,{t - half:.6f})',scale=640:-2",
                         "-frames:v", "1", png], capture_output=True)
         img = Image.open(png).convert("RGB") if os.path.exists(png) else None
         if img is not None:
@@ -7434,6 +7481,14 @@ class App(tk.Tk):
             while len(lru) > 32:
                 lru.popitem(last=False)
         return img
+
+    def _cut_frame_time(self, i):
+        """The decoded frame's own timestamp, from the analysis; the
+        frame rate only before an analysis exists."""
+        pts = getattr(self, "_cut_pts", None) or []
+        if 0 <= i < len(pts):
+            return float(pts[i])
+        return i / float(self._cut_fps or 24.0)
 
     def _cut_draw_preview(self):
         """The viewer in CUT mode: the selected frame and the one before
@@ -7524,7 +7579,8 @@ class App(tk.Tk):
                     self.after(0, lambda k=k, n=n: self.progress(
                         (k - 1) / n, f"Writing shot {k} / {n}"))
                     r = subprocess.run(self._cut_segment_cmd(
-                        src, dst, a, b, self._cut_fps, intra),
+                        src, dst, a, b, self._cut_fps, intra,
+                        self._cut_frame_time(a), self._cut_frame_time(b)),
                         capture_output=True, text=True)
                     if r.returncode != 0:
                         tail = (r.stderr or "").strip().splitlines()[-1:]
