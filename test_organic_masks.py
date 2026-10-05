@@ -17852,30 +17852,83 @@ class TestCutMode(unittest.TestCase):
     shot ranges are right down to the frame, because every file or
     folder written is named from them."""
 
-    SAMPLE = (
-        "frame:0    pts:0       pts_time:0\n"
-        "frame:1    pts:512     pts_time:0.04\n"
-        "lavfi.scene_score=0.012000\n"
-        "frame:2    pts:1024    pts_time:0.08\n"
-        "lavfi.scene_score=0.410000\n"
-        "frame:3    pts:1536    pts_time:0.12\n"
-        "lavfi.scene_score=0.003000\n")
+    # ── the frame-change metric ──
+    @staticmethod
+    def _thumb(fn):
+        """A 96x54 grey thumbnail from a function of (y, x) in 0..1."""
+        import numpy as np
+        H, W = App.CUT_THUMB_H, App.CUT_THUMB_W
+        yy, xx = np.mgrid[0:H, 0:W]
+        v = fn(yy / (H - 1), xx / (W - 1))
+        return (np.clip(v, 0, 1) * 255).astype(np.uint8)
 
-    # ── parsing ──
-    def test_scores_line_up_with_frame_numbers(self):
-        self.assertEqual(App._cut_parse_scene_scores(self.SAMPLE),
-                         [0.0, 0.012, 0.41, 0.003])
+    def _scene_a(self):
+        import numpy as np
+        return self._thumb(lambda y, x: 0.5 + 0.4 * np.sin(6 * x + 3 * y))
 
-    def test_the_first_frame_has_no_score_and_reads_as_zero(self):
-        """ffmpeg prints no score for frame 0 (nothing to compare it
-        with); it must still occupy index 0 or every shot shifts."""
-        sc = App._cut_parse_scene_scores(self.SAMPLE)
-        self.assertEqual(sc[0], 0.0)
-        self.assertEqual(len(sc), 4)
+    def _scene_b(self):
+        import numpy as np
+        return self._thumb(lambda y, x: 0.5 + 0.4 * np.cos(9 * y - 4 * x))
 
-    def test_empty_output_is_an_empty_list(self):
-        self.assertEqual(App._cut_parse_scene_scores(""), [])
-        self.assertEqual(App._cut_parse_scene_scores("garbage\n"), [])
+    def test_the_same_picture_scores_nothing(self):
+        a = self._scene_a()
+        self.assertEqual(App._cut_frame_change(a, a), 0.0)
+
+    def test_a_different_picture_scores_high(self):
+        self.assertGreater(App._cut_frame_change(self._scene_a(),
+                                                 self._scene_b()), 0.8)
+
+    def test_darkness_does_not_change_the_answer(self):
+        """The reported failure: a night exterior. ffmpeg's absolute
+        difference gave 0.03 for an obvious cut; this must read the
+        same dark as bright."""
+        a, b = self._scene_a(), self._scene_b()
+        dark = lambda im: (im.astype(float) * 0.12).astype("uint8")
+        bright = App._cut_frame_change(a, b)
+        self.assertGreater(App._cut_frame_change(dark(a), dark(b)),
+                           bright - 0.15)
+        self.assertLess(App._cut_frame_change(dark(a), dark(a)), 0.05)
+
+    def test_an_exposure_ramp_is_not_a_cut(self):
+        """The same picture, scaled: a fade or a flicker."""
+        a = self._scene_a()
+        half = (a.astype(float) * 0.5).astype("uint8")
+        self.assertLess(App._cut_frame_change(a, half), 0.1)
+
+    def test_letterbox_bars_and_a_burn_in_do_not_hide_a_cut(self):
+        """Black bars identical on both sides of a cut, and a bright
+        timecode in the same place on both frames, were the two things
+        that made the dark reel's cuts vanish."""
+        a, b = self._scene_a(), self._scene_b()
+        def reel(im):
+            d = (im.astype(float) * 0.12).astype("uint8")
+            d[:8] = 0; d[-8:] = 0
+            d[10:13, 4:30] = 220           # the burn-in
+            return d
+        bare = App._cut_frame_change(a, b)
+        self.assertGreater(App._cut_frame_change(reel(a), reel(b)),
+                           bare - 0.25)
+        self.assertLess(App._cut_frame_change(reel(a), reel(a)), 0.05)
+
+    def test_black_to_black_is_nothing_and_black_to_picture_is_a_cut(self):
+        import numpy as np
+        black = np.zeros((App.CUT_THUMB_H, App.CUT_THUMB_W), np.uint8)
+        self.assertEqual(App._cut_frame_change(black, black), 0.0)
+        self.assertEqual(App._cut_frame_change(black, self._scene_a()), 1.0)
+        self.assertEqual(App._cut_frame_change(self._scene_a(), black), 1.0)
+
+    def test_a_small_pan_scores_low(self):
+        import numpy as np
+        a = self._scene_a()
+        panned = np.roll(a, 2, axis=1)
+        self.assertLess(App._cut_frame_change(a, panned), 0.2)
+
+    def test_ffmpeg_is_asked_for_grey_thumbnails(self):
+        import inspect
+        body = inspect.getsource(App._cut_scene_cmd)
+        self.assertIn('"-f", "rawvideo"', body)
+        self.assertIn('"-pix_fmt", "gray"', body)
+        self.assertIn("CUT_THUMB_W", body)
 
     # ── thresholding ──
     def _scores(self, n, cuts):
@@ -17979,7 +18032,7 @@ class TestCutMode(unittest.TestCase):
                          [(0, 49), (50, 99)])
 
     def test_noise_under_the_floor_is_never_a_cut(self):
-        sc = [0.0] + [0.03] * 20 + [0.035] + [0.03] * 20
+        sc = [0.0] + [0.01] * 20 + [0.015] + [0.01] * 20
         self.assertEqual(App._cut_strengths(sc)[21], 0.0)
 
     # ── hand edits ──
@@ -18139,7 +18192,7 @@ class TestCutMode(unittest.TestCase):
     def test_the_analysis_streams_progress(self):
         import inspect
         body = inspect.getsource(App._cut_preview_worker)
-        self.assertIn("for line in proc.stdout:", body)
+        self.assertIn("proc.stdout.read(nbytes)", body)
         self.assertNotIn("communicate()", body)
 
 
