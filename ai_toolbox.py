@@ -3763,8 +3763,12 @@ class App(tk.Tk):
            "so frame numbers are kept. Everything lands in a versioned "
            "ADW/CUT_vNN folder.\n\n", "body")
         _w("Analyse movie\n", "param")
-        _w("One ffmpeg pass scores how much of the picture changed on "
-           "every frame (its scene score, 0\u20131). The frames are "
+        _w("One ffmpeg pass decodes the movie at thumbnail size and "
+           "every frame is compared with the one before it by how much "
+           "the picture changed \u2014 by its structure, not its "
+           "brightness, so a cut on a night exterior with letterbox "
+           "bars and a timecode burn-in reads as clearly as one in "
+           "daylight. The frames are "
            "then drawn on the timeline in alternating shades, one shade "
            "per shot, with the first frame of each shot lit blue; the "
            "list gives every shot's frame range. Click a frame to see "
@@ -6412,18 +6416,18 @@ class App(tk.Tk):
 
         # ── Mode D: CUT ───────────────────────────────────────────────
         # A long delivery -- a whole reel as one movie, or one EXR
-        # sequence of several shots -- split at its cuts. ffmpeg scores
-        # every frame change once (the scene score, 0..1); the slider
-        # then only re-thresholds the stored scores, so dragging it
-        # redraws the shots on the timeline live without another pass
-        # over the footage.
+        # sequence of several shots -- split at its cuts. ffmpeg decodes
+        # the footage once as grey thumbnails and every frame change is
+        # scored (see _cut_frame_change); the slider then only
+        # re-thresholds the stored scores, so dragging it redraws the
+        # shots on the timeline live without another pass.
         self.exr_f_cut = tk.Frame(_mh, bg=BG)
         self.exr_f_cut.grid(row=0, column=0, sticky="ew")
         self.exr_f_cut.grid_remove()
         self.cut_input = None          # movie path or sequence folder
         self.cut_is_movie = False
         self.cut_names = []            # sequence frame names, or decoded
-        self._cut_scores = None        # per-frame scene score, after Preview
+        self._cut_scores = None        # per-frame change score, after Analyse
         self._cut_shots = []           # [(first, last)] 0-based inclusive
         self._cut_busy = False
         self._cut_cancel = False
@@ -6860,41 +6864,63 @@ class App(tk.Tk):
     CUT_INTRA_CODECS = ("prores", "dnxhd", "mjpeg", "rawvideo", "qtrle",
                         "ffv1", "huffyuv", "v210", "cfhd", "hap")
 
-    @staticmethod
-    def _cut_parse_scene_scores(text):
-        """ffmpeg `metadata=print` output -> [score per frame].
+    CUT_THUMB_W, CUT_THUMB_H = 96, 54   # analysis size; 5 KB a frame
 
-        Lines come in pairs, `frame:N ...` then `lavfi.scene_score=S`.
-        Frame 0 has no previous frame and prints no score; any frame
-        missing a score reads as 0.0 so the list length always equals
-        the frame count."""
-        import re
-        scores = {}
-        cur = None
-        for line in text.splitlines():
-            m = re.match(r"\s*frame:(\d+)", line)
-            if m:
-                cur = int(m.group(1))
-                scores.setdefault(cur, 0.0)
-                continue
-            m = re.search(r"lavfi\.scene_score=([0-9.eE+-]+)", line)
-            if m and cur is not None:
-                try:
-                    scores[cur] = float(m.group(1))
-                except ValueError:
-                    pass
-        if not scores:
-            return []
-        n = max(scores) + 1
-        return [scores.get(i, 0.0) for i in range(n)]
+    @classmethod
+    def _cut_frame_change(cls, prev, cur):
+        """How different two consecutive thumbnails are, 0..1, in a way
+        that does not depend on how bright the picture is.
+
+        ffmpeg's own `scene` score is an absolute pixel difference
+        over the full 0-255 range. On a night exterior with letterbox
+        bars most of the frame is black on both sides of a cut, so a
+        cut that is obvious to the eye scored 0.03 -- under the noise
+        floor -- and no sensitivity could reach it.
+
+        This is 1 minus the rank correlation of the two frames'
+        pixels: whether the PICTURE is the same, not how much light
+        changed. Ranks rather than values because an editorial reel
+        carries burn-ins -- a timecode, a shot name -- that on a dark
+        frame are the brightest thing in it and identical on both
+        sides of a cut; by value they dominate and hide the cut, by
+        rank they are a few top places and do not. Rows and columns
+        that are black in both frames (letterbox and pillarbox bars)
+        are cropped off first for the same reason.
+
+        A flat frame (black, a hold on white) has no picture to
+        correlate: flat against flat is 0, flat against anything else
+        is 1 -- the cut into or out of black."""
+        import numpy as np
+        a = np.asarray(prev, dtype=np.uint8).reshape(cls.CUT_THUMB_H, cls.CUT_THUMB_W)
+        b = np.asarray(cur, dtype=np.uint8).reshape(cls.CUT_THUMB_H, cls.CUT_THUMB_W)
+        both = np.maximum(a, b)
+        rows = np.where(both.max(axis=1) > 8)[0]
+        cols = np.where(both.max(axis=0) > 8)[0]
+        if len(rows) >= 4 and len(cols) >= 4:
+            a = a[rows[0]:rows[-1] + 1, cols[0]:cols[-1] + 1]
+            b = b[rows[0]:rows[-1] + 1, cols[0]:cols[-1] + 1]
+        a = a.astype(np.float32).ravel(); b = b.astype(np.float32).ravel()
+        fa, fb = a.std() < 3.0, b.std() < 3.0     # ~3 grey levels of contrast
+        if fa and fb:
+            return 0.0
+        if fa or fb:
+            return 1.0
+
+        def _ranks(x):
+            r = np.empty(x.size, dtype=np.float32)
+            r[np.argsort(x, kind="stable")] = np.arange(x.size, dtype=np.float32)
+            return r - (x.size - 1) / 2.0
+        ra, rb = _ranks(a), _ranks(b)
+        corr = float((ra * rb).sum() / np.sqrt((ra * ra).sum() * (rb * rb).sum()))
+        return max(0.0, min(1.0, 1.0 - corr))
 
     CUT_BASELINE_WINDOW = 12     # frames either side for the local baseline
     CUT_SPIKE_RATIO = 8.0        # this many times its baseline = full strength
-    CUT_SCORE_FLOOR = 0.04       # below this nothing is a cut, however quiet
+    CUT_SCORE_FLOOR = 0.02       # below this nothing is a cut, however quiet
 
     @classmethod
     def _cut_strengths(cls, scores):
-        """Per-frame cut strength, 0..1, from the raw scene scores.
+        """Per-frame cut strength, 0..1, from the raw change scores.
 
         The raw score alone does not work on real footage: a handheld
         or fast-cut sequence scores 0.2-0.3 on EVERY frame from motion
@@ -7115,7 +7141,7 @@ class App(tk.Tk):
         threading.Thread(target=self._cut_preview_worker, daemon=True).start()
 
     def _cut_scene_cmd(self):
-        """One ffmpeg pass that prints the scene score of every frame.
+        """One ffmpeg pass that streams every frame as a grey thumbnail.
 
         A movie is read directly. A folder of frames goes through the
         concat demuxer from a list file, which takes any mix of names
@@ -7132,8 +7158,9 @@ class App(tk.Tk):
             inp = ["-r", "24", "-f", "concat", "-safe", "0", "-i", lst]
         return (["ffmpeg", "-nostats", "-hide_banner", "-v", "error"] + inp
                 + ["-an", "-vf",
-                   "select='gte(scene,0)',metadata=print:file=-",
-                   "-f", "null", "-"])
+                   f"scale={self.CUT_THUMB_W}:{self.CUT_THUMB_H}:flags=area,"
+                   "format=gray",
+                   "-f", "rawvideo", "-pix_fmt", "gray", "-"])
 
     def _cut_preview_worker(self):
         try:
@@ -7142,35 +7169,41 @@ class App(tk.Tk):
             self.after(0, lambda: self.progress(None, "Analysing…"))
             self.after(0, lambda: self.log(
                 self.elog, "ffmpeg is scoring every frame change…", "dim"))
+            import numpy as np
             proc = subprocess.Popen(self._cut_scene_cmd(),
                                     stdout=subprocess.PIPE,
-                                    stderr=subprocess.PIPE, text=True)
+                                    stderr=subprocess.PIPE)
             self._cut_proc = proc
-            # Read as it comes: a reel is minutes of decoding, and a
-            # bar that moves is the difference between "working" and
-            # "hung". Every frame prints a `frame:N` line.
-            lines, seen, last = [], 0, 0
-            for line in proc.stdout:
-                lines.append(line)
-                if line.startswith("frame:"):
-                    seen += 1
-                    if total and seen - last >= max(1, total // 200):
-                        last = seen
-                        self.after(0, lambda a=seen, b=total: self.progress(
-                            min(0.99, a / b), f"Analysing  {a} / {b}"))
+            # Read frame by frame as they come: a reel is minutes of
+            # decoding, and a bar that moves is the difference between
+            # "working" and "hung". Each frame is one fixed-size block.
+            nbytes = self.CUT_THUMB_W * self.CUT_THUMB_H
+            scores, prev, last = [], None, 0
+            while True:
+                buf = proc.stdout.read(nbytes)
+                if len(buf) < nbytes:
+                    break
+                cur = np.frombuffer(buf, dtype=np.uint8)
+                scores.append(0.0 if prev is None
+                              else self._cut_frame_change(prev, cur))
+                prev = cur
+                seen = len(scores)
+                if total and seen - last >= max(1, total // 200):
+                    last = seen
+                    self.after(0, lambda a=seen, b=total: self.progress(
+                        min(0.99, a / b), f"Analysing  {a} / {b}"))
                 if self._cut_cancel:
                     proc.kill()
                     break
-            err = proc.stderr.read()
+            err = proc.stderr.read().decode("utf-8", "replace")
             proc.wait()
             self._cut_proc = None
             if self._cut_cancel:
                 self.after(0, lambda: self.log(self.elog, "Cancelled.", "hi"))
                 return
-            scores = self._cut_parse_scene_scores("".join(lines))
             if not scores:
                 tail = (err or "").strip().splitlines()[-1:] or ["no output"]
-                raise RuntimeError(f"ffmpeg scored nothing — {tail[0]}")
+                raise RuntimeError(f"ffmpeg decoded nothing — {tail[0]}")
             if self.cut_is_movie:
                 names = [str(i + 1) for i in range(len(scores))]
             else:
