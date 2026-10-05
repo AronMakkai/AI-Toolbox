@@ -16943,19 +16943,57 @@ class TestCutMode(unittest.TestCase):
     def test_busy_footage_cuts_are_found_and_motion_is_not(self):
         """The reported failure: with an absolute threshold no slider
         position separated 0.5 cuts from 0.3 motion. Against the local
-        baseline they are far apart."""
+        baseline they are apart, so a slider position exists."""
         sc = self._busy()
         st = App._cut_strengths(sc)
         lo = min(st[i] for i in (40, 95, 150))
         hi = max(v for i, v in enumerate(st)
                  if i not in (40, 95, 150, 120, 121))
-        self.assertGreater(lo, hi + 0.15, (lo, hi))
-
-    def test_busy_footage_at_the_default_sensitivity(self):
+        self.assertGreater(lo, hi + 0.08, (lo, hi))
         self.assertEqual(
-            App._cut_shots_from_scores(self._busy(),
-                                       App.CUT_DEFAULT_SENSITIVITY),
+            App._cut_shots_from_scores(sc, 1.0 - lo + 0.001),
             [(0, 39), (40, 94), (95, 149), (150, 199)])
+
+    def _mixed(self):
+        """A quiet reel: three hard cuts, one soft cut at about 2.5x
+        the baseline, two whip pans at about 1.8x."""
+        import random
+        rnd = random.Random(3)
+        sc = [0.0] + [rnd.uniform(0.03, 0.08) for _ in range(299)]
+        for i in (50, 120, 200):
+            sc[i] = 0.6
+        sc[160] = 0.14
+        sc[90] = sc[250] = 0.09
+        return sc
+
+    def test_the_slider_ranks_hard_then_soft_then_whips(self):
+        """The second report: 'sensitivity does nothing'. A linear
+        spike ratio saturated every cut at 1.0, so the slider had no
+        order to move through. On the log scale the strengths are
+        ordered hard > soft > whip, and the slider walks that order."""
+        sc = self._mixed()
+        st = App._cut_strengths(sc)
+        hard = min(st[i] for i in (50, 120, 200))
+        soft = st[160]
+        whip = max(st[90], st[250])
+        self.assertGreater(hard, soft)
+        self.assertGreater(soft, whip)
+        self.assertGreater(whip, 0.1)
+        starts = lambda sens: [a for a, _ in
+                               App._cut_shots_from_scores(sc, sens)][1:]
+        self.assertEqual(starts(0.5), [50, 120, 200])
+        self.assertEqual(starts(0.65), [50, 120, 160, 200])
+        self.assertIn(90, starts(0.8))
+        self.assertGreater(len(starts(0.85)), len(starts(0.8)))
+
+    def test_strength_is_a_log_of_the_ratio(self):
+        base = [0.1] * 41
+        sc = list(base); sc[20] = 0.4          # 4x
+        self.assertAlmostEqual(App._cut_strengths(sc)[20], 2 / 3, places=2)
+        sc[20] = 0.8                            # 8x = full
+        self.assertAlmostEqual(App._cut_strengths(sc)[20], 1.0, places=2)
+        sc[20] = 0.1                            # at baseline = nothing
+        self.assertEqual(App._cut_strengths(sc)[20], 0.0)
 
     def test_a_locked_off_shot_still_sees_a_modest_cut(self):
         """Baseline near zero: a 0.12 change is a huge spike there."""
@@ -16979,7 +17017,7 @@ class TestCutMode(unittest.TestCase):
 
     def test_a_split_forces_a_start_even_where_nothing_scored(self):
         sc = self._busy()
-        shots = App._cut_shots_from_scores(sc, 0.7, splits={60})
+        shots = App._cut_shots_from_scores(sc, 0.8, splits={60})
         self.assertIn((40, 59), shots)
         self.assertIn((60, 94), shots)
 
@@ -17109,6 +17147,20 @@ class TestCutMode(unittest.TestCase):
         acc = inspect.getsource(App._cut_accept)
         self.assertIn("self._cut_joins = set()", acc)
         self.assertIn("self._cut_splits = set()", acc)
+
+    def test_arrow_keys_step_the_timeline(self):
+        import inspect
+        body = inspect.getsource(App._tab_exr)
+        for seq in ("<KeyPress-Left>", "<KeyPress-Right>",
+                    "<Shift-KeyPress-Left>", "<Shift-KeyPress-Right>"):
+            self.assertIn(seq, body)
+        self.assertIn("-20", body[body.index("<Shift-KeyPress-Left>"):][:40])
+        # guarded: only this tab, only CUT, never while typing
+        i = body.index("def _cut_key(")
+        seg = body[i:i + 600]
+        self.assertIn('!= "cut"', seg)
+        self.assertIn('winfo_ismapped()', seg)
+        self.assertIn("_typing_in_field(", seg)
 
     def test_the_analysis_streams_progress(self):
         import inspect

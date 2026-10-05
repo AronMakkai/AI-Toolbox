@@ -3780,6 +3780,12 @@ class App(tk.Tk):
            "is being cut. A single flash frame is never its own shot: "
            "a run shorter than two frames is folded back into the shot "
            "it interrupted.\n\n", "body_indent")
+        _w("Stepping\n", "param")
+        _w("\u2190 \u2192 step one frame, Shift+\u2190 \u2192 step twenty, "
+           "with the viewer following. Gold frames on the timeline are "
+           "candidates below the current Sensitivity; the log line for "
+           "a clicked frame says what Sensitivity would take it.\n\n",
+           "body_indent")
         _w("Merge with next  /  Split here  /  Reset edits\n", "param")
         _w("Hand corrections on top of the automatic result. Select a "
            "shot in the list and Merge with next joins it to the one "
@@ -6487,6 +6493,22 @@ class App(tk.Tk):
             _b.bind("<Button-1>", lambda e, c=_cmd: c())
             self._tooltip(_tip)(_b)
 
+        # Arrow keys step the timeline: one frame, or 20 with Shift.
+        # Guarded to this tab in CUT mode, and silent while typing.
+        def _cut_key(delta):
+            def _h(e):
+                if (getattr(self, "exr_mode", "") != "cut"
+                        or not self.tabs["exr"].winfo_ismapped()
+                        or self._typing_in_field(self.focus_get())):
+                    return
+                self._cut_step(delta)
+                return "break"
+            return _h
+        for _seq, _d in (("<KeyPress-Left>", -1), ("<KeyPress-Right>", +1),
+                         ("<Shift-KeyPress-Left>", -20),
+                         ("<Shift-KeyPress-Right>", +20)):
+            self.bind_all(_seq, _cut_key(_d), add="+")
+
         self.cut_out = self._outinfo(self.exr_f_cut)
         self.cut_btn = self._runbtn(self.exr_f_cut, "Cut into shots",
                                     self._cut_run)
@@ -6867,7 +6889,7 @@ class App(tk.Tk):
         return [scores.get(i, 0.0) for i in range(n)]
 
     CUT_BASELINE_WINDOW = 12     # frames either side for the local baseline
-    CUT_SPIKE_RATIO = 3.0        # this many times its baseline = full strength
+    CUT_SPIKE_RATIO = 8.0        # this many times its baseline = full strength
     CUT_SCORE_FLOOR = 0.04       # below this nothing is a cut, however quiet
 
     @classmethod
@@ -6880,12 +6902,17 @@ class App(tk.Tk):
         single threshold separates the two. What distinguishes a cut
         is that it is a SPIKE: far above the frames around it, whatever
         their level. So each frame is measured against the median of
-        its neighbours: at its baseline the strength is 0, at
-        CUT_SPIKE_RATIO times its baseline it is 1. The baseline has a
-        floor of 0.01, so on a locked-off shot (baseline ~0) a modest
+        its neighbours, on a LOG scale so the slider has something to
+        rank: at its baseline the strength is 0, at twice it 0.25, at
+        four times 0.67, at CUT_SPIKE_RATIO (8) times 1. A linear
+        ratio saturated -- every real cut read 1.0 and everything else
+        0 -- which is why the slider appeared to do nothing: it had no
+        order of candidates to move through. The baseline has a floor
+        of 0.01, so on a locked-off shot (baseline ~0) a modest
         absolute change is still a strong spike; scores under
         CUT_SCORE_FLOOR are never cuts at all, because there the ratio
         would be measuring noise."""
+        import math
         n = len(scores)
         if n == 0:
             return []
@@ -6899,7 +6926,9 @@ class App(tk.Tk):
             if sc < cls.CUT_SCORE_FLOOR:
                 continue
             ratio = sc / max(base, 0.01)
-            out[i] = max(0.0, min(1.0, (ratio - 1.0) / (cls.CUT_SPIKE_RATIO - 1.0)))
+            if ratio <= 1.0:
+                continue
+            out[i] = min(1.0, math.log2(ratio) / math.log2(cls.CUT_SPIKE_RATIO))
         return out
 
     @classmethod
@@ -6920,6 +6949,8 @@ class App(tk.Tk):
         thr = 1.0 - float(sensitivity)
         strength = cls._cut_strengths(scores)
         joins, splits = set(joins), set(splits)
+        if thr <= 0.0:
+            thr = 1e-9    # sensitivity 1.0 still needs SOME spike
         starts = [0] + sorted(
             i for i in range(1, n)
             if (strength[i] >= thr and i not in joins) or i in splits)
@@ -7182,6 +7213,7 @@ class App(tk.Tk):
         self._cut_shots = self._cut_shots_from_scores(
             self._cut_scores, float(self.cut_sens_var.get()),
             self.CUT_MIN_SHOT_FRAMES, self._cut_joins, self._cut_splits)
+        self._cut_strength = self._cut_strengths(self._cut_scores)
         n = len(self._cut_shots)
         edits = len(self._cut_joins) + len(self._cut_splits)
         self.cut_summary_lbl.configure(
@@ -7196,8 +7228,8 @@ class App(tk.Tk):
                 "end", f"shot{k}   {a + 1} – {b + 1}   ({b - a + 1} fr)")
         if getattr(self, "exr_mode", "") == "cut":
             self.tc_hint_lbl.configure(
-                text="alternating shades = shots     bright = first "
-                     "frame of a shot")
+                text="shades = shots     blue = first frame of a shot     "
+                     "gold = possible cut, raise Sensitivity")
             self.exr_frame_cb.refresh()
 
     def _cut_selected_shot(self):
@@ -7266,6 +7298,11 @@ class App(tk.Tk):
             return None
         if i == self._cut_shots[k][0] and i != 0:
             return "#4488CC"
+        # A candidate the slider is not yet taking: dim gold, so what
+        # raising Sensitivity would add is visible before it is done.
+        st = getattr(self, "_cut_strength", None)
+        if st and i < len(st) and st[i] >= 0.12 and i not in self._cut_joins:
+            return "#6B5A1A"
         return "#5A1515" if k % 2 == 0 else "#2E2E4A"
 
     def _cut_select_frame(self, i):
@@ -7274,10 +7311,20 @@ class App(tk.Tk):
         k = self._cut_shot_index(i)
         if k >= 0:
             a, b = self._cut_shots[k]
-            sc = (self._cut_scores[i] if self._cut_scores
-                  and i < len(self._cut_scores) else 0.0)
+            st = getattr(self, "_cut_strength", None) or []
+            cs = st[i] if i < len(st) else 0.0
             self.log(self.elog, f"Frame {i + 1}: shot{k + 1} "
-                     f"({a + 1}–{b + 1}), change score {sc:.2f}", "dim")
+                     f"({a + 1}–{b + 1}), cut strength {cs:.2f}"
+                     + (f" — Sensitivity {min(1.0, 1 - cs + 0.01):.2f} would cut here"
+                        if 0.0 < cs < 1.0 and i != a else ""), "dim")
+
+    def _cut_step(self, delta):
+        if not self.cut_names:
+            return
+        i = max(0, min(len(self.cut_names) - 1,
+                       getattr(self, "_cut_idx", 0) + delta))
+        self.exr_frame_cb.select(i)
+        self._cut_select_frame(i)
 
     def _cut_goto(self, _e=None):
         sel = self.cut_list.curselection()
@@ -8934,8 +8981,9 @@ class App(tk.Tk):
                 tl.set_frames(self.cut_names)
                 self.exr_tl_lbl.configure(text="Shots")
                 self.tc_hint_lbl.configure(
-                    text="alternating shades = shots     bright = first "
-                         "frame of a shot" if self._cut_shots else "")
+                    text="shades = shots     blue = first frame of a shot     "
+                         "gold = possible cut, raise Sensitivity"
+                    if self._cut_shots else "")
             else:
                 tl.set_frames(getattr(self, "_tc_frames", []) or [])
                 self.exr_tl_lbl.configure(text="Analysed frames")
