@@ -25626,7 +25626,12 @@ class App(tk.Tk):
         self.sam_frames = frames
         self.sam_frame_cb["values"] = frames
         self.sam_path_lbl.configure(text=p, fg=G)
-        self._sam_resolve_input()
+        try:
+            self._sam_resolve_input()
+        except Exception as ex:
+            self._sam_in_mode = "srgb"
+            self.log(self.sam_log_txt, "Input colour: could not resolve (" + str(ex) +
+                     ") - reading as sRGB / display", "err")
         name = os.path.basename(p)
         ext  = os.path.splitext(frames[0])[1].upper()
         self.sam_lbl.configure(
@@ -25648,7 +25653,17 @@ class App(tk.Tk):
     def _sam_load_frame(self, path):
         try:
             from PIL import Image, ImageTk
-            img_orig = Image.fromarray(self._sam_display_rgb8(path), "RGB")
+            rgb = None
+            try:
+                rgb = self._sam_display_rgb8(path)
+            except Exception as ex:
+                self.log(self.sam_log_txt, "Input colour read failed (" + str(ex) +
+                         ") - showing ffmpeg's view instead", "err")
+            if rgb is None:
+                rgb = self._sam_ffmpeg_rgb8(path)
+            if rgb is None:
+                raise RuntimeError("no reader could open " + os.path.basename(path))
+            img_orig = Image.fromarray(rgb, "RGB")
             orig_w, orig_h = img_orig.size
             # Store full-resolution original — _sam_redraw fits to canvas on every draw
             self.sam_img_base = img_orig
@@ -26344,16 +26359,23 @@ class App(tk.Tk):
                 return self._organic_linear_to_display(lin)
             # unreadable as float: the old ffmpeg route, so a picture
             # still appears
-            import cv2, tempfile, subprocess as _sp
-            tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False); tmp.close()
-            _sp.run(["ffmpeg", "-y", "-i", path, "-vf", "tonemap=reinhard", tmp.name],
-                    capture_output=True)
-            img = cv2.imread(tmp.name)
-            try: os.unlink(tmp.name)
-            except OSError: pass
-            return cv2.cvtColor(img, cv2.COLOR_BGR2RGB) if img is not None else None
+            return self._sam_ffmpeg_rgb8(path)
         from PIL import Image
         return np.asarray(Image.open(path).convert("RGB"), np.uint8)
+
+    def _sam_ffmpeg_rgb8(self, path):
+        """The pre-Input-colour reader: ffmpeg's tonemapped view of the
+        frame, or a plain decode when that fails. The last resort."""
+        import cv2, tempfile, subprocess as _sp
+        tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False); tmp.close()
+        r = _sp.run(["ffmpeg", "-y", "-i", path, "-vf", "tonemap=reinhard", tmp.name],
+                    capture_output=True)
+        if r.returncode != 0:
+            _sp.run(["ffmpeg", "-y", "-i", path, tmp.name], capture_output=True)
+        img = cv2.imread(tmp.name)
+        try: os.unlink(tmp.name)
+        except OSError: pass
+        return cv2.cvtColor(img, cv2.COLOR_BGR2RGB) if img is not None else None
 
     def _sam_removal_toggle(self):
         """Update UI when AI-Removal is toggled; reload wipe preview immediately."""
