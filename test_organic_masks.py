@@ -12210,6 +12210,173 @@ class TestSamVideoTracking(unittest.TestCase):
         self.assertIn("SAM_RUNNER_SRC", body)
 
 
+class TestSamInputColour(unittest.TestCase):
+    """The SAM 3 tab has an Input colour choice (Auto / sRGB / Linear /
+    ACES2065-1 / HDR PQ) that decides how EXR frames are read for the
+    viewer, the preview and the full run -- with the same maths in the
+    runner as in the app, so SAM sees what the user saw."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.dir = tempfile.mkdtemp()
+        cls.seq = os.path.join(cls.dir, "lin")
+        os.makedirs(cls.seq)
+        import OpenEXR, Imath
+        cls.n = 6
+        for i in range(cls.n):
+            # scene-linear: subject 0.3 (bright once display-encoded,
+            # dim if read as display code), background 0.002
+            a = np.full((120, 200, 3), 0.002, np.float32)
+            cv2.circle(a, (40 + i * 5, 60), 16, (0.3, 0.3, 0.3), -1)
+            h = OpenEXR.Header(200, 120)
+            h["channels"] = {c: Imath.Channel(Imath.PixelType(Imath.PixelType.FLOAT))
+                             for c in "RGB"}
+            f = OpenEXR.OutputFile(os.path.join(cls.seq, f"lin.{i + 1:04d}.exr"), h)
+            f.writePixels({c: a[:, :, k].tobytes() for k, c in enumerate("RGB")})
+            f.close()
+        cls.runner = os.path.join(cls.dir, "sam_runner.py")
+        with open(cls.runner, "w", encoding="utf-8") as fh:
+            fh.write(App.SAM_RUNNER_SRC)
+        with open(SRC, encoding="utf-8") as fh:
+            src = fh.read()
+        body = re.search(r"SAM_RUNNER_SRC = r'''(.*?)'''", src, re.S).group(1)
+        cls.ns = {}
+        exec(body.split("def main():")[0], cls.ns)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.dir, ignore_errors=True)
+
+    def _run(self, *extra):
+        import subprocess
+        out = tempfile.mkdtemp(dir=self.dir)
+        env = dict(os.environ)
+        env["PYTHONPATH"] = os.path.join(os.path.dirname(SRC), "_stub")
+        r = subprocess.run([sys.executable, self.runner, "--folder", self.seq,
+                            "--out_dir", out, "--edge_contrast", "1.0",
+                            "--temporal_blend", "0", "--temporal", "1",
+                            "--include", "40,60", "--prompt_frame", "0"] + list(extra),
+                           capture_output=True, text=True, env=env, timeout=120)
+        return out, r
+
+    def test_the_tab_offers_the_same_choices_as_upscale_studio(self):
+        import inspect
+        body = inspect.getsource(App._tab_sam)
+        self.assertIn('self._combo(c, "Input colour", list(self.UPS_IN_CHOICES)', body)
+        self.assertIn("self.sam_in_lbl", body)
+        self.assertEqual(App.UPS_IN_CHOICES,
+                         ("Auto", "sRGB / display", "Linear", "ACES2065-1", "HDR PQ"))
+
+    def test_the_choice_reaches_viewer_preview_and_run(self):
+        import inspect
+        self.assertIn("self._sam_resolve_input()", inspect.getsource(App._sam_load_folder))
+        self.assertIn("_sam_display_rgb8", inspect.getsource(App._sam_load_frame))
+        self.assertIn("_sam_display_rgb8", inspect.getsource(App._load_frame_bgr))
+        self.assertIn("_load_frame_bgr", inspect.getsource(App._sam_preview))
+        run = inspect.getsource(App._sam_run)
+        self.assertEqual(run.count('"--colour"'), 2)   # active object and the other pass
+        self.assertIn("--colour", App.SAM_RUNNER_SRC)
+        self.assertIn("OPENCV_IO_ENABLE_OPENEXR", App.SAM_RUNNER_SRC)
+
+    def test_the_runner_maths_matches_the_app_pixel_for_pixel(self):
+        raw = np.random.RandomState(1).rand(16, 16, 3).astype(np.float32) * 1.5
+        f = self.ns["float_rgb_to_display_u8"]
+        srgb = (np.clip(raw, 0, 1) * 255 + 0.5).astype(np.uint8)
+        self.assertTrue(np.array_equal(f(raw, "srgb"), srgb))
+        for mode in ("linear", "aces", "pq"):
+            with self.subTest(mode=mode):
+                app = App._organic_linear_to_display(App._scene_from_raw(raw, mode))
+                self.assertTrue(np.array_equal(f(raw, mode), app))
+
+    def test_the_runner_reads_exr_floats_without_cv2_openexr(self):
+        path = os.path.join(self.seq, "lin.0001.exr")
+        a = self.ns["read_exr_float_rgb"](path)
+        self.assertEqual(a.shape, (120, 200, 3))
+        self.assertAlmostEqual(float(a[60, 40, 0]), 0.3, places=5)
+        self.assertAlmostEqual(float(a[0, 0, 0]), 0.002, places=5)
+        # the ffmpeg float route, for a venv with neither OpenEXR nor
+        # an OpenEXR-enabled cv2
+        import builtins
+        real = builtins.__import__
+        def no_exr(name, *args, **kw):
+            if name in ("OpenEXR", "Imath", "cv2"):
+                raise ImportError(name)
+            return real(name, *args, **kw)
+        builtins.__import__ = no_exr
+        try:
+            b = self.ns["read_exr_float_rgb"](path)
+        finally:
+            builtins.__import__ = real
+        self.assertIsNotNone(b)
+        self.assertLess(float(np.abs(a - b).max()), 1e-4)
+
+    def test_linear_frames_are_segmented_when_read_as_linear(self):
+        out, r = self._run("--colour", "linear")
+        self.assertEqual(r.returncode, 0, r.stderr[-800:])
+        self.assertIn("Input colour: linear", r.stderr)
+        files = sorted(f for f in os.listdir(out) if f.endswith(".png"))
+        self.assertEqual(len(files), self.n)
+        for i, f in enumerate(files):
+            png = cv2.imread(os.path.join(out, f), cv2.IMREAD_UNCHANGED)
+            alpha = png[:, :, 3].astype(float) / 255
+            ys, xs = np.nonzero(alpha > 0.5)
+            with self.subTest(frame=i + 1):
+                self.assertGreater(len(xs), 300)
+                self.assertLess(abs(xs.mean() - (40 + i * 5)), 3)
+            # the RGB written next to the alpha is the display view,
+            # not the raw code: 0.3 linear is 149 in sRGB
+            self.assertEqual(int(png[60, 40 + i * 5, 0]), 149)
+        # read as display code the same subject is 0.3 * 255 = 77:
+        # below the fake SAM's blob threshold, so nothing is found
+        out2, r2 = self._run("--colour", "srgb")
+        self.assertEqual(r2.returncode, 0, r2.stderr[-800:])
+        png = cv2.imread(os.path.join(out2, files[0]), cv2.IMREAD_UNCHANGED)
+        self.assertEqual(int(png[60, 40, 0]), 77)
+        self.assertLess(float(png[:, :, 3].max()), 128)
+
+    def test_an_unknown_colour_falls_back_to_srgb(self):
+        out, r = self._run("--colour", "banana")
+        self.assertEqual(r.returncode, 0, r.stderr[-800:])
+        self.assertIn("Input colour: srgb", r.stderr)
+
+    def test_sam_display_rgb8_follows_the_mode(self):
+        app = App.__new__(App)
+        path = os.path.join(self.seq, "lin.0001.exr")
+        app._sam_in_mode = "srgb"
+        self.assertEqual(int(app._sam_display_rgb8(path)[60, 40, 0]), 77)
+        app._sam_in_mode = "linear"
+        self.assertEqual(int(app._sam_display_rgb8(path)[60, 40, 0]), 149)
+        app._sam_in_mode = "aces"
+        aces = app._sam_display_rgb8(path)
+        self.assertEqual(aces.dtype, np.uint8)
+        self.assertEqual(aces.shape, (120, 200, 3))
+        # a PNG is a display picture whatever the mode says
+        png = os.path.join(self.dir, "p.png")
+        cv2.imwrite(png, np.full((4, 4, 3), 77, np.uint8))
+        self.assertEqual(int(app._sam_display_rgb8(png)[0, 0, 0]), 77)
+
+    def test_resolve_sets_the_mode_from_the_choice(self):
+        app = App.__new__(App)
+        app.sam_folder = self.seq
+        app.sam_frames = sorted(os.listdir(self.seq))
+        app.sam_in_lbl = None
+        class _V:
+            def __init__(s, v): s.v = v
+            def get(s): return s.v
+        app.sam_in_var = _V("Linear")
+        app._sam_resolve_input()
+        self.assertEqual(app._sam_in_mode, "linear")
+        app.sam_in_var = _V("HDR PQ")
+        app._sam_resolve_input()
+        self.assertEqual(app._sam_in_mode, "pq")
+        app.sam_in_var = _V("sRGB / display")
+        app._sam_resolve_input()
+        self.assertEqual(app._sam_in_mode, "srgb")
+        app.sam_folder = None
+        app._sam_resolve_input()
+        self.assertEqual(app._sam_in_mode, "srgb")
+
+
 class TestSetupRifeLabel(unittest.TestCase):
     """The Setup & Install component row for the RIFE install was
     labelled "ADW-Blur", which stopped being accurate the moment Fix

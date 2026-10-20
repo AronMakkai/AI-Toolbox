@@ -34771,6 +34771,21 @@ class App(tk.Tk):
         self.sam_lbl.bind("<Button-1>", self._sam_pick)
         self.sam_info = tk.Label(c, text="", font=FSM, bg=S, fg=G, anchor="w")
         self.sam_info.pack(anchor="w", pady=(3, 0))
+        # The same choice, labels and resolver as Upscale Studio, so a
+        # sequence another studio wrote reads the same way here. The
+        # viewer, the preview and the full run all go through it; before
+        # this, every EXR was tonemapped by ffmpeg whatever it held.
+        self.sam_in_var = self._combo(c, "Input colour", list(self.UPS_IN_CHOICES),
+            tip="How the frames are read for display and for SAM.\n\n"
+                "Auto \u2014 the sidecar or EXR header, else the pixels.\n"
+                "sRGB / display \u2014 values used as they are.\n"
+                "Linear \u2014 scene-linear Rec.709, display-encoded for SAM.\n"
+                "ACES2065-1 \u2014 AP0 to Rec.709, then display-encoded.\n"
+                "HDR PQ \u2014 PQ decoded, 100 nits = white.")
+        self.sam_in_lbl = tk.Label(c, text="", font=FSM, bg=S, fg=G, anchor="w",
+                                   wraplength=300, justify="left")
+        self.sam_in_lbl.pack(anchor="w", pady=(2, 0))
+        self.sam_in_var.trace_add("write", lambda *_: self._sam_in_changed())
 
         # ── Prompts card with object tabs ─────────────────────────────────
         _prompt_outer = tk.Frame(lf, bg=S,
@@ -36123,6 +36138,7 @@ class App(tk.Tk):
         self.sam_frames = frames
         self.sam_frame_cb["values"] = frames
         self.sam_path_lbl.configure(text=p, fg=G)
+        self._sam_resolve_input()
         name = os.path.basename(p)
         ext  = os.path.splitext(frames[0])[1].upper()
         self.sam_lbl.configure(
@@ -36144,18 +36160,7 @@ class App(tk.Tk):
     def _sam_load_frame(self, path):
         try:
             from PIL import Image, ImageTk
-            ext = os.path.splitext(path)[1].lower()
-            if ext == ".exr":
-                tmp = os.path.join(os.path.dirname(path), "__sam_preview__.png")
-                r = subprocess.run(
-                    ["ffmpeg", "-y", "-i", path, "-vf", "tonemap=reinhard", tmp],
-                    capture_output=True)
-                if r.returncode != 0:
-                    subprocess.run(["ffmpeg", "-y", "-i", path, tmp], capture_output=True)
-                load_path = tmp
-            else:
-                load_path = path
-            img_orig = Image.open(load_path).convert("RGB")
+            img_orig = Image.fromarray(self._sam_display_rgb8(path), "RGB")
             orig_w, orig_h = img_orig.size
             # Store full-resolution original — _sam_redraw fits to canvas on every draw
             self.sam_img_base = img_orig
@@ -36168,8 +36173,6 @@ class App(tk.Tk):
                 self._sam_pan_x  = 0
                 self._sam_pan_y  = 0
             self._sam_redraw()
-            if ext == ".exr" and os.path.exists(tmp):
-                os.remove(tmp)
             self.log(self.sam_log_txt,
                 "Preview loaded: " + os.path.basename(path) +
                 " (" + str(orig_w) + "x" + str(orig_h) + ")", "ok")
@@ -36786,17 +36789,83 @@ class App(tk.Tk):
                 f"Reapply error: {e}\n{traceback.format_exc()[-200:]}", "err")
 
     def _load_frame_bgr(self, path):
-        """Load a frame as BGR, handling EXR via ffmpeg."""
-        import cv2, tempfile, subprocess, os as _os
-        ext = _os.path.splitext(path)[1].lower()
-        if ext == '.exr':
-            tmp = tempfile.NamedTemporaryFile(suffix='.png', delete=False); tmp.close()
-            subprocess.run(['ffmpeg','-y','-i',path,'-vf','tonemap=reinhard',tmp.name],
-                           capture_output=True)
-            img = cv2.imread(tmp.name); _os.unlink(tmp.name)
-        else:
-            img = cv2.imread(path)
-        return img
+        """Load a frame as BGR through the tab's Input colour choice."""
+        import cv2
+        rgb = self._sam_display_rgb8(path)
+        return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR) if rgb is not None else None
+
+    # ── SAM 3 input colour ────────────────────────────────────────────
+    sam_in_var = None
+    sam_in_lbl = None
+    _sam_in_mode = "srgb"        # resolved: srgb / linear / aces / pq
+
+    def _sam_resolve_input(self):
+        """Settle how the loaded sequence is read. Called on load and
+        when the Input colour choice changes."""
+        folder = getattr(self, "sam_folder", None)
+        names = list(getattr(self, "sam_frames", None) or [])
+        choice = self.sam_in_var.get() if self.sam_in_var is not None else "Auto"
+        if not folder or not names:
+            self._sam_in_mode = "srgb"
+            return
+        mode, why, _hdr = self._resolve_input_colour(choice, folder, names)
+        self._sam_in_mode = mode
+        txt = self.UPS_IN_NAMES[mode]
+        if choice == "Auto" and why:
+            txt += f"  \u2014  {why}"
+        try:
+            if self.sam_in_lbl is not None:
+                self.sam_in_lbl.configure(text=txt)
+        except Exception:
+            pass
+
+    def _sam_in_changed(self):
+        """A new choice re-reads the frame on screen and makes any
+        preview stale; the next Run reads the whole sequence this way."""
+        if not getattr(self, "sam_folder", None):
+            return
+        self._sam_resolve_input()
+        try:
+            self._pv_lru.clear()
+        except Exception:
+            pass
+        idx = max(0, self.sam_frame_cb.current())
+        if self.sam_frames:
+            self._sam_load_frame(os.path.join(self.sam_folder, self.sam_frames[idx]))
+        self.log(self.sam_log_txt,
+                 f"Input colour: {self.sam_in_lbl.cget('text') if self.sam_in_lbl else self._sam_in_mode}",
+                 "dim")
+
+    def _sam_display_rgb8(self, path):
+        """A frame as display-referred uint8 RGB, read the way the
+        Input colour choice says. An EXR (or DPX) is read as float and
+        converted with the same functions the studios use; anything
+        else is a display-encoded picture already."""
+        import numpy as np
+        ext = os.path.splitext(path)[1].lower()
+        if ext in self.FF_LINEAR_EXTS:
+            try:
+                raw = self._ups_raw_float(path)
+            except Exception:
+                raw = None
+            if raw is not None:
+                mode = getattr(self, "_sam_in_mode", "srgb")
+                if mode == "srgb":
+                    return (np.clip(raw, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
+                lin = self._scene_from_raw(raw, mode)
+                return self._organic_linear_to_display(lin)
+            # unreadable as float: the old ffmpeg route, so a picture
+            # still appears
+            import cv2, tempfile, subprocess as _sp
+            tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False); tmp.close()
+            _sp.run(["ffmpeg", "-y", "-i", path, "-vf", "tonemap=reinhard", tmp.name],
+                    capture_output=True)
+            img = cv2.imread(tmp.name)
+            try: os.unlink(tmp.name)
+            except OSError: pass
+            return cv2.cvtColor(img, cv2.COLOR_BGR2RGB) if img is not None else None
+        from PIL import Image
+        return np.asarray(Image.open(path).convert("RGB"), np.uint8)
 
     def _sam_removal_toggle(self):
         """Update UI when AI-Removal is toggled; reload wipe preview immediately."""
@@ -37055,6 +37124,7 @@ class App(tk.Tk):
 """SAM3 runner: video tracking (memory) or per-frame, soft alpha,
 threshold/softness/temporal_blend. Written by ai_toolbox.py."""
 import os, sys, argparse, time
+os.environ.setdefault('OPENCV_IO_ENABLE_OPENEXR', '1')   # before cv2 is first imported
 import numpy as np
 SAM3_DIR = os.path.expanduser('~/RifeApp/sam3-weights')
 _fp16 = os.path.join(SAM3_DIR, 'sam3-fp16.safetensors')
@@ -37084,10 +37154,96 @@ def _patch_mps_if_needed():
         log(f'MPS patch skipped: {ex}')
 
 
-def load_bgr(path):
+COLOUR = 'srgb'            # set from --colour: srgb / linear / aces / pq
+HDR_SDR_WHITE = 100.0      # nits that SDR code 1.0 represents
+# Linear Rec.709 -> ACES2065-1 (AP0), Bradford-adapted; inverted at
+# run time so the pair matches the app's own matrix exactly.
+M_709_TO_AP0 = ((0.4397010, 0.3829780, 0.1773350),
+                (0.0897923, 0.8134230, 0.0967616),
+                (0.0175440, 0.1115440, 0.8707040))
+
+
+def pq_decode(code):
+    c = np.clip(np.asarray(code, np.float32), 0.0, 1.0)
+    m1 = 2610.0 / 16384.0; m2 = 2523.0 / 4096.0 * 128.0
+    c1 = 3424.0 / 4096.0; c2 = 2413.0 / 4096.0 * 32.0; c3 = 2392.0 / 4096.0 * 32.0
+    num = np.clip(np.power(c, 1.0 / m2) - c1, 0.0, None)
+    den = c2 - c3 * np.power(c, 1.0 / m2)
+    y = np.power(np.clip(num / np.maximum(den, 1e-8), 0.0, None), 1.0 / m1)
+    return (y * 10000.0).astype(np.float32)
+
+
+def float_rgb_to_display_u8(raw, colour):
+    """A float RGB frame (the file's own numbers) as display-referred
+    uint8 RGB, read the way the Input colour choice says -- the same
+    maths as the app's viewer, so SAM sees what the user saw."""
+    a = np.asarray(raw, np.float32)
+    if colour == 'srgb':
+        return (np.clip(a, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
+    if colour == 'aces':
+        m = np.linalg.inv(np.array(M_709_TO_AP0, np.float64)).T.astype(np.float32)
+        a = (a @ m).astype(np.float32)
+    a = np.maximum(a, 0.0)
+    if colour == 'pq':
+        a = pq_decode(np.clip(a, 0.0, 1.0)) / HDR_SDR_WHITE
+    a = np.clip(a, 0.0, 1.0)
+    srgb = np.where(a <= 0.0031308, a * 12.92, 1.055 * (a ** (1.0 / 2.4)) - 0.055)
+    return (np.clip(srgb, 0, 1) * 255.0 + 0.5).astype(np.uint8)
+
+
+def read_exr_float_rgb(path):
+    """An EXR's own numbers as float32 RGB (h, w, 3), or None. The
+    OpenEXR module when the venv has it; otherwise cv2 (the pip wheels
+    usually ship with that codec compiled out); otherwise ffmpeg
+    decoding to raw float planes, which every install of this app has."""
+    import subprocess
+    try:
+        import OpenEXR, Imath
+        ef = OpenEXR.InputFile(path); hdr = ef.header()
+        dw = hdr['dataWindow']; w = dw.max.x - dw.min.x + 1; h = dw.max.y - dw.min.y + 1
+        present = set(hdr.get('channels', {}).keys())
+        want = [c for c in ('R', 'G', 'B') if c in present] or sorted(present)[:1]
+        pt = Imath.PixelType(Imath.PixelType.FLOAT)
+        ch = [np.frombuffer(ef.channel(c, pt), np.float32).reshape(h, w) for c in want]
+        arr = np.stack(ch * 3 if len(ch) == 1 else ch, axis=-1)
+        return np.nan_to_num(arr.astype(np.float32), nan=0.0, posinf=0.0, neginf=0.0)
+    except Exception:
+        pass
+    try:
+        import cv2
+        raw = cv2.imread(path, cv2.IMREAD_UNCHANGED | cv2.IMREAD_ANYDEPTH)
+        if raw is not None and raw.dtype != np.uint8:
+            if raw.ndim == 2:
+                raw = np.dstack([raw] * 3)
+            return np.ascontiguousarray(raw[:, :, :3][:, :, ::-1], np.float32)
+    except Exception:
+        pass
+    try:
+        r = subprocess.run(['ffprobe', '-v', 'error', '-select_streams', 'v:0',
+                            '-show_entries', 'stream=width,height', '-of', 'csv=p=0', path],
+                           capture_output=True, text=True)
+        w, h = [int(v) for v in r.stdout.strip().split(',')[:2]]
+        r = subprocess.run(['ffmpeg', '-v', 'error', '-i', path, '-f', 'rawvideo',
+                            '-pix_fmt', 'gbrpf32le', '-'], capture_output=True)
+        if r.returncode == 0 and len(r.stdout) == w * h * 12:
+            g, b, rr = np.frombuffer(r.stdout, np.float32).reshape(3, h, w)
+            return np.nan_to_num(np.stack([rr, g, b], axis=-1), nan=0.0, posinf=0.0, neginf=0.0)
+    except Exception:
+        pass
+    return None
+
+
+def load_bgr(path, colour=None):
     import cv2, tempfile, subprocess
+    colour = colour or COLOUR
     ext = os.path.splitext(path)[1].lower()
     if ext == '.exr':
+        raw = read_exr_float_rgb(path)
+        if raw is not None:
+            rgb8 = float_rgb_to_display_u8(raw, colour)
+            return cv2.cvtColor(rgb8, cv2.COLOR_RGB2BGR)
+        # nothing could read the floats: the old tonemapped route, so a
+        # mask still comes out
         tmp = tempfile.NamedTemporaryFile(suffix='.png', delete=False); tmp.close()
         r = subprocess.run(['ffmpeg', '-y', '-i', path, '-vf', 'tonemap=reinhard', tmp.name],
                            capture_output=True)
@@ -37284,7 +37440,12 @@ def main():
     ap.add_argument('--dropout_threshold', default='0.3', type=float)
     ap.add_argument('--stabilise_2pass', default='0')
     ap.add_argument('--edge_contrast', default='1.5', type=float)
+    ap.add_argument('--colour', default='srgb',
+                    help='how EXR frames are read: srgb, linear, aces or pq')
     a = ap.parse_args()
+    global COLOUR
+    COLOUR = a.colour if a.colour in ('srgb', 'linear', 'aces', 'pq') else 'srgb'
+    log(f'Input colour: {COLOUR}')
     _patch_mps_if_needed()
     import torch, cv2
     from PIL import Image
@@ -37407,6 +37568,7 @@ if __name__ == '__main__':
     def _sam_runner_path(self):
         """Write the runner next to the venv and return its path."""
         runner = os.path.expanduser("~/RifeApp/sam_runner.py")
+        os.makedirs(os.path.dirname(runner), exist_ok=True)
         with open(runner, "w", encoding="utf-8") as f:
             f.write(self.SAM_RUNNER_SRC)
         return runner
@@ -37431,45 +37593,33 @@ if __name__ == '__main__':
 
                 self.after(0, lambda: self.progress(None, "SAM 3 preview…"))
 
-                # Downscale input image if scale < 1.0
+                # What the server sees is a display-encoded PNG made
+                # through the Input colour choice (and the Scale), so a
+                # linear or ACES EXR is segmented from the picture the
+                # viewer shows, not from ffmpeg's own tonemap of it.
                 scale = getattr(self, "sam_input_scale", 1.0)
                 send_path = frame_path
-                if scale < 1.0:
+                _ext = os.path.splitext(frame_path)[1].lower()
+                if scale < 1.0 or _ext in self.FF_LINEAR_EXTS:
                     try:
-                        import cv2 as _cv2, tempfile as _tf, subprocess as _sp
-                        _img = None
-                        _ext = os.path.splitext(frame_path)[1].lower()
-                        if _ext == ".exr":
-                            # cv2 EXR disabled — always use ffmpeg for EXR
-                            _tmp = _tf.NamedTemporaryFile(suffix=".png", delete=False)
-                            _tmp.close()
-                            _r = _sp.run(["ffmpeg","-y","-i",frame_path,
-                                "-vf","tonemap=reinhard",_tmp.name],
-                                capture_output=True)
-                            if _r.returncode != 0:
-                                _sp.run(["ffmpeg","-y","-i",frame_path,
-                                    _tmp.name], capture_output=True)
-                            _img = _cv2.imread(_tmp.name)
-                            os.unlink(_tmp.name)
-                        else:
-                            _img = _cv2.imread(frame_path)
+                        import cv2 as _cv2
+                        _img = self._load_frame_bgr(frame_path)
                         if _img is None:
                             raise ValueError(f"Could not load: {frame_path}")
-                        if _img is not None:
-                            _h, _w = _img.shape[:2]
+                        _h, _w = _img.shape[:2]
+                        if scale < 1.0:
                             _nw = max(1, int(_w * scale))
                             _nh = max(1, int(_h * scale))
                             _img = _cv2.resize(_img, (_nw, _nh),
                                 interpolation=_cv2.INTER_AREA)
-                            send_path = os.path.join(out_dir,
-                                "preview_scaled.png")
-                            _cv2.imwrite(send_path, _img)
                             self.log(self.sam_log_txt,
-                                f"Input scaled to {scale:.2f}× "
-                                f"({_nw}×{_nh})", "dim")
+                                f"Input scaled to {scale:.2f}\u00d7 "
+                                f"({_nw}\u00d7{_nh})", "dim")
+                        send_path = os.path.join(out_dir, "preview_src.png")
+                        _cv2.imwrite(send_path, _img)
                     except Exception as _e:
                         self.log(self.sam_log_txt,
-                            "Scale error: " + str(_e), "err")
+                            "Input read error: " + str(_e), "err")
                         send_path = frame_path
 
                 # Scale point coords to match downscaled image
@@ -37719,6 +37869,7 @@ if __name__ == '__main__':
                 "--temporal", temporal_flag,
                 "--scale",    str(input_scale),
                 "--prompt_frame", str(prompt_frame),
+                "--colour",   getattr(self, "_sam_in_mode", "srgb"),
             ]
             if pts_include: cmd_parts += ["--include",     pts_include]
             if pts_exclude: cmd_parts += ["--exclude",     pts_exclude]
@@ -37813,6 +37964,7 @@ if __name__ == '__main__':
                         "--temporal",       temporal_flag,
                         "--scale",          str(input_scale),
                         "--prompt_frame",   str(prompt_frame),
+                        "--colour",         getattr(self, "_sam_in_mode", "srgb"),
                         "--threshold",      str(round(_thr, 3)),
                         "--softness",       str(int(_sof)),
                         "--temporal_blend", str(round(_tmp, 3)),
