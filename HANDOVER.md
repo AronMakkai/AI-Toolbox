@@ -47,6 +47,30 @@ prefixes. Use this table before searching.
   goes to `ADW/Lens_Studio_vNN/Lens_Studio.NNNNN.exr`.
 - **Paint Studio** is hand paint/smudge per frame.
 
+## SAM 3
+
+- The full run (`_sam_run`) writes `App.SAM_RUNNER_SRC` to
+  `~/RifeApp/sam_runner.py` and executes it in the RifeApp venv, once per
+  object, parsing `[i/total]` lines for progress. The runner is readable
+  source, not a one-line string.
+- Engines, chosen by `--temporal` (the Frame Linking checkbox): `1` is
+  SAM 3's video tracker (`Sam3TrackerVideoModel`, streaming session),
+  prompted once on `--prompt_frame` (the frame shown when Run is
+  pressed) and tracked forward to the end, then backward to the start
+  in a second session. `0` is the old per-frame engine, also the
+  automatic fallback when the venv's transformers has no
+  `Sam3TrackerVideoModel` (the Setup tab's SAM 3 row says so).
+- Text prompts: with the video engine the detector (`Sam3Model`) finds
+  the concept on the prompt frame and its box becomes the tracker's
+  prompt; with points as well, the detector's box is added to them.
+- `_stub/transformers` is a fake SAM 3 with the documented API shapes
+  (a model that follows a bright blob); `TestSamVideoTracking` runs the
+  real runner against it. The real model has never been run from the
+  sandbox: the streaming API calls are taken from the transformers
+  v5.20 docs for `Sam3TrackerVideoModel` and need checking on the Mac.
+- The single-frame preview (`sam_server.py`) is unchanged and still
+  per frame.
+
 ## Colour handling
 
 - Every studio has an "Input colour" choice: Auto, display-encoded

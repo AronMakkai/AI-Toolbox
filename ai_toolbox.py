@@ -4487,15 +4487,25 @@ class App(tk.Tk):
         _w("Guided filter that snaps soft mask edges toward the colour "
            "transitions in the source image. Helps when the mask boundary "
            "falls slightly inside or outside the true object edge.\n\n", "body_indent")
+        _w("Frame Linking\n", "param")
+        _w("ON runs SAM 3's video tracker: the object is prompted once, on "
+           "the frame you are looking at when you press Run, and every "
+           "other frame is tracked from the model's memory of it \u2014 "
+           "forward to the end of the sequence and back to the start. "
+           "That is what keeps the edge from flickering frame to frame "
+           "and what survives an occlusion or a fast move. OFF segments "
+           "every frame on its own from the same prompts. Before this, "
+           "the per-frame result was carried forward with optical flow; "
+           "the tracker replaces that.\n\n", "body_indent")
         _w("Temporal Blend\n", "param")
-        _w("Blends the current frame's mask with the previous frame's "
-           "via optical flow warping before finalising. Reduces flicker "
-           "in propagated masks on slowly-moving or near-static objects.\n\n", "body_indent")
+        _w("Blends each frame's finished mask with the previous one in "
+           "the order the frames are tracked. A little hides residual "
+           "edge chatter on a near-static subject; a lot lags a moving "
+           "one. With Frame Linking on, start at 0.\n\n", "body_indent")
         _w("Dropout Gate\n", "param")
-        _w("Detects frame dropouts: when the mask area suddenly changes "
-           "beyond this threshold, SAM likely lost the object. The gate "
-           "then weights the warped previous frame more heavily (up to 80%) "
-           "to recover. Log messages show when a dropout is detected.\n\n", "body_indent")
+        _w("Per-frame mode only: when the mask area jumps by more than "
+           "this, the previous frame is weighted in to recover.\n\n",
+           "body_indent")
         _w("Stabilise (2-pass)\n", "param")
         _w("Applies temporal post-smoothing for extra stability. Off by default. "
            "Minimal runtime cost vs. full 2-pass forward/backward propagation.\n", "body_indent")
@@ -5144,7 +5154,9 @@ class App(tk.Tk):
                 venv = os.path.expanduser("~/RifeApp/venv/bin/python3")
                 r = subprocess.run(
                     [venv, "-c",
-                     "from transformers import Sam3VideoProcessor; print('SAM3 transformers OK')"],
+                     "import transformers as t; from transformers import Sam3VideoProcessor; "
+                     "print('SAM3 transformers OK' + ('' if hasattr(t, 'Sam3TrackerVideoModel') "
+                     "else ' — no video tracker: update transformers for Frame Linking'))"],
                     capture_output=True, text=True)
                 ok = r.returncode == 0
                 detail = (r.stdout.strip() if ok
@@ -35312,12 +35324,18 @@ class App(tk.Tk):
             fg="#555555", cursor="hand2")
         _fl_info.pack(side="left", padx=(4,0))
         _info_popup(
-            "Carries the segmentation mask forward through\n"
-            "the sequence using optical flow motion estimation.\n\n"
-            "ON  — mask tracks subject motion between frames\n"
-            "OFF — each frame is segmented independently\n\n"
-            "Keep ON for most footage. Turn OFF if the mask\n"
-            "drifts onto the wrong subject over time."
+            "ON  — SAM 3's video tracker: the object is prompted\n"
+            "once, on the frame you are looking at, and every\n"
+            "other frame is tracked from the model's memory of\n"
+            "it, forward to the end and back to the start. Stable\n"
+            "edges, survives occlusion and fast motion.\n\n"
+            "OFF — each frame is segmented on its own from the\n"
+            "same prompts. No memory; use it when the subject\n"
+            "changes so much that tracking loses it, or when the\n"
+            "installed transformers has no video tracker (the\n"
+            "Setup tab says).\n\n"
+            "With tracking ON, place the prompts on a frame where\n"
+            "the subject is clear and unoccluded."
         )(_fl_info)
 
         self.sam_removal_var   = tk.BooleanVar(value=False)
@@ -37013,11 +37031,384 @@ class App(tk.Tk):
         except Exception:
             pass
 
+    # ── SAM 3 runner ──────────────────────────────────────────────────
+    # Written to ~/RifeApp/sam_runner.py before every run and executed
+    # in the RifeApp venv. Kept as readable source here (not a one-line
+    # string) so it can be read, and so the tests can parse and run it
+    # against a fake SAM.
+    #
+    # Two engines, chosen by --temporal:
+    #   1  video tracking: SAM 3's memory-based tracker streams the
+    #      frames from the prompt frame forward, then (if the prompt
+    #      frame is not the first) backward from it to the start. The
+    #      object is prompted ONCE; every later frame is tracked from
+    #      the model's memory of it, which is what survives occlusion,
+    #      fast motion and look-alikes, and what stops the edge
+    #      flickering from one frame to the next.
+    #   0  per frame: every frame segmented on its own from the same
+    #      prompts (the old behaviour, kept as the fallback -- and what
+    #      runs when the installed transformers has no video tracker).
+    # Before this, "frame linking" was the per-frame engine with the
+    # previous alpha warped forward by optical flow to re-seed the
+    # prompt: a workaround for not having the tracker.
+    SAM_RUNNER_SRC = r'''#!/usr/bin/env python3
+"""SAM3 runner: video tracking (memory) or per-frame, soft alpha,
+threshold/softness/temporal_blend. Written by ai_toolbox.py."""
+import os, sys, argparse, time
+import numpy as np
+SAM3_DIR = os.path.expanduser('~/RifeApp/sam3-weights')
+_fp16 = os.path.join(SAM3_DIR, 'sam3-fp16.safetensors')
+_std = os.path.join(SAM3_DIR, 'model.safetensors')
+if os.path.exists(_fp16) and not os.path.exists(_std):
+    os.rename(_fp16, _std)
+
+
+def log(msg):
+    sys.stderr.write(str(msg) + '\n'); sys.stderr.flush()
+
+
+def _patch_mps_if_needed():
+    try:
+        import transformers.models.sam3_video.processing_sam3_video as _m
+        import inspect
+        src = inspect.getsource(_m.Sam3VideoProcessor.postprocess_outputs)
+        if 'pin_memory' not in src:
+            return
+        new_src = src.replace(
+            'keep_idx.pin_memory().to(device=out_binary_masks.device',
+            'keep_idx.to(device=out_binary_masks.device')
+        globs = {**vars(_m), **{'__name__': _m.__name__}}
+        exec(compile(new_src, '<patch>', 'exec'), globs)
+        _m.Sam3VideoProcessor.postprocess_outputs = globs['postprocess_outputs']
+    except Exception as ex:
+        log(f'MPS patch skipped: {ex}')
+
+
+def load_bgr(path):
+    import cv2, tempfile, subprocess
+    ext = os.path.splitext(path)[1].lower()
+    if ext == '.exr':
+        tmp = tempfile.NamedTemporaryFile(suffix='.png', delete=False); tmp.close()
+        r = subprocess.run(['ffmpeg', '-y', '-i', path, '-vf', 'tonemap=reinhard', tmp.name],
+                           capture_output=True)
+        if r.returncode != 0:
+            subprocess.run(['ffmpeg', '-y', '-i', path, tmp.name], capture_output=True)
+        img = cv2.imread(tmp.name); os.unlink(tmp.name)
+    else:
+        img = cv2.imread(path)
+    if img is None:
+        raise FileNotFoundError(f'Could not load: {path}')
+    return img
+
+
+def write_rgba(bgr, alpha_u8, out_path):
+    import cv2
+    rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+    if alpha_u8.shape != rgb.shape[:2]:
+        alpha_u8 = cv2.resize(alpha_u8.astype(np.float32), (rgb.shape[1], rgb.shape[0]),
+                              interpolation=cv2.INTER_LINEAR)
+    bgra = cv2.cvtColor(np.dstack([rgb, np.clip(alpha_u8, 0, 255).astype(np.uint8)]),
+                        cv2.COLOR_RGBA2BGRA)
+    cv2.imwrite(out_path, bgra)
+
+
+def tensor_to_np(t):
+    if hasattr(t, 'detach'): t = t.detach()
+    if hasattr(t, 'cpu'): t = t.cpu()
+    if hasattr(t, 'float'): t = t.float()
+    return np.array(t)
+
+
+def to_alpha(arr, H, W):
+    """Any mask-ish array -> float32 alpha 0..1 at (H, W). Logits are
+    passed through a sigmoid; probabilities and binary masks are left."""
+    import cv2
+    a = np.asarray(arr, dtype=np.float32)
+    while a.ndim > 2:
+        a = a[0]
+    if a.min() < -0.01 or a.max() > 1.01:
+        a = 1.0 / (1.0 + np.exp(-a))
+    if a.shape != (H, W):
+        a = cv2.resize(a, (W, H), interpolation=cv2.INTER_LINEAR)
+    return np.clip(a, 0.0, 1.0)
+
+
+def guided_filter_soft(guide_gray, alpha_f32, r=14, eps=0.008):
+    import cv2
+    if r < 1:
+        return alpha_f32
+    I = guide_gray.astype(np.float32) / 255.0; p = alpha_f32
+    ks = (2 * r + 1, 2 * r + 1)
+    mI = cv2.blur(I, ks); mp = cv2.blur(p, ks); mIp = cv2.blur(I * p, ks); mII = cv2.blur(I * I, ks)
+    a = (mIp - mI * mp) / (mII - mI * mI + eps); b = mp - a * mI
+    q = cv2.blur(a, ks) * I + cv2.blur(b, ks)
+    return np.clip(q, 0.0, 1.0)
+
+
+def refine_mask(soft_01, bgr, threshold=0.45, softness=14):
+    """threshold: 0.3=grow, 0.5=neutral, 0.7=shrink; softness: edge
+    feather radius in px. Returns float32 0-1 alpha."""
+    import cv2
+    hard = (soft_01 > threshold).astype(np.uint8) * 255
+    h, w = hard.shape[:2]
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    hard = cv2.morphologyEx(hard, cv2.MORPH_CLOSE, k)
+    flood = hard.copy(); border = np.zeros((h + 2, w + 2), np.uint8)
+    for pt in [(0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)]:
+        cv2.floodFill(flood, border, pt, 255)
+    hard = cv2.bitwise_or(hard, cv2.bitwise_not(flood))
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(hard, 8)
+    min_area = max(64, int(h * w * 0.003)); cleaned = np.zeros_like(hard)
+    for lbl in range(1, n):
+        if stats[lbl, cv2.CC_STAT_AREA] >= min_area:
+            cleaned[labels == lbl] = 255
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    if gray.shape != cleaned.shape:
+        gray = cv2.resize(gray, (cleaned.shape[1], cleaned.shape[0]))
+    return guided_filter_soft(gray, cleaned.astype(np.float32) / 255.0, r=softness)
+
+
+def detect_with_text(det_model, det_proc, pil_img, text, inc_pts, device):
+    """SAM 3 detector: the best instance of a concept on one frame ->
+    (binary mask, xyxy box). With include points, the instance that
+    contains the most of them wins over the highest score."""
+    import torch
+    W, H = pil_img.width, pil_img.height
+    inputs = det_proc(images=pil_img, text=text.strip(), return_tensors='pt')
+    inputs = {k: v.to(device) if hasattr(v, 'to') else v for k, v in inputs.items()}
+    with torch.no_grad():
+        outputs = det_model(**inputs)
+    orig_sizes = inputs.get('original_sizes')
+    orig_sizes = orig_sizes.tolist() if orig_sizes is not None else [[H, W]]
+    try:
+        results = det_proc.post_process_instance_segmentation(
+            outputs, threshold=0.2, mask_threshold=0.4, target_sizes=orig_sizes)[0]
+    except Exception as e:
+        log(f'detect failed: {e}'); return None, None
+    masks = results.get('masks', []); boxes = results.get('boxes', []); scores = results.get('scores', [])
+    if not len(masks):
+        log(f'No detections for "{text}"'); return None, None
+    log(f'Detected {len(masks)} "{text}", scores={[f"{float(s):.2f}" for s in scores]}')
+    best_idx = 0
+    if inc_pts:
+        best_val = -1.0
+        for i, (m, s) in enumerate(zip(masks, scores)):
+            m_np = tensor_to_np(m).astype(bool)
+            inside = sum(1 for (px, py) in inc_pts
+                         if 0 <= int(py) < m_np.shape[0] and 0 <= int(px) < m_np.shape[1]
+                         and m_np[int(py), int(px)])
+            val = inside * 5.0 + float(s)
+            if val > best_val:
+                best_val = val; best_idx = i
+    else:
+        best_idx = int(np.argmax([float(s) for s in scores]))
+    best_mask_bin = (tensor_to_np(masks[best_idx]) > 0).astype(np.uint8) * 255
+    best_box = tensor_to_np(boxes[best_idx]).tolist() if len(boxes) > best_idx else None
+    return best_mask_bin, best_box
+
+
+def segment_frame(det_model, det_proc, trk_model, trk_proc, pil_img, inc, exc, text, bbox, device):
+    """Per-frame engine: one frame, no memory. Returns alpha at the
+    frame's size."""
+    import torch
+    W, H = pil_img.width, pil_img.height
+    has_spatial = bool(inc or exc or bbox); has_text = bool(text and text.strip())
+    use_box = bbox
+    if has_text:
+        mask_bin, det_box = detect_with_text(det_model, det_proc, pil_img, text, inc, device)
+        if not has_spatial:
+            if mask_bin is not None:
+                return mask_bin.astype(np.float32) / 255.0
+        elif det_box is not None:
+            use_box = det_box
+    if not inc and use_box is None:
+        inc = [[W / 2, H / 2]]
+    kw = dict(images=pil_img, return_tensors='pt')
+    if use_box is not None:
+        kw['input_boxes'] = [[[float(v) for v in use_box]]]
+    if inc or exc:
+        kw['input_points'] = [[inc + exc]]
+        kw['input_labels'] = [[[1] * len(inc) + [0] * len(exc)]]
+    inputs = trk_proc(**kw)
+    inputs = {k: v.to(device) if hasattr(v, 'to') else v for k, v in inputs.items()}
+    with torch.no_grad():
+        outputs = trk_model(**inputs)
+    scores = tensor_to_np(outputs.iou_scores[0][0])
+    best = int(np.argmax(scores))
+    return to_alpha(tensor_to_np(outputs.pred_masks[0][0][best]), H, W)
+
+
+def track_video(trk_model, trk_proc, order, read_frame, inc, exc, bbox, device):
+    """Video engine: a streaming tracker session over `order` (a list
+    of frame indices whose FIRST entry is the prompt frame). The
+    prompts are given once, on that frame; every later frame is
+    tracked from memory. Yields (frame_idx, alpha at frame size)."""
+    import torch
+    session = trk_proc.init_video_session(inference_device=device)
+    for k, fi in enumerate(order):
+        pil = read_frame(fi)
+        H, W = pil.height, pil.width
+        inputs = trk_proc(images=pil, device=device, return_tensors='pt')
+        if hasattr(inputs, 'to'):
+            inputs = inputs.to(trk_model.device if hasattr(trk_model, 'device') else device)
+        if k == 0:
+            kw = dict(inference_session=session, frame_idx=0, obj_ids=1,
+                      original_size=inputs.original_sizes[0])
+            if inc or exc:
+                kw['input_points'] = [[inc + exc]]
+                kw['input_labels'] = [[[1] * len(inc) + [0] * len(exc)]]
+            if bbox is not None:
+                kw['input_boxes'] = [[[float(v) for v in bbox]]]
+            if not (inc or exc) and bbox is None:
+                kw['input_points'] = [[[[W / 2, H / 2]]]]
+                kw['input_labels'] = [[[1]]]
+            trk_proc.add_inputs_to_inference_session(**kw)
+        with torch.no_grad():
+            out = trk_model(inference_session=session, frame=inputs.pixel_values[0])
+        masks = trk_proc.post_process_masks(
+            [out.pred_masks], original_sizes=inputs.original_sizes, binarize=False)[0]
+        yield fi, to_alpha(tensor_to_np(masks), H, W)
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--folder', required=True); ap.add_argument('--out_dir', required=True)
+    ap.add_argument('--include', default=''); ap.add_argument('--exclude', default='')
+    ap.add_argument('--text_prompt', default=''); ap.add_argument('--temporal', default='1')
+    ap.add_argument('--scale', default='1.0'); ap.add_argument('--bbox', default='')
+    ap.add_argument('--prompt_frame', default='0', type=int,
+                    help='0-based index of the frame the prompts were placed on')
+    ap.add_argument('--threshold', default='0.45', type=float)
+    ap.add_argument('--softness', default='14', type=int)
+    ap.add_argument('--temporal_blend', default='0.3', type=float)
+    ap.add_argument('--dropout_threshold', default='0.3', type=float)
+    ap.add_argument('--stabilise_2pass', default='0')
+    ap.add_argument('--edge_contrast', default='1.5', type=float)
+    a = ap.parse_args()
+    _patch_mps_if_needed()
+    import torch, cv2
+    from PIL import Image
+    device = ('cuda' if torch.cuda.is_available()
+              else ('mps' if torch.backends.mps.is_available() else 'cpu'))
+    want_video = (a.temporal == '1')
+    print(f'Loading SAM3 on {device}...', flush=True); t0 = time.time()
+    import transformers
+    det_model = transformers.Sam3Model.from_pretrained(SAM3_DIR).to(device).eval()
+    det_proc = transformers.Sam3Processor.from_pretrained(SAM3_DIR)
+    video_ok = want_video and hasattr(transformers, 'Sam3TrackerVideoModel')
+    if want_video and not video_ok:
+        log('transformers has no Sam3TrackerVideoModel: per-frame engine instead. '
+            'Update transformers in the RifeApp venv for video tracking.')
+    if video_ok:
+        trk_model = transformers.Sam3TrackerVideoModel.from_pretrained(SAM3_DIR).to(device).eval()
+        trk_proc = transformers.Sam3TrackerVideoProcessor.from_pretrained(SAM3_DIR)
+    else:
+        trk_model = transformers.Sam3TrackerModel.from_pretrained(SAM3_DIR).to(device).eval()
+        trk_proc = transformers.Sam3TrackerProcessor.from_pretrained(SAM3_DIR)
+    print(f'Loaded in {time.time()-t0:.1f}s  engine={"video tracking" if video_ok else "per frame"}',
+          flush=True)
+
+    frames = sorted(f for f in os.listdir(a.folder)
+                    if os.path.splitext(f)[1].lower() in ('.exr', '.png', '.tif', '.tiff', '.jpg', '.jpeg'))
+    total = len(frames); os.makedirs(a.out_dir, exist_ok=True)
+    user_inc = [[float(x), float(y)] for tok in (a.include.split() if a.include else []) for x, y in [tok.split(',')]]
+    user_exc = [[float(x), float(y)] for tok in (a.exclude.split() if a.exclude else []) for x, y in [tok.split(',')]]
+    bbox = [float(v) for v in a.bbox.split(',')] if a.bbox.strip() and len(a.bbox.split(',')) == 4 else None
+    scale = max(0.1, min(1.0, float(a.scale)))
+    tblend = max(0.0, min(0.95, float(a.temporal_blend)))
+    use_2pass = (getattr(a, 'stabilise_2pass', '0') == '1')
+    p0 = max(0, min(total - 1, int(a.prompt_frame)))
+    print(f'Thr:{a.threshold:.2f} Soft:{a.softness}px TBlend:{tblend:.2f} 2Pass:{use_2pass} '
+          f'Scale:{scale:.2f} Prompt frame:{p0 + 1}/{total}', flush=True)
+    inc = [[x * scale, y * scale] for x, y in user_inc]
+    exc = [[x * scale, y * scale] for x, y in user_exc]
+    sc_bbox = [v * scale for v in bbox] if bbox else None
+
+    full_cache = {}
+
+    def read_full(fi):
+        if fi not in full_cache:
+            full_cache.clear()
+            full_cache[fi] = load_bgr(os.path.join(a.folder, frames[fi]))
+        return full_cache[fi]
+
+    def read_scaled(fi):
+        bgr_full = read_full(fi)
+        oh, ow = bgr_full.shape[:2]
+        bgr = (cv2.resize(bgr_full, (max(1, int(ow * scale)), max(1, int(oh * scale))),
+                          interpolation=cv2.INTER_AREA) if scale < 1.0 else bgr_full)
+        return Image.fromarray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
+
+    done = [0]
+    history = {}      # per pass direction: previous alpha for the blend, last few for 2-pass
+
+    def finish(fi, alpha_scaled, pass_key):
+        bgr_full = read_full(fi); oh, ow = bgr_full.shape[:2]
+        alpha = to_alpha(alpha_scaled, oh, ow)
+        alpha = refine_mask(alpha, bgr_full, threshold=a.threshold, softness=a.softness)
+        st = history.setdefault(pass_key, {'prev': None, 'hist': []})
+        if tblend > 0 and st['prev'] is not None:
+            # A plain blend with the previous frame's alpha, in the
+            # order the pass walks the frames. The video engine
+            # already follows the motion; the flow warp the old
+            # per-frame engine needed would only lag it.
+            alpha = np.clip((1 - tblend) * alpha + tblend * st['prev'], 0, 1)
+        if a.edge_contrast > 1.01:
+            _eps = 1e-6; _a = np.clip(alpha, _eps, 1 - _eps)
+            alpha = 1.0 / (1.0 + np.exp(-a.edge_contrast * np.log(_a / (1.0 - _a))))
+        if use_2pass:
+            st['hist'].append(alpha.copy())
+            if len(st['hist']) > 3:
+                st['hist'].pop(0)
+            if len(st['hist']) > 1:
+                alpha = np.clip(np.mean(np.array(st['hist']), axis=0), 0, 1)
+        st['prev'] = alpha
+        out_p = os.path.join(a.out_dir, os.path.splitext(frames[fi])[0] + '.png')
+        write_rgba(bgr_full, (alpha * 255).astype(np.uint8), out_p)
+        done[0] += 1
+        print(f'[{done[0]}/{total}] OK: {frames[fi]}', flush=True)
+
+    if video_ok:
+        # Text with no points or box: the detector finds the object on
+        # the prompt frame and its box becomes the tracker's prompt.
+        # Text WITH points: the detector's box is added to the points.
+        track_box = sc_bbox
+        if a.text_prompt.strip():
+            _, det_box = detect_with_text(det_model, det_proc, read_scaled(p0),
+                                          a.text_prompt, inc, device)
+            if det_box is not None:
+                track_box = det_box
+                log(f'Text "{a.text_prompt}" -> box {[round(v) for v in det_box]} on frame {p0 + 1}')
+            elif not (inc or sc_bbox):
+                log(f'"{a.text_prompt}" not found on frame {p0 + 1}; tracking from the frame centre')
+        forward = list(range(p0, total))
+        for fi, alpha in track_video(trk_model, trk_proc, forward, read_scaled, inc, exc, track_box, device):
+            finish(fi, alpha, 'fwd')
+        if p0 > 0:
+            backward = list(range(p0, -1, -1))   # prompt frame again, then back to 0
+            first = True
+            for fi, alpha in track_video(trk_model, trk_proc, backward, read_scaled, inc, exc, track_box, device):
+                if first:
+                    first = False; continue     # already written by the forward pass
+                finish(fi, alpha, 'bwd')
+    else:
+        for fi in range(total):
+            pil = read_scaled(fi)
+            alpha = segment_frame(det_model, det_proc, trk_model, trk_proc, pil,
+                                  inc, exc, a.text_prompt, sc_bbox, device)
+            finish(fi, alpha, 'fwd')
+    print('DONE', flush=True)
+
+
+if __name__ == '__main__':
+    main()
+'''
+
     def _sam_runner_path(self):
-        """SAM3 runner: dual-model, threshold/softness/temporal_blend."""
+        """Write the runner next to the venv and return its path."""
         runner = os.path.expanduser("~/RifeApp/sam_runner.py")
-        with open(runner, "w") as f:
-            f.write('#!/usr/bin/env python3\n"""SAM3 runner: dual-model, soft alpha, threshold/softness/temporal_blend."""\nimport os,sys,argparse,time\nimport numpy as np\nSAM3_DIR=os.path.expanduser(\'~/RifeApp/sam3-weights\')\n_fp16=os.path.join(SAM3_DIR,\'sam3-fp16.safetensors\');_std=os.path.join(SAM3_DIR,\'model.safetensors\')\nif os.path.exists(_fp16) and not os.path.exists(_std): os.rename(_fp16,_std)\n\ndef _patch_mps_if_needed():\n    try:\n        import transformers.models.sam3_video.processing_sam3_video as _m\n        import inspect\n        src = inspect.getsource(_m.Sam3VideoProcessor.postprocess_outputs)\n        if \'pin_memory\' not in src: return\n        new_src = src.replace(\n            \'keep_idx.pin_memory().to(device=out_binary_masks.device\',\n            \'keep_idx.to(device=out_binary_masks.device\')\n        globs = {**vars(_m), **{\'__name__\': _m.__name__}}\n        exec(compile(new_src, \'<patch>\', \'exec\'), globs)\n        _m.Sam3VideoProcessor.postprocess_outputs = globs[\'postprocess_outputs\']\n    except Exception as ex:\n        print(f\'MPS patch skipped: {ex}\', file=sys.stderr, flush=True)\n\ndef load_bgr(path):\n    import cv2, tempfile, subprocess\n    ext = os.path.splitext(path)[1].lower()\n    if ext == \'.exr\':\n        tmp = tempfile.NamedTemporaryFile(suffix=\'.png\', delete=False); tmp.close()\n        r = subprocess.run([\'ffmpeg\',\'-y\',\'-i\',path,\'-vf\',\'tonemap=reinhard\',tmp.name], capture_output=True)\n        if r.returncode != 0:\n            subprocess.run([\'ffmpeg\',\'-y\',\'-i\',path,tmp.name], capture_output=True)\n        img = cv2.imread(tmp.name); os.unlink(tmp.name)\n    else:\n        img = cv2.imread(path)\n    if img is None: raise FileNotFoundError(f\'Could not load: {path}\')\n    return img\n\ndef write_rgba(bgr, alpha_u8, out_path):\n    import cv2, numpy as np\n    rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)\n    if alpha_u8.shape != rgb.shape[:2]:\n        alpha_u8 = cv2.resize(alpha_u8.astype(np.float32),(rgb.shape[1],rgb.shape[0]),interpolation=cv2.INTER_LINEAR)\n    bgra = cv2.cvtColor(np.dstack([rgb, np.clip(alpha_u8,0,255).astype(np.uint8)]), cv2.COLOR_RGBA2BGRA)\n    cv2.imwrite(out_path, bgra)\n\ndef tensor_to_np(t):\n    if hasattr(t,\'cpu\'): t=t.cpu()\n    import numpy as np; return np.array(t)\n\ndef soft_alpha_from_logit(logit_2d, H, W):\n    import torch, torch.nn.functional as F\n    t = torch.tensor(logit_2d, dtype=torch.float32)\n    t = F.interpolate(t.unsqueeze(0).unsqueeze(0),(H,W),mode=\'bilinear\',align_corners=False).squeeze()\n    return torch.sigmoid(t).numpy()\n\ndef guided_filter_soft(guide_gray, alpha_f32, r=14, eps=0.008):\n    import cv2, numpy as np\n    if r < 1: return alpha_f32\n    I = guide_gray.astype(np.float32)/255.0; p = alpha_f32\n    ks = (2*r+1,2*r+1)\n    mI=cv2.blur(I,ks); mp=cv2.blur(p,ks); mIp=cv2.blur(I*p,ks); mII=cv2.blur(I*I,ks)\n    a=(mIp-mI*mp)/(mII-mI*mI+eps); b=mp-a*mI\n    q=cv2.blur(a,ks)*I+cv2.blur(b,ks)\n    return np.clip(q,0.0,1.0)\n\ndef refine_mask(soft_01, bgr, threshold=0.45, softness=14):\n    """\n    threshold: 0.3=grow, 0.5=neutral, 0.7=shrink\n    softness:  edge feather radius in pixels (0=hard edge)\n    Returns float32 0-1 alpha with anti-aliased edges.\n    """\n    import cv2, numpy as np\n    hard = (soft_01 > threshold).astype(np.uint8)*255\n    h,w  = hard.shape[:2]\n    k    = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(5,5))\n    hard = cv2.morphologyEx(hard,cv2.MORPH_CLOSE,k)\n    flood=hard.copy(); border=np.zeros((h+2,w+2),np.uint8)\n    for pt in [(0,0),(w-1,0),(0,h-1),(w-1,h-1)]: cv2.floodFill(flood,border,pt,255)\n    hard = cv2.bitwise_or(hard,cv2.bitwise_not(flood))\n    n,labels,stats,_=cv2.connectedComponentsWithStats(hard,8)\n    min_area=max(64,int(h*w*0.003)); cleaned=np.zeros_like(hard)\n    for lbl in range(1,n):\n        if stats[lbl,cv2.CC_STAT_AREA]>=min_area: cleaned[labels==lbl]=255\n    gray=cv2.cvtColor(bgr,cv2.COLOR_BGR2GRAY)\n    if gray.shape!=cleaned.shape: gray=cv2.resize(gray,(cleaned.shape[1],cleaned.shape[0]))\n    alpha=guided_filter_soft(gray,cleaned.astype(np.float32)/255.0,r=softness)\n    return alpha\n\ndef detect_with_text(det_model,det_proc,pil_img,text,inc_pts,device):\n    import torch, numpy as np\n    W,H=pil_img.width,pil_img.height\n    inputs=det_proc(images=pil_img,text=text.strip(),return_tensors="pt")\n    inputs={k:v.to(device) if hasattr(v,\'to\') else v for k,v in inputs.items()}\n    with torch.no_grad(): outputs=det_model(**inputs)\n    orig_sizes=inputs.get(\'original_sizes\')\n    orig_sizes=orig_sizes.tolist() if orig_sizes is not None else [[H,W]]\n    try:\n        results=det_proc.post_process_instance_segmentation(\n            outputs,threshold=0.2,mask_threshold=0.4,target_sizes=orig_sizes)[0]\n    except Exception as e:\n        sys.stderr.write(f\'detect failed: {e}\\n\'); return None,None\n    masks=results.get(\'masks\',[]); boxes=results.get(\'boxes\',[]); scores=results.get(\'scores\',[])\n    if not len(masks):\n        sys.stderr.write(f\'No detections for "{text}"\\n\'); sys.stderr.flush(); return None,None\n    sys.stderr.write(f\'Detected {len(masks)} "{text}", scores={[f"{float(s):.2f}" for s in scores]}\\n\')\n    sys.stderr.flush()\n    best_idx=0\n    if inc_pts:\n        best_val=-1.0\n        for i,(m,s) in enumerate(zip(masks,scores)):\n            m_np=tensor_to_np(m).astype(bool)\n            inside=sum(1 for (px,py) in inc_pts\n                       if 0<=int(py)<m_np.shape[0] and 0<=int(px)<m_np.shape[1] and m_np[int(py),int(px)])\n            val=inside*5.0+float(s)\n            if val>best_val: best_val=val; best_idx=i\n    else:\n        best_idx=int(np.argmax([float(s) for s in scores]))\n    best_mask_bin=(tensor_to_np(masks[best_idx])>0).astype(np.uint8)*255\n    best_box=tensor_to_np(boxes[best_idx]).tolist() if len(boxes)>best_idx else None\n    return best_mask_bin,best_box\n\ndef track_with_points(trk_model,trk_proc,pil_img,inc_pts,exc_pts,bbox,device):\n    import torch, numpy as np\n    W,H=pil_img.width,pil_img.height\n    if not inc_pts and bbox is None: inc_pts=[[W/2,H/2]]\n    proc_kw=dict(images=pil_img,return_tensors="pt")\n    if bbox is not None: proc_kw[\'input_boxes\']=[[[float(v) for v in bbox]]]\n    if inc_pts or exc_pts:\n        proc_kw[\'input_points\']=[[inc_pts+exc_pts]]\n        proc_kw[\'input_labels\']=[[[1]*len(inc_pts)+[0]*len(exc_pts)]]\n    inputs=trk_proc(**proc_kw)\n    inputs={k:v.to(device) if hasattr(v,\'to\') else v for k,v in inputs.items()}\n    with torch.no_grad(): outputs=trk_model(**inputs)\n    scores=tensor_to_np(outputs.iou_scores[0][0])\n    best=int(np.argmax(scores))\n    logit=tensor_to_np(outputs.pred_masks[0][0][best])\n    sys.stderr.write(f\'tracker best={best} iou={scores[best]:.3f}\\n\'); sys.stderr.flush()\n    return soft_alpha_from_logit(logit,H,W)\n\ndef predict(det_model,det_proc,trk_model,trk_proc,pil_img,inc_pts,exc_pts,text,bbox,device):\n    import numpy as np\n    W,H=pil_img.width,pil_img.height\n    has_spatial=bool(inc_pts or exc_pts or bbox); has_text=bool(text and text.strip())\n    if has_text and not has_spatial:\n        sys.stderr.write(f\'Mode: text-detect "{text}"\\n\'); sys.stderr.flush()\n        mask_bin,_=detect_with_text(det_model,det_proc,pil_img,text,[],device)\n        if mask_bin is not None: return mask_bin.astype(np.float32)/255.0\n        return track_with_points(trk_model,trk_proc,pil_img,[],[],None,device)\n    if has_text and has_spatial:\n        sys.stderr.write(f\'Mode: text+spatial "{text}"\\n\'); sys.stderr.flush()\n        _,det_box=detect_with_text(det_model,det_proc,pil_img,text,inc_pts,device)\n        use_box=det_box if det_box is not None else bbox\n        return track_with_points(trk_model,trk_proc,pil_img,inc_pts,exc_pts,use_box,device)\n    sys.stderr.write(\'Mode: tracker (spatial)\\n\'); sys.stderr.flush()\n    return track_with_points(trk_model,trk_proc,pil_img,inc_pts,exc_pts,bbox,device)\n\ndef warp_optical_flow(prev_gray,curr_gray,prev_alpha_01):\n    import cv2, numpy as np\n    dis=cv2.DISOpticalFlow_create(cv2.DISOPTICAL_FLOW_PRESET_MEDIUM)\n    flow=dis.calc(prev_gray,curr_gray,None); h,w=flow.shape[:2]\n    map_x=np.clip(np.arange(w,dtype=np.float32)[None,:]+flow[:,:,0],0,w-1).astype(np.float32)\n    map_y=np.clip(np.arange(h,dtype=np.float32)[:,None]+flow[:,:,1],0,h-1).astype(np.float32)\n    return cv2.remap(prev_alpha_01.astype(np.float32),map_x,map_y,cv2.INTER_LINEAR)\n\ndef mask_centroid(alpha_01):\n    import cv2, numpy as np\n    hard=(alpha_01>0.5).astype(np.uint8)*255; M=cv2.moments(hard)\n    if M[\'m00\']>0: return [[int(M[\'m10\']/M[\'m00\']),int(M[\'m01\']/M[\'m00\'])]]\n    return []\ndef mask_area_ratio(alpha_01, prev_alpha_01):\n    import numpy as np\n    curr_area = np.sum(alpha_01 > 0.5)\n    prev_area = np.sum(prev_alpha_01 > 0.5)\n    if prev_area == 0: return 0.0\n    return abs(curr_area - prev_area) / max(prev_area, 1)\ndef detect_dropout(curr_alpha, warped_prev, dropout_thresh):\n    import numpy as np\n    if dropout_thresh >= 1.0: return False\n    ratio = mask_area_ratio(curr_alpha, warped_prev)\n    return ratio > dropout_thresh\ndef main():\n    ap=argparse.ArgumentParser()\n    ap.add_argument(\'--folder\',required=True);ap.add_argument(\'--out_dir\',required=True)\n    ap.add_argument(\'--include\',default=\'\');ap.add_argument(\'--exclude\',default=\'\')\n    ap.add_argument(\'--text_prompt\',default=\'\');ap.add_argument(\'--temporal\',default=\'1\')\n    ap.add_argument(\'--scale\',default=\'1.0\');ap.add_argument(\'--bbox\',default=\'\')\n    ap.add_argument(\'--threshold\',default=\'0.45\',type=float)\n    ap.add_argument(\'--softness\',default=\'14\',type=int)\n    ap.add_argument(\'--temporal_blend\',default=\'0.3\',type=float)\n    ap.add_argument(\'--dropout_threshold\',default=\'0.3\',type=float)\n    ap.add_argument(\'--stabilise_2pass\',default=\'0\')\n    ap.add_argument(\'--edge_contrast\',default=\'1.5\',type=float)\n    a=ap.parse_args()\n    _patch_mps_if_needed()\n    import torch,cv2;from PIL import Image\n    device=(\'cuda\' if torch.cuda.is_available() else (\'mps\' if torch.backends.mps.is_available() else \'cpu\'))\n    print(f\'Loading SAM3 on {device}...\',flush=True);t0=time.time()\n    from transformers import Sam3Model,Sam3Processor,Sam3TrackerModel,Sam3TrackerProcessor\n    det_model=Sam3Model.from_pretrained(SAM3_DIR).to(device).eval()\n    det_proc =Sam3Processor.from_pretrained(SAM3_DIR)\n    trk_model=Sam3TrackerModel.from_pretrained(SAM3_DIR).to(device).eval()\n    trk_proc =Sam3TrackerProcessor.from_pretrained(SAM3_DIR)\n    print(f\'Loaded in {time.time()-t0:.1f}s\',flush=True)\n    frames=sorted(f for f in os.listdir(a.folder)\n        if os.path.splitext(f)[1].lower() in (\'.exr\',\'.png\',\'.tif\',\'.tiff\',\'.jpg\',\'.jpeg\'))\n    total=len(frames);os.makedirs(a.out_dir,exist_ok=True)\n    user_inc=[[float(x),float(y)] for tok in (a.include.split() if a.include else []) for x,y in [tok.split(\',\')]]\n    user_exc=[[float(x),float(y)] for tok in (a.exclude.split() if a.exclude else []) for x,y in [tok.split(\',\')]]\n    bbox=[float(v) for v in a.bbox.split(\',\')] if a.bbox.strip() and len(a.bbox.split(\',\'))==4 else None\n    use_temporal=(a.temporal==\'1\')\n    scale=max(0.1,min(1.0,float(a.scale)))\n    tblend=max(0.0,min(0.95,float(a.temporal_blend)))\n    dropout_thresh = max(0.0, min(1.0, float(getattr(a, \'dropout_threshold\', 0.3))))\n    use_2pass = (getattr(a, \'stabilise_2pass\', \'0\') == \'1\')\n    print(f\'Thr:{a.threshold:.2f} Soft:{a.softness}px TBlend:{tblend:.2f} Dropout:{dropout_thresh:.2f} 2Pass:{use_2pass} Scale:{scale:.2f}\',flush=True)\n    prev_alpha=None;prev_gray=None\n    mask_history=[]\n    for fi,fname in enumerate(frames):\n        fpath=os.path.join(a.folder,fname)\n        out_p=os.path.join(a.out_dir,os.path.splitext(fname)[0]+\'.png\')\n        bgr_full=load_bgr(fpath);oh,ow=bgr_full.shape[:2]\n        bgr=cv2.resize(bgr_full,(max(1,int(ow*scale)),max(1,int(oh*scale))),\n                       interpolation=cv2.INTER_AREA) if scale<1.0 else bgr_full\n        gray=cv2.cvtColor(bgr,cv2.COLOR_BGR2GRAY)\n        pil=Image.fromarray(cv2.cvtColor(bgr,cv2.COLOR_BGR2RGB))\n        h,w=bgr.shape[:2]\n        inc=[[x*scale,y*scale] for x,y in user_inc]\n        exc=[[x*scale,y*scale] for x,y in user_exc]\n        sc_bbox=[bbox[0]*scale,bbox[1]*scale,bbox[2]*scale,bbox[3]*scale] if bbox else None\n        if use_temporal and prev_alpha is not None and prev_gray is not None:\n            try:\n                pg=cv2.resize(prev_gray,(w,h)) if prev_gray.shape!=(h,w) else prev_gray\n                pa=cv2.resize(prev_alpha,(w,h)) if prev_alpha.shape[:2]!=(h,w) else prev_alpha\n                warped=warp_optical_flow(pg,gray,pa)\n                cp=mask_centroid(warped); \n                if cp: inc=inc+cp\n            except Exception as e:\n                sys.stderr.write(f\'Flow: {e}\\n\')\n        alpha_01=predict(det_model,det_proc,trk_model,trk_proc,\n                         pil,inc,exc,a.text_prompt,sc_bbox,device)\n        if alpha_01 is None: alpha_01=np.zeros((h,w),np.float32)\n        if scale<1.0:\n            alpha_01=cv2.resize(alpha_01.astype(np.float32),(ow,oh),interpolation=cv2.INTER_LINEAR)\n        alpha_01=refine_mask(alpha_01,bgr_full,threshold=a.threshold,softness=a.softness)\n        # Temporal blend with confidence-gated dropout detection\n        if tblend>0 and prev_alpha is not None:\n            try:\n                pa_full=cv2.resize(prev_alpha,(ow,oh)) if prev_alpha.shape[:2]!=(oh,ow) else prev_alpha\n                if use_temporal and prev_gray is not None:\n                    pg_full=cv2.resize(prev_gray,(ow,oh)) if prev_gray.shape[:2]!=(oh,ow) else prev_gray\n                    curr_gray_full=cv2.cvtColor(bgr_full,cv2.COLOR_BGR2GRAY)\n                    warped_full=warp_optical_flow(pg_full,curr_gray_full,pa_full)\n                    is_dropout = detect_dropout(alpha_01, warped_full, dropout_thresh)\n                    if is_dropout:\n                        sys.stderr.write(f\'[{fi+1}] Dropout detected: area change > {dropout_thresh*100:.0f}%. Weighting warped prev heavily.\\n\'); sys.stderr.flush()\n                        blend_w = min(0.8, tblend + 0.3)\n                    else:\n                        blend_w = tblend\n                    alpha_01=(1-blend_w)*alpha_01 + blend_w*warped_full\n                else:\n                    alpha_01=(1-tblend)*alpha_01 + tblend*pa_full\n                alpha_01=np.clip(alpha_01,0,1)\n            except Exception as e:\n                sys.stderr.write(f\'TBlend: {e}\\n\')\n        if a.edge_contrast>1.01:\n            _eps=1e-6; _a=np.clip(alpha_01,_eps,1-_eps)\n            alpha_01=1.0/(1.0+np.exp(-a.edge_contrast*np.log(_a/(1.0-_a))))\n        if use_2pass:\n            mask_history.append(alpha_01.copy())\n            if len(mask_history) > 3: mask_history.pop(0)\n            if len(mask_history) > 1:\n                alpha_01 = np.mean(np.array(mask_history), axis=0)\n                alpha_01 = np.clip(alpha_01, 0, 1)\n        mask_u8=(alpha_01*255).astype(np.uint8)\n        write_rgba(bgr_full,mask_u8,out_p)\n        prev_alpha=alpha_01; prev_gray=gray\n        print(f\'[{fi+1}/{total}] OK: {fname}\',flush=True)\n    print(\'DONE\',flush=True)\nif __name__==\'__main__\': main()\n')
+        with open(runner, "w", encoding="utf-8") as f:
+            f.write(self.SAM_RUNNER_SRC)
         return runner
 
     def _sam_preview(self):
@@ -37304,7 +37695,9 @@ class App(tk.Tk):
 
             self.log(self.sam_log_txt,
                 "Running SAM 3 on " + str(total_frames) + " frames"
-                + (" (temporal tracking ON)" if use_temporal else "")
+                + (" (video tracking from frame "
+                   f"{max(0, self.sam_frame_cb.current()) + 1})" if use_temporal
+                   else " (per frame)")
                 + f" — {_n_passes} object pass{'es' if _n_passes>1 else ''}", "hi")
             _pass_lbl = f"Obj 1/{_n_passes}"
             self.after(0, lambda l=_pass_lbl, t=total_frames:
@@ -37315,12 +37708,17 @@ class App(tk.Tk):
             if self.sam_bbox:
                 x1b,y1b,x2b,y2b = self.sam_bbox
                 bbox_run = f"{int(x1b)},{int(y1b)},{int(x2b)},{int(y2b)}"
+            # The frame the prompts were placed on: the video engine
+            # prompts the tracker there and tracks outward in both
+            # directions, so a click on frame 80 is a click on frame 80.
+            prompt_frame = max(0, self.sam_frame_cb.current())
             cmd_parts = [
                 venv, script,
                 "--folder",   folder,
                 "--out_dir",  out,
                 "--temporal", temporal_flag,
                 "--scale",    str(input_scale),
+                "--prompt_frame", str(prompt_frame),
             ]
             if pts_include: cmd_parts += ["--include",     pts_include]
             if pts_exclude: cmd_parts += ["--exclude",     pts_exclude]
@@ -37414,6 +37812,7 @@ class App(tk.Tk):
                         "--out_dir",        _tmp_out,
                         "--temporal",       temporal_flag,
                         "--scale",          str(input_scale),
+                        "--prompt_frame",   str(prompt_frame),
                         "--threshold",      str(round(_thr, 3)),
                         "--softness",       str(int(_sof)),
                         "--temporal_blend", str(round(_tmp, 3)),
