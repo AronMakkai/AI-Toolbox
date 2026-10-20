@@ -103,6 +103,17 @@ prefixes. Use this table before searching.
   v5.20 docs for `Sam3TrackerVideoModel` and need checking on the Mac.
 - The single-frame preview (`sam_server.py`) is unchanged and still
   per frame.
+- Input colour (combo under the folder card, same choices as Upscale
+  Studio: Auto / sRGB / Linear / ACES2065-1 / HDR PQ). `_sam_resolve_input`
+  sets `_sam_in_mode` via `_resolve_input_colour`; `_sam_display_rgb8`
+  reads EXR/DPX as float and converts (`_scene_from_raw` +
+  `_organic_linear_to_display`) for the viewer, `_load_frame_bgr` (the
+  preview) and the per-frame fallback; the full run passes `--colour` to
+  the runner, which has the same maths (`float_rgb_to_display_u8`,
+  checked pixel-for-pixel in `TestSamInputColour`) and reads EXR floats
+  via OpenEXR -> cv2 -> ffmpeg `gbrpf32le`, since pip OpenCV usually has
+  the EXR codec compiled out. PNG/JPG/TIF are display pictures whatever
+  the choice says.
 
 ## Colour handling
 
@@ -165,8 +176,8 @@ prefixes. Use this table before searching.
 - Many tests assert on exact source text. Changing a line can break a test
   whose intent is still met; update the test to the new intent.
 - Calling Tk from a worker thread segfaults under Xvfb.
-- `sam_runner` FileNotFoundError noise at startup in the sandbox is
-  unrelated.
+- `_sam_runner_path` now creates `~/RifeApp` if missing, so the
+  startup FileNotFoundError noise in the sandbox is gone.
 - A `ttk.Combobox` is a `tk.Entry` subclass. Hotkey guards must use
   `_typing_in_field(w)`, not `isinstance(w, tk.Entry)`.
 - The sandbox ffmpeg has no `gbrpf16le`, so 16-bit half MOV → EXR is
