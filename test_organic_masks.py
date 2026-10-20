@@ -5816,8 +5816,8 @@ class TestVideoToVideoNaming(unittest.TestCase):
 
     def test_the_toggle_says_video_to_video(self):
         body = self._src(App._tab_exr)
-        self.assertIn("Video  \u2192  Video", body)
-        self.assertNotIn("H.265  \u2192  H.264", body)
+        self.assertIn('"Video \u2192 Video"', body)
+        self.assertNotIn("H.265", body[body.index("exr_tog_c"):][:200])
 
     def test_the_run_button_does_not_name_one_codec(self):
         """The codec is chosen in the panel, so a button promising
@@ -12157,6 +12157,136 @@ class TestOldProjectsStillLoad(unittest.TestCase):
         for key in ('["area"]', '["curve"]', '["rife"]'):
             self.assertNotIn(key, body)
 
+class TestSamVideoTracking(unittest.TestCase):
+    """The SAM 3 runner tracks with the video model's memory instead of
+    segmenting every frame on its own and warping the previous alpha
+    forward with optical flow. The runner is run for real here against
+    _stub/transformers, a fake SAM 3 with the documented API shapes
+    whose "model" follows a bright blob -- so the plumbing (streaming
+    session, prompt on the chosen frame, forward and backward passes,
+    scaling, outputs, progress lines) is exercised end to end."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.dir = tempfile.mkdtemp()
+        cls.seq = os.path.join(cls.dir, "seq")
+        os.makedirs(cls.seq)
+        cls.n = 24
+        for i in range(cls.n):
+            img = np.full((120, 200, 3), 30, np.uint8)
+            cv2.circle(img, (40 + i * 5, 60), 16, (250, 250, 250), -1)   # subject
+            cv2.circle(img, (20, 100), 8, (240, 240, 240), -1)           # decoy
+            cv2.imwrite(os.path.join(cls.seq, f"plate.{i + 1:04d}.png"), img)
+        cls.runner = os.path.join(cls.dir, "sam_runner.py")
+        with open(cls.runner, "w", encoding="utf-8") as fh:
+            fh.write(App.SAM_RUNNER_SRC)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.dir, ignore_errors=True)
+
+    def _run(self, *extra):
+        import subprocess
+        out = tempfile.mkdtemp(dir=self.dir)
+        env = dict(os.environ)
+        env["PYTHONPATH"] = os.path.join(os.path.dirname(SRC), "_stub")
+        env["FAKE_SAM_LOG"] = os.path.join(out, "fake.log")
+        r = subprocess.run([sys.executable, self.runner, "--folder", self.seq,
+                            "--out_dir", out, "--edge_contrast", "1.0",
+                            "--temporal_blend", "0"] + list(extra),
+                           capture_output=True, text=True, env=env, timeout=120)
+        self.assertEqual(r.returncode, 0, r.stderr[-800:])
+        return out, r.stdout, r.stderr
+
+    def _centroids(self, out):
+        res = []
+        for i in range(self.n):
+            p = os.path.join(out, f"plate.{i + 1:04d}.png")
+            a = cv2.imread(p, cv2.IMREAD_UNCHANGED)[:, :, 3].astype(float) / 255
+            ys, xs = np.nonzero(a > 0.5)
+            res.append((xs.mean(), ys.mean(), a[100, 20]))
+        return res
+
+    def test_the_runner_source_is_valid_python(self):
+        ast.parse(App.SAM_RUNNER_SRC)
+        self.assertIn("Sam3TrackerVideoModel", App.SAM_RUNNER_SRC)
+        self.assertIn("init_video_session", App.SAM_RUNNER_SRC)
+        self.assertIn("add_inputs_to_inference_session", App.SAM_RUNNER_SRC)
+        self.assertIn("--prompt_frame", App.SAM_RUNNER_SRC)
+
+    def test_video_tracking_follows_the_subject_both_ways(self):
+        """Prompted on frame 13 of 24, with a decoy blob in shot: every
+        frame's mask sits on the subject, before and after the prompt
+        frame, and never on the decoy."""
+        out, stdout, _ = self._run("--temporal", "1", "--scale", "0.5",
+                                   "--include", "100,60", "--prompt_frame", "12")
+        self.assertEqual(len([f for f in os.listdir(out) if f.endswith(".png")]), self.n)
+        for i, (cx, cy, decoy) in enumerate(self._centroids(out)):
+            with self.subTest(frame=i + 1):
+                self.assertLess(abs(cx - (40 + i * 5)), 3)
+                self.assertLess(abs(cy - 60), 3)
+                self.assertLess(decoy, 0.1)
+        self.assertIn("engine=video tracking", stdout)
+        self.assertEqual(stdout.count("] OK:"), self.n)
+        self.assertIn(f"[{self.n}/{self.n}]", stdout)
+
+    def test_the_prompt_lands_on_the_chosen_frame_scaled(self):
+        out, _, _ = self._run("--temporal", "1", "--scale", "0.5",
+                              "--include", "100,60", "--prompt_frame", "12")
+        import json
+        events = [json.loads(l) for l in open(os.path.join(out, "fake.log"))]
+        prompts = [e for e in events if e["ev"] == "prompt"]
+        # one forward session and one backward session, each prompted once
+        self.assertEqual(len([e for e in events if e["ev"] == "init_session"]), 2)
+        self.assertEqual(len(prompts), 2)
+        for e in prompts:
+            self.assertEqual(e["points"], [[[[50.0, 30.0]]]])     # 100,60 at scale 0.5
+            self.assertEqual(e["labels"], [[[1]]])
+            self.assertEqual(e["original_size"], [60, 100])
+
+    def test_prompting_on_the_first_frame_is_one_pass(self):
+        out, _, _ = self._run("--temporal", "1", "--include", "40,60",
+                              "--prompt_frame", "0")
+        import json
+        events = [json.loads(l) for l in open(os.path.join(out, "fake.log"))]
+        self.assertEqual(len([e for e in events if e["ev"] == "init_session"]), 1)
+        self.assertEqual(len([f for f in os.listdir(out) if f.endswith(".png")]), self.n)
+
+    def test_text_alone_becomes_a_box_for_the_tracker(self):
+        out, _, stderr = self._run("--temporal", "1", "--text_prompt", "circle",
+                                   "--prompt_frame", "0")
+        self.assertIn("-> box", stderr)
+        import json
+        prompts = [json.loads(l) for l in open(os.path.join(out, "fake.log"))
+                   if '"prompt"' in l]
+        self.assertIsNotNone(prompts[0]["boxes"])
+        self.assertIsNone(prompts[0]["points"])
+
+    def test_per_frame_engine_still_works(self):
+        out, stdout, _ = self._run("--temporal", "0", "--include", "40,60")
+        self.assertIn("engine=per frame", stdout)
+        self.assertEqual(len([f for f in os.listdir(out) if f.endswith(".png")]), self.n)
+        cx, cy, _ = self._centroids(out)[5]
+        self.assertLess(abs(cx - 65), 3)
+        # 2-pass smoothing is an average over three frames: on a
+        # moving subject the centroid lags, which is the documented
+        # trade-off, not a fault
+        out2, _, _ = self._run("--temporal", "0", "--include", "40,60",
+                               "--stabilise_2pass", "1")
+        cx2, _, _ = self._centroids(out2)[5]
+        self.assertLess(cx2, cx)
+
+    def test_the_app_passes_the_prompt_frame_to_every_object_pass(self):
+        import inspect
+        body = inspect.getsource(App._sam_run)
+        self.assertEqual(body.count('"--prompt_frame"'), 2)
+        self.assertIn("self.sam_frame_cb.current()", body)
+
+    def test_the_runner_is_rewritten_from_the_source_constant(self):
+        import inspect
+        body = inspect.getsource(App._sam_runner_path)
+        self.assertIn("SAM_RUNNER_SRC", body)
+
 
 class TestSetupRifeLabel(unittest.TestCase):
     """The Setup & Install component row for the RIFE install is
@@ -14174,7 +14304,11 @@ class TestWindowsPortability(unittest.TestCase):
                 self.assertIn("self._reveal(", body)
 
     # ── SAM3 device selection: CUDA checked, not just MPS ──
-    def test_both_embedded_sam3_scripts_check_cuda_first(self):
+    @staticmethod
+    def _embedded_sam3_scripts():
+        """The two SAM 3 scripts the app writes to ~/RifeApp: the
+        server is still an f.write("...") literal, the runner is the
+        class constant App.SAM_RUNNER_SRC."""
         import ast
         tree = ast.parse(open("ai_toolbox.py", encoding="utf-8").read())
         found = []
@@ -14187,6 +14321,11 @@ class TestWindowsPortability(unittest.TestCase):
                     and isinstance(node.args[0].value, str)
                     and "torch.backends.mps.is_available" in node.args[0].value):
                 found.append(node.args[0].value)
+        found.append(App.SAM_RUNNER_SRC)
+        return found
+
+    def test_both_embedded_sam3_scripts_check_cuda_first(self):
+        found = self._embedded_sam3_scripts()
         self.assertEqual(len(found), 2)
         for script in found:
             with self.subTest():
@@ -14195,7 +14334,7 @@ class TestWindowsPortability(unittest.TestCase):
                 # "device=" appears many times in these scripts (e.g.
                 # "to(device=device)"), so anchored on the specific
                 # assignment that builds the ternary itself.
-                i = script.index("device=('cuda'")
+                i = script.index("'cuda' if torch.cuda.is_available()")
                 seg = script[i:i + 200]
                 self.assertLess(seg.index("cuda"), seg.index("mps"))
 
@@ -14204,18 +14343,10 @@ class TestWindowsPortability(unittest.TestCase):
         string literal -- verified as ACTUAL standalone Python, not
         just that the surrounding file still parses."""
         import ast
-        tree = ast.parse(open("ai_toolbox.py", encoding="utf-8").read())
         checked = 0
-        for node in ast.walk(tree):
-            if (isinstance(node, ast.Call)
-                    and isinstance(node.func, ast.Attribute)
-                    and node.func.attr == "write"
-                    and node.args
-                    and isinstance(node.args[0], ast.Constant)
-                    and isinstance(node.args[0].value, str)
-                    and "torch.cuda.is_available" in node.args[0].value):
-                ast.parse(node.args[0].value)  # raises if invalid
-                checked += 1
+        for script in self._embedded_sam3_scripts():
+            ast.parse(script)  # raises if invalid
+            checked += 1
         self.assertEqual(checked, 2)
 
     # ── PATH separator ──
