@@ -13106,6 +13106,114 @@ class TestFalLivenessAndPanel(unittest.TestCase):
         self.assertIn("alive=lambda: life[0]", inspect.getsource(App._fal_video_submit))
 
 
+class TestFalFactorRefusal(unittest.TestCase):
+    """FlashVSR refused Detail Studio's x4 with "Upscale factor is too
+    high. Please use a lower upscale factor." -- no number to parse, so
+    the one retry the code had gave up. Now a refusal without a number
+    steps down the ladder (4 -> 3 -> 2 -> 1.5), the learned cap is
+    remembered for the clip, and the remainder is Lanczos as for any
+    model that cannot reach the size."""
+
+    MSG = ("[{'loc': ['body', 'upscale_factor'], 'msg': 'Upscale factor is "
+           "too high. Please use a lower upscale factor.', 'type': 'value_error'}]")
+
+    def test_the_refusal_is_recognised_and_stepped_down(self):
+        self.assertTrue(App._ups_is_factor_refusal(RuntimeError(self.MSG)))
+        self.assertFalse(App._ups_is_factor_refusal(RuntimeError("quota exceeded")))
+        self.assertIsNone(App._ups_parse_factor_limit(self.MSG))
+        self.assertEqual(App._ups_step_down(4.0), 3.0)
+        self.assertEqual(App._ups_step_down(3.0), 2.0)
+        self.assertEqual(App._ups_step_down(2.0), 1.5)
+        self.assertEqual(App._ups_step_down(1.5), 1.0)
+        self.assertIsNone(App._ups_step_down(1.0))
+        self.assertEqual(App._ups_step_down(3.7), 3.0)
+
+    def test_a_learned_cap_shapes_the_plan(self):
+        app = App.__new__(App)
+        app._ups_fal_caps = {("flashvsr", 120, 68): 2.0}
+        f, native, want = app._ups_factor_plan("flashvsr", (120, 68), (480, 272))
+        self.assertEqual((f, native, want), (2.0, (240, 136), 4.0))
+        self.assertIn("Lanczos", app._ups_limit_text("flashvsr", (120, 68), (480, 272)))
+
+    def test_the_call_steps_down_until_fal_accepts(self):
+        """x4 and x3 refused without a number, x2 accepted: three
+        submissions, the cap remembered, the log saying each retry,
+        the notice shown once."""
+        d = tempfile.mkdtemp()
+        for i in range(2):
+            cv2.imwrite(os.path.join(d, f"f{i}.png"), np.full((68, 120, 3), 90, np.uint8))
+        app = App.__new__(App)
+        app._ups_bar_prefix = ""
+        app._ip_vace_cancel = False
+        app.ups_fal_panel = None
+        app.after = lambda ms, fn=None, *a: (fn() if fn else None)
+        app.progress = lambda *a, **k: None
+        app._ups_fal_caps = {}
+        app._ups_limit_seen = set()
+        app._ups_cached = lambda *a, **k: None
+        app._ups_fal_ingest = lambda *a, **k: 2
+        asked, logs, shown = [], [], []
+
+        def submit(endpoint, src, args, **kw):
+            asked.append(args["upscale_factor"])
+            if args["upscale_factor"] > 2.0:
+                raise RuntimeError(self.MSG)
+            return "/tmp/out.mov"
+        app._fal_video_submit = submit
+        with unittest.mock.patch.object(App, "_vace_estimate", classmethod(lambda c, n, endpoint=None: (10.0, False))), \
+             unittest.mock.patch.object(App, "_vace_record_render", classmethod(lambda c, *a, **k: None)), \
+             unittest.mock.patch.object(sys.modules["ai_toolbox"].messagebox, "showinfo",
+                                        lambda *a, **k: shown.append(a)):
+            n = app._ups_fal_upscale("flashvsr", d, ["f0.png", "f1.png"], (480, 272),
+                                     on_log=logs.append, sig="t",
+                                     read=App._det_read_png,
+                                     fal_kw={"accel": "regular"})
+        self.assertEqual(n, 2)
+        self.assertEqual(asked, [4.0, 3.0, 2.0])
+        self.assertEqual(app._ups_fal_caps[("flashvsr", 120, 68)], 2.0)
+        self.assertEqual(sum("retrying at" in l for l in logs), 2)
+        self.assertEqual(len(shown), 1)
+        self.assertIn("Lanczos", shown[0][1])
+        # the next call for this clip asks x2 straight away
+        asked.clear()
+        with unittest.mock.patch.object(App, "_vace_estimate", classmethod(lambda c, n, endpoint=None: (10.0, False))), \
+             unittest.mock.patch.object(App, "_vace_record_render", classmethod(lambda c, *a, **k: None)), \
+             unittest.mock.patch.object(sys.modules["ai_toolbox"].messagebox, "showinfo",
+                                        lambda *a, **k: shown.append(a)):
+            app._ups_fal_upscale("flashvsr", d, ["f0.png", "f1.png"], (480, 272),
+                                 on_log=logs.append, sig="t", read=App._det_read_png,
+                                 fal_kw={"accel": "regular"})
+        self.assertEqual(asked, [2.0])
+        self.assertEqual(len(shown), 1)        # said once per setting
+        shutil.rmtree(d, ignore_errors=True)
+
+    def test_a_refusal_that_is_not_about_the_factor_is_raised(self):
+        d = tempfile.mkdtemp()
+        cv2.imwrite(os.path.join(d, "f0.png"), np.full((68, 120, 3), 90, np.uint8))
+        app = App.__new__(App)
+        app._ups_bar_prefix = ""
+        app._ip_vace_cancel = False
+        app.ups_fal_panel = None
+        app.after = lambda ms, fn=None, *a: (fn() if fn else None)
+        app.progress = lambda *a, **k: None
+        app._ups_fal_caps = {}
+        app._ups_limit_seen = set()
+        app._ups_cached = lambda *a, **k: None
+        asked = []
+
+        def submit(endpoint, src, args, **kw):
+            asked.append(args["upscale_factor"]); raise RuntimeError("quota exceeded")
+        app._fal_video_submit = submit
+        with unittest.mock.patch.object(App, "_vace_estimate", classmethod(lambda c, n, endpoint=None: (10.0, False))):
+            with self.assertRaises(RuntimeError) as cm:
+                app._ups_fal_upscale("flashvsr", d, ["f0.png"], (480, 272),
+                                     sig="t", read=App._det_read_png,
+                                     fal_kw={"accel": "regular"})
+        self.assertIn("quota", str(cm.exception))
+        self.assertEqual(asked, [4.0])
+        shutil.rmtree(d, ignore_errors=True)
+
+
 class TestSetupRifeLabel(unittest.TestCase):
     """The Setup & Install component row for the RIFE install is
     labelled "RIFE" and names its one remaining consumer, Fix Missing
@@ -17431,10 +17539,14 @@ class TestUpscaleModelOutputLimit(unittest.TestCase):
         self.assertIn("SeedVR2 cannot reach 3840\u00d72160", txt)
         self.assertIn("3600\u00d72160", txt)
 
-    def test_a_refusal_is_retried_once_at_fals_number(self):
+    def test_a_refusal_is_retried_at_fals_number(self):
+        """One submit in a bounded loop: fal's own number when it gives
+        one, the ladder when it does not (TestFalFactorRefusal), and
+        never a retry at a factor that is not lower."""
         body = self._src(App._ups_fal_upscale)
         self.assertIn("self._ups_parse_factor_limit(ex)", body)
-        self.assertEqual(body.count("self._fal_video_submit("), 2)
+        self.assertEqual(body.count("self._fal_video_submit("), 1)
+        self.assertIn("for attempt in range(4):", body)
         self.assertIn("told + 1e-6 >= factor", body)   # no endless retry
         self.assertIn("messagebox.showinfo(", body)
 
