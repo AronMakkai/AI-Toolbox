@@ -12517,6 +12517,21 @@ class TestDetailStudio(unittest.TestCase):
                    "_det_reblend", "_det_draw", "_det_reset_sash"):
             self.assertTrue(callable(getattr(App, fn, None)), fn)
 
+    def test_project_load_keeps_the_pre_split_fallback_on_upstudio(self):
+        """The Detail section is read after the whole Upscale Studio
+        block: the old-combined-tab fallback (`elif um ...`) belongs to
+        the upstudio `if`, and a project with no Detail section must not
+        trigger it."""
+        import inspect
+        body = inspect.getsource(App._project_load)
+        i_pm = body.index('pm = mods.get("upstudio")')
+        i_el = body.index('elif um and um.get("vars"):')
+        i_dm = body.index('dm = mods.get("detail")')
+        self.assertLess(i_pm, i_el)
+        self.assertLess(i_el, i_dm)
+        self.assertNotIn('self._project_restore_vars(dm.get("vars"))\n'
+                         '                elif', body)
+
     def test_it_shares_upscale_studios_helpers_by_parameter_not_state(self):
         """The shared helpers take the mode / hdr / sig / reader as
         arguments and default to Upscale Studio's own, so neither
