@@ -21976,9 +21976,11 @@ class App(tk.Tk):
                                 # still waiting, once fal's own logs stop
     VACE_FAL_POLL_S = 5         # how often cancellation is re-checked
 
+    VACE_FAL_HARD_CAP_S = 4 * 60 * 60   # a job that keeps talking may run this long
+
     def _fal_call_with_watchdog(self, fn, on_log=None, cancel_check=None,
                                 timeout_s=None,
-                                label="fal"):
+                                label="fal", alive=None):
         """Run a blocking call (fal_client.subscribe or similar) on a
         background thread and poll for its result, instead of blocking
         the caller directly on it. This exists because on_queue_update
@@ -22003,6 +22005,14 @@ class App(tk.Tk):
         Returns fn's result, or re-raises whatever fn itself raised
         (via a daemon thread + Queue, so an abandoned call doesn't
         block process exit and can't corrupt this thread's stack).
+
+        alive, if given, returns the time of the last sign of life from
+        the call (a queue position, a log line). The timeout is then
+        measured from THAT, not from the start: a SeedVR2 render that
+        keeps reporting for forty minutes is working, not stuck, and
+        was being killed at thirty by a clock that never looked. A
+        hard cap (VACE_FAL_HARD_CAP_S) still ends a job that talks
+        forever.
         """
         # The bar shows fal's mark and stands still for as long as this
         # call is out -- on the Tk thread, wherever this one is.
@@ -22012,7 +22022,7 @@ class App(tk.Tk):
             pass
         try:
             return self._fal_call_with_watchdog_inner(
-                fn, on_log, cancel_check, timeout_s, label)
+                fn, on_log, cancel_check, timeout_s, label, alive)
         finally:
             try:
                 self.after(0, self._fal_hold_end)
@@ -22020,7 +22030,7 @@ class App(tk.Tk):
                 pass
 
     def _fal_call_with_watchdog_inner(self, fn, on_log, cancel_check,
-                                      timeout_s, label):
+                                      timeout_s, label, alive=None):
         import threading, queue, time
         start = time.time()
         last_heartbeat = [start]
@@ -22046,12 +22056,27 @@ class App(tk.Tk):
             except queue.Empty:
                 now = time.time()
                 elapsed = now - start
-                if elapsed > (timeout_s or self.VACE_FAL_TIMEOUT_S):
+                last = start
+                if alive is not None:
+                    try:
+                        last = max(start, float(alive() or start))
+                    except Exception:
+                        last = start
+                quiet = now - last
+                if quiet > (timeout_s or self.VACE_FAL_TIMEOUT_S):
                     raise RuntimeError(
-                        f"Timed out after {elapsed / 60:.0f} min with no "
-                        f"response from {label}. It may still be running "
-                        "on their end -- check their dashboard, or try "
-                        "again.")
+                        f"Timed out after {quiet / 60:.0f} min with no "
+                        f"response from {label}"
+                        + (f" ({elapsed / 60:.0f} min in all)"
+                           if alive is not None and elapsed - quiet > 60
+                           else "")
+                        + ". It may still be running on their end -- "
+                        "check their dashboard, or try again.")
+                if elapsed > self.VACE_FAL_HARD_CAP_S:
+                    raise RuntimeError(
+                        f"Gave up on {label} after {elapsed / 3600:.1f} h; "
+                        "it was still reporting, but nothing takes this "
+                        "long. Check their dashboard.")
                 if on_log and now - last_heartbeat[0] >= self.VACE_FAL_HEARTBEAT_S:
                     last_heartbeat[0] = now
                     on_log(f"Still waiting on {label} "
@@ -50957,6 +50982,14 @@ print("EXR write complete")
         self.ups_run_btn = self._runbtn(_bottom, "Run Upscale", self._ups_run)
         self.ups_run_btn.configure(state="disabled")
         self.ups_bar = self._global_bar_proxy()   # the window's bar
+        # The standing fal panel Expansion Studio has: endpoint, phase,
+        # frames, elapsed, ETA, queue position, request id and the
+        # watchdog's verdict, while a paid model is out -- "is it going
+        # to plan", which the log does not answer.
+        self.ups_fal_panel = tk.Label(
+            _bottom, text="", font=FM, bg="#0D0D0D", fg=G,
+            anchor="w", justify="left", padx=10, pady=6, wraplength=390)
+        self._ups_fal_state = {}
 
         # Right: viewer over log
         vp = self._make_paned(rf, "vertical")
@@ -52556,17 +52589,32 @@ print("EXR write complete")
         return args
 
     def _fal_video_submit(self, endpoint, video_path, arguments, on_log=None,
-                          on_phase=None, label="fal"):
+                          on_phase=None, label="fal", on_panel=None):
         """Upload one clip, run `endpoint` on it, download the returned
         video. The generic sibling of _topaz_submit; every wait goes
         through the watchdog, so the bar shows fal's hold and Cancel
-        works even if fal falls silent."""
+        works even if fal falls silent. Every queue position and log
+        line counts as a sign of life for the watchdog, and reaches a
+        standing panel through on_panel (phase / queue / req / msg)
+        when the caller has one."""
+        import time as _time
         key = self._vace_key()
         if not key:
             raise RuntimeError("No fal.ai key — set one up on the "
                                "Setup tab.")
+        life = [_time.time()]
+
+        def _pfeed(**kw):
+            if on_panel is None:
+                return
+            try:
+                self.after(0, lambda k=kw: on_panel(**k))
+            except Exception:
+                pass
 
         def _ph(phase, detail=""):
+            life[0] = _time.time()
+            _pfeed(phase=phase)
             if on_phase:
                 on_phase(phase, detail)
 
@@ -52581,21 +52629,41 @@ print("EXR write complete")
             label=f"the upload of {os.path.basename(video_path)}")
         _ph("queue", "submitting")
         seen = set()
+        state = {"pos": None, "req": None, "phase": None}
 
         def _on_update(update):
             if self._ip_vace_cancel:
                 return
+            life[0] = _time.time()
             name = type(update).__name__
+            rid = (getattr(update, "request_id", None)
+                   or getattr(update, "requestId", None))
+            if rid and rid != state["req"]:
+                state["req"] = rid
+                if on_log:
+                    on_log(f"fal request {rid}")
+                _pfeed(req=rid)
             if "Queued" in name:
                 pos = getattr(update, "position", None)
+                if pos != state["pos"]:
+                    state["pos"] = pos
+                    if on_log:
+                        on_log(f"Queued at position {pos}"
+                               if pos is not None else "Queued")
+                    _pfeed(queue=pos)
                 _ph("queue", f"position {pos}" if pos is not None
                     else "waiting")
             else:
+                if state["phase"] != "render":
+                    state["phase"] = "render"
+                    if on_log:
+                        on_log(f"Rendering on {endpoint}\u2026")
                 _ph("render", "")
             for lg in (getattr(update, "logs", None) or []):
                 msg = lg.get("message") if isinstance(lg, dict) else str(lg)
                 if msg and msg not in seen:
                     seen.add(msg)
+                    _pfeed(msg=msg)
                     if on_log:
                         on_log(f"{label}: {msg}")
 
@@ -52607,7 +52675,7 @@ print("EXR write complete")
                 endpoint, arguments=body, with_logs=True,
                 on_queue_update=_on_update),
             on_log=on_log, cancel_check=lambda: self._ip_vace_cancel,
-            label=f"fal ({endpoint})")
+            label=f"fal ({endpoint})", alive=lambda: life[0])
         vid = (result or {}).get("video") or {}
         out_url = vid.get("url") if isinstance(vid, dict) else vid
         if not out_url:
@@ -52626,21 +52694,28 @@ print("EXR write complete")
         return dst
 
     def _ups_fal_upscale(self, m, folder, names, size, on_log=None,
-                         on_frac=None, sig=None, read=None, fal_kw=None):
+                         on_frac=None, sig=None, read=None, fal_kw=None,
+                         panel=None):
         """Upscale `names` (one contiguous span) with paid model m to
         `size`, into the cache. Cache-first: a span already fully cached
         costs nothing. Returns the number of frames newly generated.
         `sig` and `read` (path -> (PIL base, gain)) default to this
-        studio's own; Detail Studio passes its own."""
+        studio's own; Detail Studio passes its own. `panel` is the
+        (Label, state attribute) of the standing fal panel to drive --
+        Upscale Studio's own by default."""
         import cv2
         import numpy as np
         import shutil as _sh
+        import time as _time
         tw, th = size
         if sig is None:
             sig = self._ups_model_sig(m)
         if read is None:
             read = self._ups_read_source
         fal_kw = dict(fal_kw or {})
+        if panel is None:
+            panel = (getattr(self, "ups_fal_panel", None), "_ups_fal_state")
+        p_lbl, p_attr = panel
         if all(self._ups_cached(m, folder, n, sig) for n in names):
             if on_log:
                 on_log(f"all {len(names)} frame(s) already cached — "
@@ -52657,6 +52732,20 @@ print("EXR write complete")
                 on_frac(f)
             lbl = f"{pre}  ·  {label}" if pre else label
             self.after(0, lambda f=f, L=lbl: self.progress(f, L))
+            if p_lbl is not None:
+                self.after(0, lambda ph=phase: self._fal_panel_note(
+                    p_attr, phase=ph))
+
+        def _panel(**kw):
+            if p_lbl is not None:
+                self._fal_panel_note(p_attr, **kw)
+
+        nm = self.UPS_MODEL_NAMES[m]
+        est, learned = self._vace_estimate(len(names), endpoint=endpoint)
+        if p_lbl is not None:
+            self.after(0, lambda: self._fal_panel_begin(
+                p_lbl, p_attr, endpoint, len(names), est, learned))
+        t_job = _time.time()
 
         # A fresh folder per call: two jobs (a preview and a run, or two
         # chunks) must never decode into each other's frames.
@@ -52679,9 +52768,12 @@ print("EXR write complete")
              "pad=ceil(iw/2)*2:ceil(ih/2)*2", "-c:v", "libx264", "-crf",
              "10", "-pix_fmt", "yuv420p", src], capture_output=True)
         if r.returncode != 0 or not os.path.exists(src):
+            if p_lbl is not None:
+                self.after(0, lambda: self._fal_panel_end(
+                    p_lbl, p_attr, "could not stage the clip \u2014 see the "
+                    "log.", ok=False))
             raise RuntimeError("could not stage frames: "
                                + r.stderr.decode("utf-8", "replace")[-300:])
-        nm = self.UPS_MODEL_NAMES[m]
 
         def _plan():
             f, native, want = self._ups_factor_plan(m, (sw, sh), (tw, th))
@@ -52696,7 +52788,7 @@ print("EXR write complete")
             try:
                 out = self._fal_video_submit(
                     endpoint, src, self._ups_fal_args(m, factor, **fal_kw),
-                    on_log=on_log, on_phase=_bar, label=nm)
+                    on_log=on_log, on_phase=_bar, label=nm, on_panel=_panel)
             except Exception as ex:
                 # fal knows the real limit for THIS clip and says it in
                 # the refusal. Take its number, remember it, try once
@@ -52726,9 +52818,23 @@ print("EXR write complete")
                 factor = _plan()
                 out = self._fal_video_submit(
                     endpoint, src, self._ups_fal_args(m, factor, **fal_kw),
-                    on_log=on_log, on_phase=_bar, label=nm)
-            return self._ups_fal_ingest(m, folder, names, out, work, sig,
-                                        (sw, sh), (tw, th), on_log, _bar)
+                    on_log=on_log, on_phase=_bar, label=nm, on_panel=_panel)
+            n_new = self._ups_fal_ingest(m, folder, names, out, work, sig,
+                                         (sw, sh), (tw, th), on_log, _bar)
+            took = _time.time() - t_job
+            self._vace_record_render(len(names), took, endpoint=endpoint)
+            if p_lbl is not None:
+                mins, secs = divmod(int(took), 60)
+                self.after(0, lambda: self._fal_panel_end(
+                    p_lbl, p_attr, f"\u2713 {nm}: {len(names)} frame(s) in "
+                    f"{mins}m{secs:02d}s", ok=True))
+            return n_new
+        except Exception as ex:
+            if p_lbl is not None:
+                why = (str(ex).strip().splitlines() or [type(ex).__name__])[0][:140]
+                self.after(0, lambda w=why: self._fal_panel_end(
+                    p_lbl, p_attr, f"{nm} call failed \u2014 {w}", ok=False))
+            raise
         finally:
             _sh.rmtree(work, ignore_errors=True)
 
@@ -53527,6 +53633,10 @@ print("EXR write complete")
         tk.Frame(_bottom, bg=BD, height=1).pack(fill="x")
         self.det_run_btn = self._runbtn(_bottom, "Run Detail", self._det_run)
         self.det_run_btn.configure(state="disabled")
+        self.det_fal_panel = tk.Label(
+            _bottom, text="", font=FM, bg="#0D0D0D", fg=G,
+            anchor="w", justify="left", padx=10, pady=6, wraplength=390)
+        self._det_fal_state = {}
 
         # Right: viewer over log
         vp = self._make_paned(rf, "vertical")
@@ -53892,10 +54002,11 @@ print("EXR write complete")
         pngs = self._det_stage_names(names, k, stage)
         self._ups_bar_prefix = self._det_bar_prefix
         try:
-            return self._ups_fal_upscale(m, stage, pngs, size, on_log, on_frac,
-                                         sig=self._det_sig(m, size),
-                                         read=self._det_read_png,
-                                         fal_kw=self._det_fal_kw(m))
+            return self._ups_fal_upscale(
+                m, stage, pngs, size, on_log, on_frac,
+                sig=self._det_sig(m, size), read=self._det_read_png,
+                fal_kw=self._det_fal_kw(m),
+                panel=(getattr(self, "det_fal_panel", None), "_det_fal_state"))
         finally:
             self._ups_bar_prefix = ""
 

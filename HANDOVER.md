@@ -140,6 +140,20 @@ prefixes. Use this table before searching.
 
 ## fal
 
+- `_fal_call_with_watchdog(..., alive=)`: the timeout (`VACE_FAL_TIMEOUT_S`,
+  30 min) is measured from the last sign of life when the caller passes
+  `alive` (a callable returning that time), not from the start — SeedVR2
+  renders that kept reporting for 40 min were being killed at 30.
+  `VACE_FAL_HARD_CAP_S` (4 h) still ends a job that talks forever.
+  `_fal_video_submit` feeds `alive` from every queue update / log line,
+  logs the request id and queue moves, and relays phase / queue / req /
+  msg to `on_panel`.
+- Upscale Studio and Detail Studio have Expansion Studio's standing fal
+  panel (`ups_fal_panel` / `det_fal_panel`, under Run): `_ups_fal_upscale`
+  takes `panel=(label, state_attr)`, calls `_fal_panel_begin` with the
+  `_vace_estimate` for the span, notes every phase/update, records the
+  render time (`_vace_record_render`) and ends with ✓ / the failure.
+
 - All calls go through `_fal_call_with_watchdog`. While waiting on fal the
   progress bar freezes with a red/black fal mark, and Preview becomes
   Cancel preview.
