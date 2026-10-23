@@ -52509,6 +52509,25 @@ print("EXR write complete")
         f = math.floor(f * 1000.0 + 1e-6) / 1000.0   # never round UP past it
         return f, (int(round(sw * f)), int(round(sh * f))), want
 
+    # The factors to fall back through when fal refuses one without
+    # saying what it would take.
+    UPS_FACTOR_LADDER = (4.0, 3.0, 2.0, 1.5, 1.0)
+
+    @classmethod
+    def _ups_step_down(cls, factor):
+        """The next factor below `factor` on the ladder, or None."""
+        for f in cls.UPS_FACTOR_LADDER:
+            if f + 1e-6 < factor:
+                return f
+        return None
+
+    @staticmethod
+    def _ups_is_factor_refusal(ex):
+        """fal's "Upscale factor is too high" (in whatever wrapping --
+        a validation list, a dict, a string)."""
+        t = str(ex).lower()
+        return "upscale_factor" in t or "upscale factor" in t
+
     @staticmethod
     def _ups_parse_factor_limit(msg):
         """The factor fal says it would accept, out of its refusal
@@ -52785,40 +52804,50 @@ print("EXR write complete")
 
         try:
             factor = _plan()
-            try:
-                out = self._fal_video_submit(
-                    endpoint, src, self._ups_fal_args(m, factor, **fal_kw),
-                    on_log=on_log, on_phase=_bar, label=nm, on_panel=_panel)
-            except Exception as ex:
-                # fal knows the real limit for THIS clip and says it in
-                # the refusal. Take its number, remember it, try once
-                # more -- rather than fail on a limit it just spelled out.
-                told = self._ups_parse_factor_limit(ex)
-                if (told is None or told + 1e-6 >= factor
-                        or self._ip_vace_cancel):
-                    raise
-                caps = getattr(self, "_ups_fal_caps", None)
-                if caps is None:
-                    caps = self._ups_fal_caps = {}
-                caps[(m, sw, sh)] = told
-                if on_log:
-                    on_log(f"fal allows at most \u00d7{told:g} for this "
-                           "clip \u2014 retrying at that.")
-                txt = self._ups_limit_text(m, (sw, sh), (tw, th))
-                if txt:
-                    # said here, so the up-front notice does not say it
-                    # again on the next preview
-                    seen = getattr(self, "_ups_limit_seen", None)
-                    if seen is None:
-                        seen = self._ups_limit_seen = set()
-                    seen.add((m, (sw, sh), (tw, th), self._ups_factor_plan(
-                        m, (sw, sh), (tw, th))[0]))
+            out = None
+            for attempt in range(4):
+                try:
+                    out = self._fal_video_submit(
+                        endpoint, src, self._ups_fal_args(m, factor, **fal_kw),
+                        on_log=on_log, on_phase=_bar, label=nm,
+                        on_panel=_panel)
+                    break
+                except Exception as ex:
+                    # fal knows the real limit for THIS clip. Sometimes
+                    # it says the number ("...4.0 or lower"); sometimes
+                    # only that the factor is too high (FlashVSR). Take
+                    # the number when there is one, else step down the
+                    # ladder, remember what was learned, and try again
+                    # -- rather than fail on a limit it just refused.
+                    if self._ip_vace_cancel or attempt == 3:
+                        raise
+                    told = self._ups_parse_factor_limit(ex)
+                    if told is None:
+                        told = (self._ups_step_down(factor)
+                                if self._ups_is_factor_refusal(ex) else None)
+                    if told is None or told + 1e-6 >= factor or told < 1.0:
+                        raise
+                    caps = getattr(self, "_ups_fal_caps", None)
+                    if caps is None:
+                        caps = self._ups_fal_caps = {}
+                    caps[(m, sw, sh)] = told
+                    if on_log:
+                        on_log(f"fal refused ×{factor:g} for this clip "
+                               f"— retrying at ×{told:g}.")
+                    factor = _plan()
+            txt = self._ups_limit_text(m, (sw, sh), (tw, th))
+            if txt and (getattr(self, "_ups_fal_caps", None) or {}).get(
+                    (m, sw, sh)):
+                # said here, so the up-front notice does not say it
+                # again on the next preview
+                seen = getattr(self, "_ups_limit_seen", None)
+                if seen is None:
+                    seen = self._ups_limit_seen = set()
+                key = (m, (sw, sh), (tw, th), factor)
+                if key not in seen:
+                    seen.add(key)
                     self.after(0, lambda t=txt: messagebox.showinfo(
                         f"{nm} output size", t))
-                factor = _plan()
-                out = self._fal_video_submit(
-                    endpoint, src, self._ups_fal_args(m, factor, **fal_kw),
-                    on_log=on_log, on_phase=_bar, label=nm, on_panel=_panel)
             n_new = self._ups_fal_ingest(m, folder, names, out, work, sig,
                                          (sw, sh), (tw, th), on_log, _bar)
             took = _time.time() - t_job
