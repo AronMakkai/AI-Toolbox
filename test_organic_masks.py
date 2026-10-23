@@ -12514,8 +12514,36 @@ class TestDetailStudio(unittest.TestCase):
         self.assertTrue(callable(getattr(App, "_tab_detail", None)))
         for fn in ("_det_load_folder", "_det_preview", "_det_run", "_det_blend",
                    "_det_downscale", "_det_synth_esrgan", "_det_fal_span",
-                   "_det_reblend", "_det_draw", "_det_reset_sash"):
+                   "_det_reblend", "_det_draw", "_det_reset_sash",
+                   "_det_build_model_tiles", "_det_tile_click", "_det_view",
+                   "_det_multi_models", "_det_multi_changed",
+                   "_det_freq_refresh", "_det_spec_for"):
             self.assertTrue(callable(getattr(App, fn, None)), fn)
+
+    def test_it_is_upscale_studios_workflow(self):
+        """Model tiles, Preview & Compare, the frequency graph, per-model
+        settings, the shared cache button and Multi model output -- the
+        same UI as Upscale Studio, for detail."""
+        import inspect
+        body = inspect.getsource(App._tab_detail)
+        for frag in ("self._det_build_model_tiles(c_m)", "Preview & Compare",
+                     "frequency distribution", "self.det_freq_canvas",
+                     "SeedVR2 noise", "FlashVSR speed", "self.det_cache_btn",
+                     "Multi model output", "self.det_multi_var",
+                     '"\u2b1b Wipe", "wipe"', '"\u25b3 Diff", "diff"',
+                     '"\u25d0 Detail on black"'):
+            with self.subTest(fragment=frag):
+                self.assertIn(frag, body)
+        run = inspect.getsource(App._det_run)
+        self.assertIn("self._usc_write_exr_layers(", run)
+        self.assertIn("self.UPS_LAYER_NAMES[m]", run)
+        self.assertIn("multi = self._det_multi_models()", run)
+        # the graph's limit is the downscale, not an output size
+        self.assertIn("limit = 0.5 / float(self._det_k())",
+                      inspect.getsource(App._det_freq_refresh))
+        # the cache button is the shared one, logging here
+        self.assertIn("self._ups_clear_cache(self.det_log)", body)
+        self.assertIn("det_cache_btn", inspect.getsource(App._ups_sync_cache_button))
 
     def test_project_load_keeps_the_pre_split_fallback_on_upstudio(self):
         """The Detail section is read after the whole Upscale Studio
@@ -12550,8 +12578,25 @@ class TestDetailStudio(unittest.TestCase):
         span = inspect.getsource(App._det_fal_span)
         self.assertIn("sig=self._det_sig(m, size)", span)
         self.assertIn("read=self._det_read_png", span)
+        self.assertIn("fal_kw=self._det_fal_kw(m)", span)
+        self.assertIn("noise=None", str(inspect.signature(App._ups_fal_args)))
+        self.assertIn("accel=None", str(inspect.signature(App._ups_fal_args)))
+        self.assertIn("fal_kw=None", sig)
         self.assertNotIn("_ups_in_mode", inspect.getsource(App._det_run))
         self.assertIn("detail|", inspect.getsource(App._det_sig))
+        # per-model settings are Detail Studio's own variables
+        self.assertIn("self.det_seedvr_noise_var", inspect.getsource(App._det_fal_kw))
+        self.assertNotIn("ups_seedvr_noise_var", inspect.getsource(App._det_fal_kw))
+
+    def test_fal_args_take_the_callers_settings(self):
+        app = App.__new__(App)
+        app.ups_seedvr_noise_var = type("V", (), {"get": lambda s: "0.5"})()
+        app.ups_flash_accel_var = type("V", (), {"get": lambda s: "full"})()
+        self.assertEqual(app._ups_fal_args("seedvr", 2)["noise_scale"], 0.5)
+        self.assertEqual(app._ups_fal_args("seedvr", 2, noise=0.05)["noise_scale"], 0.05)
+        self.assertEqual(app._ups_fal_args("flashvsr", 2)["acceleration"], "full")
+        self.assertEqual(app._ups_fal_args("flashvsr", 2, accel="regular")["acceleration"],
+                         "regular")
 
     # -- the blend ---------------------------------------------------------
     def test_downscale_is_area_averaged_at_one_over_k(self):
@@ -12668,19 +12713,38 @@ class TestDetailStudio(unittest.TestCase):
         def s2():
             self.assertIsNotNone(app._det_res, app.det_log.get("1.0", "end"))
             self.assertEqual(app._det_res.size, (240, 136))
-            self.assertEqual(app._det_up_key, (0, "esrgan", 2, "srgb"))
+            self.assertEqual(app._det_view_model, "esrgan")
+            self.assertTrue(app._det_model_available("esrgan"))
+            self.assertFalse(app._det_model_available("seedvr"))
             state["before"] = np.asarray(app._det_res).copy()
-            state["up_before"] = app._det_up
+            state["up_before"] = app._det_model_result("esrgan")
             app.det_strength_var.set(100)
-            self.assertIs(app._det_up, state["up_before"])        # no re-synthesis
+            self.assertIs(app._det_model_result("esrgan"), state["up_before"])  # no re-synthesis
             self.assertGreater(float(np.abs(np.asarray(app._det_res, float)
                                             - state["before"]).mean()), 0.1)
             app.det_strength_var.set(0)
             self.assertLess(float(np.abs(np.asarray(app._det_res, int)
                                          - np.asarray(app._det_orig, int)).max()), 2)
+            # a new downscale is a new signature: the tile goes grey
+            # until Preview; back on the old one the result is there
             app.det_down_var.set(4)
-            self.assertNotEqual(app._det_up_key, app._det_key(0))   # stale, says so
+            self.assertFalse(app._det_model_available("esrgan"))
+            self.assertIsNone(app._det_res)
             app.det_down_var.set(2)
+            self.assertTrue(app._det_model_available("esrgan"))
+            self.assertIsNotNone(app._det_res)
+            # multi model output: EXR only, every ticked model a layer
+            app.det_multi_var.set(True); app._det_multi_changed()
+            app._det_toggle_model("seedvr")
+            self.assertEqual(app._det_multi_models(), ["esrgan", "seedvr"])
+            self.assertIn("2 MODELS", app._det_run_label())
+            self.assertIn("layers: esrgan, seedvr2", app.det_multi_lbl.cget("text"))
+            app._det_toggle_model("seedvr")
+            app.det_fmt_var.set("MOV ProRes 4444")
+            self.assertEqual(app._det_multi_models(), [])
+            app.det_fmt_var.set("EXR 16-bit half")
+            self.assertEqual(app._det_multi_models(), ["esrgan"])
+            app.det_strength_var.set(70)
             app.det_range_bar.set_view(0, 3)
             app._det_run()
             wait(lambda: not app._det_running, s3, 1200)
@@ -12692,8 +12756,12 @@ class TestDetailStudio(unittest.TestCase):
             self.assertEqual(len(exrs), 3, app.det_log.get("1.0", "end"))
             self.assertEqual(App._adw_read_colorspace(out), "scene-linear")
             import OpenEXR
-            dw = OpenEXR.InputFile(os.path.join(out, exrs[0])).header()["dataWindow"]
+            hdr = OpenEXR.InputFile(os.path.join(out, exrs[0])).header()
+            dw = hdr["dataWindow"]
             self.assertEqual((dw.max.x + 1, dw.max.y + 1), (240, 136))
+            chans = set(hdr["channels"].keys())
+            self.assertTrue({"R", "G", "B", "esrgan.R", "esrgan.G",
+                             "esrgan.B"} <= chans, chans)
             # the other modules were offered the result
             self.assertEqual(getattr(app, "_ups_folder", None), out)
             app.quit()
