@@ -315,6 +315,7 @@ class App(tk.Tk):
         self._tab_setup()
         self._tab_exr()
         self._tab_upstudio()
+        self._tab_detail()
         self._tab_upscale()
         self._tab_fixframes()
         self._tab_curve()
@@ -331,8 +332,8 @@ class App(tk.Tk):
         if self._enabled_tabs:
             # Open on the tool's own module, not a support tab
             _prefer = [k for k in ("rife","curve","area","smudge","sam",
-                                   "upscale","upstudio","fixframes","exr",
-                                   "setup")
+                                   "upscale","upstudio","detail","fixframes",
+                                   "exr","setup")
                        if k in self._enabled_tabs]
             self.show(_prefer[0] if _prefer else self._enabled_tabs[0])
         else:
@@ -399,8 +400,8 @@ class App(tk.Tk):
         self._tl_bar.pack(side="bottom", fill="x")
         tk.Frame(self._tl_bar, bg=BD, height=1).pack(fill="x")
         self._tl_frames = {}
-        for key in ("rife","sam","upscale","upstudio","curve","area","smudge",
-                    "interp","organic","fixframes","exr"):
+        for key in ("rife","sam","upscale","upstudio","detail","curve","area",
+                    "smudge","interp","organic","fixframes","exr"):
             f = tk.Frame(self._tl_bar, bg=BG)
             self._tl_frames[key] = f
             # Not packed yet — show() manages visibility
@@ -664,6 +665,7 @@ class App(tk.Tk):
             # and the output hand-off keep finding it; the new upscale-
             # only module is "upstudio".
             ("Upscale Studio",     "upstudio"),
+            ("Detail Studio",      "detail"),
             ("Expansion Studio",   "upscale"),
             # The studios sit together. Lens Studio was ADW-Organic and
             # Paint Studio was ADW-Paint; like Expansion Studio they keep
@@ -726,6 +728,8 @@ class App(tk.Tk):
             self.after(150, self._usc_reset_sash)
         if key == "upstudio":
             self.after(150, self._ups_reset_sash)
+        if key == "detail":
+            self.after(150, self._det_reset_sash)
         if key == "exr":
             self.after(150, self._exr_reset_sash)
         if key == "sam" and hasattr(self, "_sam_status_dot"):
@@ -972,6 +976,10 @@ class App(tk.Tk):
                     "folder": getattr(self, "_ups_folder", None),
                     "vars": self._project_collect_vars("ups"),
                 }
+                data["modules"]["detail"] = {
+                    "folder": getattr(self, "_det_folder", None),
+                    "vars": self._project_collect_vars("det"),
+                }
                 data["modules"]["sam"] = {
                     "folder": getattr(self, "sam_folder", None),
                     "vars": self._project_collect_vars("sam"),
@@ -1092,6 +1100,12 @@ class App(tk.Tk):
                     if pm.get("folder") and os.path.isdir(pm["folder"]):
                         self._ups_load_folder(pm["folder"])
                     self._project_restore_vars(pm.get("vars"))
+
+                dm = mods.get("detail")
+                if dm:
+                    if dm.get("folder") and os.path.isdir(dm["folder"]):
+                        self._det_load_folder(dm["folder"])
+                    self._project_restore_vars(dm.get("vars"))
                 elif um and um.get("vars"):
                     # A project saved before the split: its resolution
                     # settings belonged to the old combined tab.
@@ -3167,9 +3181,9 @@ class App(tk.Tk):
         # only launcher would not show or require either as relevant.
         _COMP_MODULES = {
             "ffmpeg": {"exr","rife","curve","area","smudge","sam","upscale",
-                      "upstudio","fixframes"},
+                      "upstudio","detail","fixframes"},
             "rife":   {"rife","fixframes"},
-            "esrgan": {"rife","upstudio","fixframes"},
+            "esrgan": {"rife","upstudio","detail","fixframes"},
             "sam":    {"sam"},
             "vace":   {"interp"},
         }
@@ -4060,6 +4074,31 @@ class App(tk.Tk):
            "Expansion Studio automatically. Never the other way round "
            "\u2014 upscaling an expansion interpolates PQ code values.\n",
            "body_indent")
+        _end()
+
+        _w("\n", "body")
+
+        # ── DETAIL STUDIO ─────────────────────────────────────────────────
+        _w("Detail Studio\n", "h1")
+        _w("Texture at the input resolution. Each frame is downscaled "
+           "(\u00bd or \u00bc), upscaled back by the same factor, and the "
+           "invented fine detail laid over the original \u2014 pores, weave, "
+           "foliage a plain sharpen cannot make. Same size in, same size "
+           "out.\n\n", "body")
+        _end = _sec("Settings", expanded=True)
+        _w("Downscale\n", "param")
+        _w("\u00bd invents fine texture and stays close to the plate; "
+           "\u00bc invents more and coarser.\n\n", "body_indent")
+        _w("Upscaler\n", "param")
+        _w("ESRGAN is local and free; SeedVR2 and FlashVSR run on fal.ai "
+           "(preview sends a short span, run sends the range in chunks, "
+           "every paid frame is cached).\n\n", "body_indent")
+        _w("Strength / Protect / Detail only\n", "param")
+        _w("Strength blends the invented detail in. Protect keeps the "
+           "plate's own fine detail where it already has some. Detail only "
+           "takes just the high band from the upscaler, so colour, exposure "
+           "and grade stay the original's. After one Preview the sliders "
+           "re-blend instantly.\n", "body_indent")
         _end()
 
         _w("\n", "body")
@@ -18646,6 +18685,7 @@ class App(tk.Tk):
             ("rife",    "_rpick_load",        "ADW-Blur"),
             ("sam",     "_sam_load_folder",   "SAM 3"),
             ("upstudio", "_ups_load_folder",  "Upscale Studio"),
+            ("detail",  "_det_load_folder",   "Detail Studio"),
             ("upscale", "_usc_load_folder",   "Expansion Studio"),
             ("smudge",  "_smudge_load_folder", "Paint Studio"),
         ]
@@ -51281,25 +51321,30 @@ print("EXR write complete")
                         n / np.maximum(nt, 1e-6) * (1.0 + 4.0 * y)).astype(
             np.float32)
 
-    def _ups_scene(self, path):
+    def _ups_scene(self, path, mode=None):
         """Scene-linear float RGB (1.0 = display white) for a linear or
-        PQ source."""
+        PQ source. `mode` defaults to this studio's own; Detail Studio
+        passes its own."""
         import numpy as np
+        if mode is None:
+            mode = self._ups_in_mode
         a = self._ups_raw_float(path)
-        if self._ups_in_mode == "aces":
+        if mode == "aces":
             # to the Rec.709 primaries the upscalers were trained on;
             # _ups_run converts the result back
             a = self._aces_to_lin709(a)
         a = np.maximum(a, 0.0)
-        if self._ups_in_mode == "pq":
+        if mode == "pq":
             return self._hdr_pq_decode(np.clip(a, 0.0, 1.0)) \
                 / float(self.HDR_SDR_WHITE)
         return a
 
-    def _ups_read_source(self, path):
+    def _ups_read_source(self, path, mode=None, hdr=None):
         """(base, gain): the 8-bit display picture the upscalers and the
         viewer work on, and -- for HDR -- the per-pixel factor that turns
         the base's linear light back into the source's (None otherwise).
+        `mode` / `hdr` default to this studio's own resolution of the
+        source; Detail Studio passes its own.
 
         The split is the point. An upscaler shown raw HDR sees a blown
         or a flat-log image it was never trained on; shown the base it
@@ -51309,16 +51354,19 @@ print("EXR write complete")
         invented coming out."""
         import numpy as np
         from PIL import Image
-        mode = self._ups_in_mode
+        if mode is None:
+            mode = self._ups_in_mode
+        if hdr is None:
+            hdr = self._ups_src_hdr
         if mode == "srgb":
             if os.path.splitext(path)[1].lower() in self.FF_LINEAR_EXTS:
                 a = np.clip(self._ups_raw_float(path), 0.0, 1.0)
                 return Image.fromarray(
                     (a * 255.0 + 0.5).astype(np.uint8), "RGB"), None
             return Image.open(path).convert("RGB"), None
-        lin = self._ups_scene(path)
+        lin = self._ups_scene(path, mode)
         gain = None
-        if self._ups_src_hdr:
+        if hdr:
             n = lin.max(axis=2)
             g = np.where(n > 1e-6, n / np.maximum(self._ups_shoulder(n),
                                                   1e-6), 1.0)
@@ -51327,12 +51375,13 @@ print("EXR write complete")
         base = self._organic_linear_to_display(lin)
         return Image.fromarray(np.ascontiguousarray(base), "RGB"), gain
 
-    def _ups_out_px(self, up_disp, gain, spec, eotf):
+    def _ups_out_px(self, up_disp, gain, spec, eotf, mode=None):
         """An upscaled display picture as the pixels to WRITE: linear
         light for EXR, a display (or PQ) code for a movie."""
         import numpy as np
         import cv2
-        mode = self._ups_in_mode
+        if mode is None:
+            mode = self._ups_in_mode
         exr = spec["ext"] == ".exr"
         if mode == "srgb":
             if not exr:
@@ -52378,15 +52427,20 @@ print("EXR write complete")
         return dst
 
     def _ups_fal_upscale(self, m, folder, names, size, on_log=None,
-                         on_frac=None):
+                         on_frac=None, sig=None, read=None):
         """Upscale `names` (one contiguous span) with paid model m to
         `size`, into the cache. Cache-first: a span already fully cached
-        costs nothing. Returns the number of frames newly generated."""
+        costs nothing. Returns the number of frames newly generated.
+        `sig` and `read` (path -> (PIL base, gain)) default to this
+        studio's own; Detail Studio passes its own."""
         import cv2
         import numpy as np
         import shutil as _sh
         tw, th = size
-        sig = self._ups_model_sig(m)
+        if sig is None:
+            sig = self._ups_model_sig(m)
+        if read is None:
+            read = self._ups_read_source
         if all(self._ups_cached(m, folder, n, sig) for n in names):
             if on_log:
                 on_log(f"all {len(names)} frame(s) already cached — "
@@ -52411,8 +52465,7 @@ print("EXR write complete")
         os.makedirs(stage, exist_ok=True)
         sw = sh = None
         for k, n in enumerate(names):
-            rgb = np.asarray(self._ups_read_source(
-                os.path.join(folder, n))[0])
+            rgb = np.asarray(read(os.path.join(folder, n))[0])
             sh, sw = rgb.shape[:2]
             cv2.imwrite(os.path.join(stage, f"{k:05d}.png"),
                         cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
@@ -52905,6 +52958,1069 @@ print("EXR write complete")
                         text=self._ups_run_label(), bg="#2A0A0A",
                         fg="#CC4444", command=self._ups_run, state="normal")
                     self._ups_models_changed()
+                self.after(0, _done)
+        threading.Thread(target=go, daemon=True).start()
+
+    # ══ Detail Studio ════════════════════════════════════════════════
+    # Texture at the input resolution. An upscaler is trained to invent
+    # plausible fine detail from a soft picture, so a frame downscaled
+    # by ½ or ¼ and upscaled back by the same factor comes back with
+    # texture the plate never had -- pores, weave, foliage -- which a
+    # sharpen cannot make. Gen-AI video upres'd internally and arriving
+    # mushy is exactly the material this is for.
+    #
+    # Two rules keep it usable on a real shot. The invented texture is
+    # only ever the HIGH band: the output's low frequencies are the
+    # original's, so colour, exposure and grade stay the plate's and
+    # only texture changes (Detail only). And where the plate already
+    # holds fine detail, that detail is kept rather than replaced by a
+    # guess -- a protect mask from the ratio of the plate's local
+    # high-band energy to the upscaler's (Protect). Strength blends the
+    # result against the original. Sliders re-blend the preview on the
+    # spot: the upscaler runs once per frame, the blend is instant.
+    #
+    # The upscalers, the input colour handling, the cache and the
+    # writer are Upscale Studio's, called with Detail Studio's own
+    # state (_det_*) passed in -- never through Upscale Studio's.
+    DET_DOWN = (("½", 2), ("¼", 4))
+    DET_MODELS = (("esrgan", "ESRGAN"), ("seedvr", "SeedVR2"),
+                  ("flashvsr", "FlashVSR"))
+    DET_MODEL_KEYS = {"ESRGAN": "esrgan", "SeedVR2": "seedvr",
+                      "FlashVSR": "flashvsr"}
+    DET_PREVIEW_SPAN = 12
+
+    _det_folder = None
+    _det_frames = ()
+    _det_is_movie = False
+    _det_src_movie = None
+    _det_src_fps = 24.0
+    _det_in_mode = "srgb"
+    _det_src_hdr = False
+    _det_previewing = False
+    _det_running = False
+    _det_cancel = False
+    _det_mode = "wipe"
+    _det_orig = None            # PIL, the input frame on screen
+    _det_res = None             # PIL, the blended result on screen
+    _det_up = None              # float RGB, the upscaler's re-synthesis
+    _det_up_key = None          # (idx, model, k, in_mode)
+    _det_preview_idx = None
+    _det_show_seq = 0
+    _det_tl_idx = 0
+    det_in_var = None
+    det_in_lbl = None
+    det_strength_var = None
+    det_protect_var = None
+    det_only_var = None
+    det_model_var = None
+    det_down_var = None
+
+    def _tab_detail(self):
+        p = self._frame("detail")
+        lf, rf = self._two_col(p, "", "", lw=420)
+        lf, _bottom = self._scroll_column(lf)
+
+        self._det_folder = None
+        self._det_frames = []
+        self._det_is_movie = False
+        self._det_src_movie = None
+        self._det_src_fps = 24.0
+        self._det_orig = None
+        self._det_res = None
+        self._det_up = None
+        self._det_up_key = None
+        self._det_wipe_t = 0.5
+        self._det_zoom = 1.0
+        self._det_pan = [0, 0]
+        self._det_mode = "wipe"
+        self._det_mode_imgs = {}
+        self._det_show_seq = 0
+        self._det_tl_idx = 0
+
+        _hd = tk.Frame(lf, bg=BG)
+        _hd.pack(fill="x", padx=16, pady=(14, 0))
+        tk.Label(_hd, text="Detail Studio", font=("Futura", 14), bg=BG,
+                 fg=W).pack(side="left")
+        _hdi = tk.Label(_hd, text="ⓘ", font=FSM, bg=BG, fg="#555555",
+                        cursor="hand2")
+        _hdi.pack(side="left", padx=(8, 0))
+        self._tooltip(
+            "Texture at the input resolution. Each frame is\n"
+            "downscaled, upscaled back by the same factor, and\n"
+            "the invented fine detail laid over the original.\n\n"
+            "Detail only keeps the original's colour, exposure\n"
+            "and grade: only the high band changes. Protect\n"
+            "keeps the plate's own fine detail where it already\n"
+            "has some, so the boost lands on the soft areas.\n\n"
+            "Preview runs the upscaler once; the sliders then\n"
+            "re-blend instantly. Same size in, same size out.")(_hdi)
+
+        self.det_path_lbl = self._path_bar(lf)
+        c1 = self._card(lf, "Input")
+        _pf, self.det_picker_lbl = self._picker(
+            c1, "\U0001F4C1  Click to select a sequence folder or a movie")
+        _pf.bind("<Button-1>", lambda e: self._det_pick())
+        self.det_picker_lbl.bind("<Button-1>", lambda e: self._det_pick())
+        self.det_in_var = self._combo(
+            c1, "Input colour", list(self.UPS_IN_CHOICES),
+            tip="What the source frames hold — the same choices and\n"
+                "the same Auto rule as Upscale Studio. The upscaler\n"
+                "sees a display picture; a linear, ACES or PQ source\n"
+                "is encoded for it and the result decoded back, so\n"
+                "an EXR goes out in the space it came in.")
+        self.det_in_lbl = tk.Label(c1, text="", font=FSM, bg=S,
+                                   fg="#555555", anchor="w",
+                                   wraplength=370, justify="left")
+        self.det_in_lbl.pack(fill="x", pady=(2, 0))
+        self.det_in_var.trace_add("write", lambda *_: self._det_in_changed())
+
+        c2 = self._card(lf, "Detail")
+        _dr = tk.Frame(c2, bg=S); _dr.pack(fill="x", pady=(0, 4))
+        tk.Label(_dr, text="Downscale", font=FSM, bg=S, fg=G, width=12,
+                 anchor="w").pack(side="left")
+        self.det_down_var = tk.IntVar(value=2)
+        self._det_down_btns = {}
+        for label, val in self.DET_DOWN:
+            b = tk.Label(_dr, text=label, font=FSM, bg=S2, fg=G, relief="flat",
+                         padx=12, pady=4, cursor="hand2")
+            b.pack(side="left", padx=2)
+            b.bind("<Button-1>", lambda e, v=val: self.det_down_var.set(v))
+            self._det_down_btns[val] = b
+        _dri = tk.Label(_dr, text="ⓘ", font=FSM, bg=S, fg="#555555",
+                        cursor="hand2")
+        _dri.pack(side="left", padx=(6, 0))
+        self._tooltip(
+            "How far down the frame goes before the upscaler\n"
+            "brings it back. ½ invents fine texture and stays\n"
+            "close to the plate; ¼ invents more, coarser, and\n"
+            "can change what things are made of.")(_dri)
+
+        def _paint_down(*_):
+            v = self.det_down_var.get()
+            for val, b in self._det_down_btns.items():
+                b.configure(bg="#2A0A0A" if val == v else S2,
+                            fg="#CC4444" if val == v else G)
+            self._det_settings_changed()
+        self.det_down_var.trace_add("write", _paint_down)
+        _paint_down()
+
+        self.det_model_var = self._combo(
+            c2, "Upscaler", [n for _k, n in self.DET_MODELS],
+            tip="ESRGAN is local and free. SeedVR2 and FlashVSR are\n"
+                "video models on fal.ai: a preview sends a short span\n"
+                "around the frame, a run sends the range in chunks,\n"
+                "and every paid frame is cached. SeedVR2 re-imagines\n"
+                "texture the most; FlashVSR stays closest to the plate.")
+        self.det_model_var.trace_add("write",
+                                     lambda *_: self._det_settings_changed())
+
+        def _cs(parent, label, var, from_, to, res, fmt, tip=""):
+            row = tk.Frame(parent, bg=S); row.pack(fill="x", pady=1)
+            tk.Label(row, text=label, font=FSM, bg=S, fg=G, width=11,
+                     anchor="w").pack(side="left")
+            if tip:
+                i = tk.Label(row, text="ⓘ", font=FSM, bg=S, fg="#555555",
+                             cursor="hand2")
+                i.pack(side="left", padx=(0, 2))
+                self._tooltip(tip)(i)
+            val_lbl = tk.Label(row, text=fmt(var.get()), font=FM, bg=S, fg=W,
+                               width=5, anchor="e")
+            val_lbl.pack(side="right")
+            var.trace_add("write", lambda *_: val_lbl.configure(
+                text=fmt(var.get())))
+            tk.Scale(row, variable=var, from_=from_, to=to, resolution=res,
+                     orient="horizontal", bg=S, fg=W, troughcolor=BD,
+                     highlightthickness=0, bd=0, showvalue=False,
+                     activebackground=R).pack(side="left", fill="x",
+                                              expand=True)
+
+        self.det_strength_var = tk.IntVar(value=70)
+        _cs(c2, "Strength", self.det_strength_var, 0, 100, 5,
+            lambda v: f"{int(v)}%",
+            tip="How much of the invented detail goes in.\n"
+                "0% is the original; 100% is all of the\n"
+                "upscaler's detail in place of the plate's.")
+        self.det_protect_var = tk.IntVar(value=50)
+        _cs(c2, "Protect", self.det_protect_var, 0, 100, 5,
+            lambda v: f"{int(v)}%",
+            tip="Keeps the plate's own fine detail where it\n"
+                "already has some: the boost lands on the soft\n"
+                "areas and leaves a sharp eye or a text sign\n"
+                "alone. 0% replaces everywhere.")
+        _or = tk.Frame(c2, bg=S); _or.pack(fill="x", pady=(4, 0))
+        self.det_only_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(_or, text="Detail only", variable=self.det_only_var,
+                       bg=S, fg=W, selectcolor="#222222", activebackground=S,
+                       activeforeground=W, font=FSM, bd=0).pack(side="left")
+        _oi = tk.Label(_or, text="ⓘ", font=FSM, bg=S, fg="#555555",
+                       cursor="hand2")
+        _oi.pack(side="left", padx=(4, 0))
+        self._tooltip(
+            "On: only the high band is taken from the upscaler;\n"
+            "the output's colour, exposure and grade are the\n"
+            "original's, pixel for pixel in the low band.\n\n"
+            "Off: the whole upscaled picture is blended in at\n"
+            "Strength, tone shifts and all.")(_oi)
+        for v in (self.det_strength_var, self.det_protect_var,
+                  self.det_only_var):
+            v.trace_add("write", lambda *_: self._det_reblend())
+
+        # ── Preview & Compare ──
+        _pc = tk.Frame(c2, bg=S)
+        _pc.pack(fill="x", pady=(8, 0))
+        tk.Frame(_pc, bg=BD, height=1).pack(fill="x")
+        tk.Label(_pc, text="Preview & Compare", font=FSM, bg=S,
+                 fg=G).pack(anchor="w", pady=(5, 2))
+        _seg = tk.Frame(_pc, bg=S); _seg.pack(fill="x")
+        self._det_mode_btns = {}
+        for col, (text, mode) in enumerate((("⬛ Wipe", "wipe"),
+                                            ("△ Diff", "diff"),
+                                            ("◐ Detail on black",
+                                             "detail"))):
+            _seg.columnconfigure(col, weight=1)
+            b = self._mkbtn(_seg, text,
+                            lambda md=mode: self._det_set_mode(md),
+                            bg="#0D0D0D", fg=G)
+            tk.Label.configure(b._lbl, width=0, pady=4, padx=8)
+            b.grid(row=0, column=col, sticky="ew",
+                   padx=(0, 2) if col < 2 else 0)
+            self._det_mode_btns[mode] = b
+        self.det_preview_btn = self._runbtn(c2, "Preview", self._det_preview)
+        self.det_preview_btn.pack_configure(padx=0, pady=(6, 4))
+        self.det_preview_btn.configure(state="disabled")
+
+        c_of = self._card(lf, "Output Format")
+        self.det_fmt_var = self._combo(
+            c_of, "Write", list(self.USC_FORMATS.keys()),
+            default=self.USC_DEFAULT_FORMAT,
+            tip="EXR holds the result as linear light, decoded with\n"
+                "the same curve the frames were encoded with. MOV is\n"
+                "a display delivery, encoded from the frames on disk.")
+        c4 = self._card(lf, "Output")
+        self.det_out_lbl = tk.Label(c4, text="Select a folder to see output path",
+            font=FSM, bg=S, fg=G, anchor="w", wraplength=380, justify="left")
+        self.det_out_lbl.pack(anchor="w")
+
+        tk.Frame(_bottom, bg=BD, height=1).pack(fill="x")
+        self.det_run_btn = self._runbtn(_bottom, "Run Detail", self._det_run)
+        self.det_run_btn.configure(state="disabled")
+
+        # Right: viewer over log
+        vp = self._make_paned(rf, "vertical")
+        vp.pack(fill="both", expand=True)
+        top = tk.Frame(vp, bg=BG)
+        vp.add(top, minsize=100, height=320, stretch="always")
+        bot = tk.Frame(vp, bg=BG)
+        vp.add(bot, minsize=60, height=140, stretch="never")
+        self._det_vpaned = vp
+        _tb = tk.Frame(top, bg=BG); _tb.pack(fill="x", padx=16, pady=(10, 3))
+        self.det_view_lbl = tk.Label(
+            _tb, text="Input vs Detail — drag to wipe  |  Scroll "
+            "to zoom  |  ⌥drag to pan", font=FSM, bg=BG, fg=G)
+        self.det_view_lbl.pack(side="left")
+        for sym, fn in (("1:1", self._det_zoom_1to1),
+                        ("⊙", self._det_zoom_reset)):
+            b = self._mkbtn(_tb, sym, fn, bg="#0D0D0D", fg=G)
+            tk.Label.configure(b._lbl, width=0, pady=2, padx=6)
+            b.pack(side="right", padx=(2, 0))
+        self.det_canvas = tk.Canvas(top, bg="#0D0D0D", highlightthickness=1,
+                                    highlightbackground=BD, cursor="crosshair")
+        self.det_canvas.pack(fill="both", expand=True, padx=16, pady=(0, 6))
+        cv = self.det_canvas
+        cv.bind("<Configure>", lambda e: self._det_draw())
+        cv.bind("<Button-1>", self._det_canvas_drag)
+        cv.bind("<B1-Motion>", self._det_canvas_drag)
+        cv.bind("<MouseWheel>", self._det_canvas_scroll)
+        cv.bind("<Button-4>", self._det_canvas_scroll)
+        cv.bind("<Button-5>", self._det_canvas_scroll)
+        for seq in ("<Option-Button-1>", "<Alt-Button-1>"):
+            cv.bind(seq, self._det_pan_start)
+        for seq in ("<Option-B1-Motion>", "<Alt-B1-Motion>"):
+            cv.bind(seq, self._det_pan_move)
+
+        tk.Label(bot, text="Activity Log", font=FSM, bg=BG, fg=G).pack(
+            anchor="w", padx=16, pady=(4, 2))
+        _lf = tk.Frame(bot, bg=S2, highlightthickness=1, highlightbackground=BD)
+        _lf.pack(fill="both", expand=True, padx=16, pady=(0, 8))
+        self.det_log = tk.Text(_lf, bg=S2, fg=G, font=FM, bd=0,
+            highlightthickness=0, wrap="word", state="disabled", padx=8, pady=6)
+        self.det_log.pack(fill="both", expand=True, side="left")
+        self._mk_scrollbar(_lf, self.det_log).pack(side="right", fill="y")
+        for tag, col in (("ok", GR), ("err", RB), ("hi", W), ("dim", "#444444")):
+            self.det_log.tag_configure(tag, foreground=col)
+
+        _tb2 = self._tl_frames["detail"]
+        self.det_range_bar = self._maya_range_bar(
+            _tb2, lambda: [getattr(self, "_det_tl_proxy", None)],
+            on_change=lambda *_: self._det_range_changed())
+        _th = tk.Frame(_tb2, bg=BG); _th.pack(fill="x")
+        tk.Label(_th, text="Input frames", font=FM, bg=BG, fg=G,
+                 anchor="w").pack(side="left")
+        self.det_range_lbl = tk.Label(_th, text="", font=FM, bg=BG, fg="#666666")
+        self.det_range_lbl.pack(side="right")
+        _tr = tk.Frame(_tb2, bg=BG); _tr.pack(fill="x", pady=(2, 0))
+        self._det_tl_proxy = self._timeline(_tr, lambda i: self._det_tl_click(i))
+        self._det_paint_mode_btns()
+
+    # -- input -----------------------------------------------------------
+    def _det_pick(self):
+        p = filedialog.askopenfilename(
+            title="Select a movie, or any frame of a sequence",
+            filetypes=[("Movie or image", " ".join(
+                "*" + e for e in self.FF_MOV_EXTS + self.FF_SOURCE_EXTS)),
+                ("All files", "*.*")])
+        if not p:
+            p = filedialog.askdirectory(title="Select an image sequence folder")
+        if p:
+            self._det_accept(p)
+
+    def _det_accept(self, path):
+        if os.path.isdir(path):
+            self._det_is_movie, self._det_src_movie = False, None
+            return self._det_load_folder(path)
+        ext = os.path.splitext(path)[1].lower()
+        if ext in self.FF_MOV_EXTS:
+            return self._det_load_movie(path)
+        if ext in self.FF_SOURCE_EXTS:
+            self._det_is_movie, self._det_src_movie = False, None
+            return self._det_load_folder(os.path.dirname(path))
+        self.det_picker_lbl.configure(text="Not a movie or an image sequence.",
+                                      fg=R)
+
+    def _det_load_movie(self, path):
+        self.det_picker_lbl.configure(
+            text="Decoding …  " + os.path.basename(path), fg=W)
+        self.update_idletasks()
+        try:
+            out = os.path.join(tempfile.gettempdir(), "adw_det_decode")
+            names = self._ff_decode_movie(
+                path, out, lambda m: self.log(self.det_log, m, "dim"))
+        except Exception as ex:
+            self.det_picker_lbl.configure(text=f"Decode failed: {ex}", fg=R)
+            return
+        self._det_is_movie = True
+        self._det_src_movie = path
+        self._det_src_fps = self._ff_probe_fps(path)
+        self._det_load_folder(out)
+        self.det_path_lbl.configure(text=path, fg=W)
+        self.det_picker_lbl.configure(
+            text=f"\U0001F3AC  {os.path.basename(path)}  —  "
+                 f"{len(names)} frames, {self._det_src_fps:g} fps", fg=W)
+
+    def _det_load_folder(self, d):
+        exts = {".exr", ".png", ".jpg", ".jpeg", ".tif", ".tiff"}
+        try:
+            fs = sorted(f for f in os.listdir(d)
+                        if os.path.splitext(f)[1].lower() in exts)
+        except Exception:
+            fs = []
+        if not fs:
+            self.det_picker_lbl.configure(text="No image files found.", fg=R)
+            return
+        self._det_folder = d
+        self._det_frames = fs
+        self._det_resolve_input()
+        self._det_up = None
+        self._det_up_key = None
+        self._det_res = None
+        self._det_mode_imgs = {}
+        self._det_preview_idx = None
+        self.det_path_lbl.configure(text=d, fg=W)
+        self.det_picker_lbl.configure(
+            text=f"{len(fs)} frames  —  {fs[0]}  …  {fs[-1]}", fg=W)
+        self._det_update_out_label()
+        self._det_tl_proxy.set_frames(fs)
+        self.det_range_bar.set_n(len(fs))
+        self.det_range_bar.set_view(0, len(fs))
+        self._det_range_changed()
+        self.det_preview_btn.configure(state="normal", bg="#2A0A0A")
+        self.det_run_btn.configure(state="normal")
+        self._det_tl_idx = 0
+        self.log(self.det_log, f"Loaded: {len(fs)} frames from "
+                 f"{os.path.basename(d)}", "ok")
+        self._det_show_frame(0)
+
+    def _det_range(self):
+        n = len(getattr(self, "_det_frames", []) or [])
+        bar = getattr(self, "det_range_bar", None)
+        if bar is None or n == 0:
+            return 0, max(0, n - 1)
+        try:
+            v0, v1 = bar.get_range()
+        except Exception:
+            return 0, max(0, n - 1)
+        v0 = max(0, min(int(v0), n - 1))
+        v1 = max(v0, min(int(v1) - 1, n - 1))
+        return v0, v1
+
+    def _det_range_changed(self):
+        try:
+            r0, r1 = self._det_range()
+            self.det_range_lbl.configure(
+                text=f"{r1 - r0 + 1} frame(s)  [{r0}–{r1}]")
+        except Exception:
+            pass
+
+    def _det_update_out_label(self):
+        if not self._det_folder:
+            return
+        base = (os.path.dirname(str(self._det_src_movie))
+                if self._det_is_movie else self._det_folder)
+        out = self._adw_peek_next_version_dir(base, "DETAIL")
+        self.det_out_lbl.configure(text=out + "/", fg=W)
+
+    def _det_resolve_input(self):
+        folder = self._det_folder
+        names = list(self._det_frames or [])
+        choice = self.det_in_var.get() if self.det_in_var else "Auto"
+        if not folder or not names:
+            self._det_in_mode, self._det_src_hdr = "srgb", False
+            return
+        mode, why, hdr = self._resolve_input_colour(choice, folder, names)
+        self._det_in_mode, self._det_src_hdr = mode, hdr
+        txt = self.UPS_IN_NAMES[mode]
+        if choice == "Auto" and why:
+            txt += f"  —  {why}"
+        if hdr:
+            txt += "  ·  HDR (values above white kept)"
+        try:
+            if self.det_in_lbl is not None:
+                self.det_in_lbl.configure(text=txt)
+        except Exception:
+            pass
+
+    def _det_in_changed(self):
+        if not self._det_folder:
+            return
+        self._det_resolve_input()
+        self._det_up, self._det_up_key = None, None
+        self.log(self.det_log, "Input colour: " + self.det_in_lbl.cget("text"),
+                 "dim")
+        self._det_show_frame(self._det_tl_idx)
+
+    def _det_settings_changed(self):
+        """A new downscale or upscaler makes the re-synthesis on screen
+        stale: the blend stays until Preview runs the upscaler again."""
+        if self._det_up_key is not None and self._det_up_key != self._det_key(
+                self._det_preview_idx):
+            try:
+                self.log(self.det_log, "Settings changed — press Preview "
+                         "to re-synthesise; the sliders still re-blend "
+                         "the last result.", "dim")
+            except Exception:
+                pass
+
+    def _det_read(self, path):
+        """(PIL base, gain) for a frame, read the Detail Studio way."""
+        return self._ups_read_source(path, mode=self._det_in_mode,
+                                     hdr=self._det_src_hdr)
+
+    def _det_model(self):
+        return self.DET_MODEL_KEYS.get(
+            self.det_model_var.get() if self.det_model_var else "ESRGAN",
+            "esrgan")
+
+    def _det_k(self):
+        try:
+            return int(self.det_down_var.get()) if self.det_down_var else 2
+        except Exception:
+            return 2
+
+    def _det_key(self, idx):
+        return (idx, self._det_model(), self._det_k(), self._det_in_mode)
+
+    # -- engine ------------------------------------------------------------
+    @staticmethod
+    def _det_downscale(base_f32, k):
+        """The frame at 1/k, area-averaged: what the upscaler is shown."""
+        import cv2
+        h, w = base_f32.shape[:2]
+        return cv2.resize(base_f32, (max(1, w // k), max(1, h // k)),
+                          interpolation=cv2.INTER_AREA)
+
+    @staticmethod
+    def _det_blend(base, up, k, strength, protect, detail_only=True):
+        """The result, as display float RGB the size of `base`.
+
+        base, up: float RGB 0..1 (the original and the re-synthesis).
+        k: the downscale factor -- sets the band that was lost and
+        re-invented (sigma = 0.8 k px). strength, protect: 0..1.
+
+        Detail only: low band from the original, high band mixed from
+        the two. Protect: where the original's local high-band energy
+        is at least the upscaler's, its own detail is kept."""
+        import cv2
+        import numpy as np
+        base = np.asarray(base, np.float32)
+        up = np.asarray(up, np.float32)
+        if up.shape != base.shape:
+            up = cv2.resize(up, (base.shape[1], base.shape[0]),
+                            interpolation=cv2.INTER_LANCZOS4)
+        s = float(max(0.0, min(1.0, strength)))
+        if not detail_only:
+            return np.clip(base * (1.0 - s) + up * s, 0.0, 1.0)
+        sigma = 0.8 * float(k)
+        low_b = cv2.GaussianBlur(base, (0, 0), sigma)
+        low_u = cv2.GaussianBlur(up, (0, 0), sigma)
+        hf_b = base - low_b
+        hf_u = up - low_u
+        pr = float(max(0.0, min(1.0, protect)))
+        if pr > 0.0:
+            # local high-band energy, luminance, over a few k pixels
+            lum = np.array([0.2126, 0.7152, 0.0722], np.float32)
+            e_b = cv2.GaussianBlur(np.abs(hf_b @ lum), (0, 0), 2.0 * k)
+            e_u = cv2.GaussianBlur(np.abs(hf_u @ lum), (0, 0), 2.0 * k)
+            keep = np.clip(e_b / np.maximum(e_u, 1e-4), 0.0, 1.0) * pr
+            hf_u = hf_b * keep[:, :, None] + hf_u * (1.0 - keep[:, :, None])
+        out = low_b + hf_b * (1.0 - s) + hf_u * s
+        return np.clip(out, 0.0, 1.0)
+
+    def _det_stage_dir(self, k):
+        """Where the downscaled frames for a paid model live: one folder
+        per (source, factor, colour), so the fal cache keyed on it hits
+        again on the next preview or run with the same settings."""
+        import hashlib
+        tag = hashlib.sha1(
+            f"{os.path.abspath(str(self._det_folder))}|{k}|{self._det_in_mode}"
+            .encode("utf-8")).hexdigest()[:16]
+        d = os.path.join(os.path.expanduser("~"), ".ai_toolbox",
+                         "detail_stage", tag)
+        os.makedirs(d, exist_ok=True)
+        return d
+
+    def _det_stage_names(self, names, k, stage):
+        """The 1/k PNGs for `names` in `stage`, written if missing; returns
+        their file names."""
+        import cv2
+        import numpy as np
+        out = []
+        for n in names:
+            pn = os.path.splitext(n)[0] + ".png"
+            dst = os.path.join(stage, pn)
+            if not os.path.exists(dst):
+                base = np.asarray(self._det_read(
+                    os.path.join(self._det_folder, n))[0], np.float32) / 255.0
+                small = self._det_downscale(base, k)
+                cv2.imwrite(dst, cv2.cvtColor(
+                    (small * 255.0 + 0.5).astype(np.uint8), cv2.COLOR_RGB2BGR))
+            out.append(pn)
+        return out
+
+    def _det_sig(self, m, size):
+        """The cache signature: everything besides the frame a paid
+        re-synthesis depends on. Distinct from Upscale Studio's, so the
+        two never serve each other's frames."""
+        sig = f"detail|{size[0]}x{size[1]}|k={self._det_k()}|in={self._det_in_mode}"
+        try:
+            if m == "seedvr" and self.ups_seedvr_noise_var is not None:
+                sig += f"|noise={self.ups_seedvr_noise_var.get()}"
+            if m == "flashvsr" and self.ups_flash_accel_var is not None:
+                sig += f"|accel={self.ups_flash_accel_var.get()}"
+        except Exception:
+            pass
+        return sig
+
+    @staticmethod
+    def _det_read_png(path):
+        from PIL import Image
+        return Image.open(path).convert("RGB"), None
+
+    def _det_fal_span(self, m, names, size, on_log=None, on_frac=None):
+        """Re-synthesise `names` (a contiguous span of source frames)
+        with paid model m: the 1/k frames staged, sent as a clip, the
+        result cached at `size`."""
+        k = self._det_k()
+        stage = self._det_stage_dir(k)
+        pngs = self._det_stage_names(names, k, stage)
+        return self._ups_fal_upscale(m, stage, pngs, size, on_log, on_frac,
+                                     sig=self._det_sig(m, size),
+                                     read=self._det_read_png)
+
+    def _det_fal_result(self, m, name, size):
+        """The cached re-synthesis of source frame `name`, or None."""
+        stage = self._det_stage_dir(self._det_k())
+        pn = os.path.splitext(name)[0] + ".png"
+        p = self._ups_cached(m, stage, pn, self._det_sig(m, size))
+        return self._ups_read16(p) if p else None
+
+    def _det_synth_esrgan(self, base_f32, k):
+        """Real-ESRGAN (or Lanczos + sharpen): the 1/k frame back to
+        full size, as display float RGB."""
+        import cv2
+        import numpy as np
+        h, w = base_f32.shape[:2]
+        small = (self._det_downscale(base_f32, k) * 255.0 + 0.5).astype(np.uint8)
+        up = self._rife_upscale(cv2.cvtColor(small, cv2.COLOR_RGB2BGR), w, h)
+        up = cv2.cvtColor(up, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+        if up.shape[:2] != (h, w):
+            up = cv2.resize(up, (w, h), interpolation=cv2.INTER_LANCZOS4)
+        return up
+
+    def _det_params(self):
+        try:
+            s = self.det_strength_var.get() / 100.0
+            pr = self.det_protect_var.get() / 100.0
+            only = bool(self.det_only_var.get())
+        except Exception:
+            s, pr, only = 0.7, 0.5, True
+        return s, pr, only
+
+    # -- preview -----------------------------------------------------------
+    def _det_tl_click(self, i):
+        self._det_show_frame(i)
+
+    def _det_show_frame(self, idx=None):
+        """Show a frame and, if its re-synthesis is on screen already,
+        the blend; never runs the upscaler."""
+        if not self._det_folder or not self._det_frames:
+            return
+        if idx is None:
+            idx = self._det_tl_proxy.current()
+        idx = max(0, min(int(idx), len(self._det_frames) - 1))
+        self._det_tl_idx = idx
+        self._det_show_seq += 1
+        seq = self._det_show_seq
+        import threading
+
+        def go():
+            try:
+                img = self._det_read(
+                    os.path.join(self._det_folder, self._det_frames[idx]))[0]
+
+                def _apply():
+                    if seq != self._det_show_seq:
+                        return
+                    self._det_orig = img
+                    self._det_preview_idx = idx
+                    self._det_mode_imgs = {}
+                    if self._det_up_key != self._det_key(idx):
+                        self._det_res = None
+                        self._det_draw()
+                    else:
+                        self._det_reblend()
+                self.after(0, _apply)
+            except Exception as ex:
+                self.after(0, lambda e=str(ex): self.log(
+                    self.det_log, f"Could not read frame: {e}", "err"))
+        threading.Thread(target=go, daemon=True).start()
+
+    def _det_reblend(self):
+        """The sliders applied to the re-synthesis on screen -- instant,
+        no upscaler."""
+        if self._det_orig is None or self._det_up is None:
+            return
+        if self._det_up_key is None or self._det_up_key[0] != self._det_preview_idx:
+            return
+        import numpy as np
+        from PIL import Image
+        s, pr, only = self._det_params()
+        base = np.asarray(self._det_orig, np.float32) / 255.0
+        out = self._det_blend(base, self._det_up, self._det_up_key[2], s, pr, only)
+        self._det_res = Image.fromarray((out * 255.0 + 0.5).astype(np.uint8))
+        self._det_mode_imgs = {}
+        self._det_draw()
+
+    def _det_preview(self):
+        if not self._det_folder or not self._det_frames:
+            return
+        if self._det_previewing:
+            self._det_prev_cancelled = True
+            self._ip_vace_cancel = True
+            self.log(self.det_log, "Cancelling preview…", "err")
+            return
+        if self._det_running:
+            self.log(self.det_log, "A run is going — Preview is free "
+                     "again when it finishes.", "dim")
+            return
+        idx = max(0, min(int(self._det_tl_proxy.current()),
+                         len(self._det_frames) - 1))
+        self._det_tl_idx = idx
+        m = self._det_model()
+        k = self._det_k()
+        nm = dict(self.DET_MODELS)[m]
+        self._det_previewing = True
+        self._det_prev_cancelled = False
+        self._ip_vace_cancel = False
+        self.det_preview_btn.configure(text="✕  CANCEL PREVIEW", state="normal")
+        self.log(self.det_log, f"Preview frame {idx + 1} "
+                 f"({self._det_frames[idx]}): {nm}, downscale 1/{k}", "hi")
+        import threading
+
+        def _log(msg):
+            self.after(0, lambda t=f"[{nm}] {msg}": self.log(self.det_log, t, "dim"))
+
+        def _frac(f):
+            self.after(0, lambda t=f: self.progress(t, f"Preview  {nm}"))
+
+        def go():
+            try:
+                import numpy as np
+                name = self._det_frames[idx]
+                orig = self._det_read(os.path.join(self._det_folder, name))[0]
+                base = np.asarray(orig, np.float32) / 255.0
+                size = (orig.width, orig.height)
+                self.after(0, lambda: (setattr(self, "_det_orig", orig),
+                                       setattr(self, "_det_preview_idx", idx)))
+                if m == "esrgan":
+                    _frac(0.2)
+                    up = self._det_synth_esrgan(base, k)
+                    _frac(1.0)
+                else:
+                    r0, r1 = self._vace_span_for(idx, len(self._det_frames),
+                                                 want=self.DET_PREVIEW_SPAN)
+                    _log(f"re-synthesises frames {r0 + 1}–{r1 + 1} — "
+                         "this spends real money and takes a little while.")
+                    self._ups_bar_prefix = f"{nm} preview"
+                    self._det_fal_span(m, self._det_frames[r0:r1 + 1], size,
+                                       _log, _frac)
+                    up = self._det_fal_result(m, name, size)
+                    if up is None:
+                        raise RuntimeError("no result came back for this frame")
+                key = (idx, m, k, self._det_in_mode)
+
+                def _done_ok():
+                    self._det_up, self._det_up_key = up, key
+                    self._det_reblend()
+                    self.log(self.det_log, f"✓ {nm} preview ready — "
+                             "drag to wipe; Strength and Protect re-blend "
+                             "on the spot.", "ok")
+                self.after(0, _done_ok)
+            except Exception as ex:
+                if getattr(self, "_det_prev_cancelled", False):
+                    self.after(0, lambda: self.log(self.det_log,
+                                                   "Preview cancelled.", "err"))
+                else:
+                    self.after(0, lambda e=str(ex): self.log(
+                        self.det_log, f"✗ Preview failed: {e}", "err"))
+            finally:
+                def _fin():
+                    self._det_previewing = False
+                    self._det_prev_cancelled = False
+                    self._ip_vace_cancel = False
+                    self._ups_bar_prefix = ""
+                    self.det_preview_btn.configure(text="PREVIEW", state="normal")
+                    self.progress(-1)
+                self.after(0, _fin)
+        threading.Thread(target=go, daemon=True).start()
+
+    # -- viewer ------------------------------------------------------------
+    def _det_set_mode(self, mode):
+        self._det_mode = mode
+        self._det_paint_mode_btns()
+        self._det_draw()
+
+    def _det_paint_mode_btns(self):
+        for md, b in getattr(self, "_det_mode_btns", {}).items():
+            on = md == self._det_mode
+            try:
+                b.configure(bg="#2A0A0A" if on else "#0D0D0D",
+                            fg="#CC4444" if on else G)
+            except Exception:
+                pass
+
+    def _det_mode_image(self, mode):
+        """Diff (×4) between result and input, or the result's fine
+        detail on black (the input's when there is no result yet)."""
+        import numpy as np
+        import cv2
+        from PIL import Image
+        hit = self._det_mode_imgs.get(mode)
+        if hit is not None:
+            return hit
+        a = np.asarray(self._det_orig, np.float32) / 255.0
+        r = (np.asarray(self._det_res, np.float32) / 255.0
+             if self._det_res is not None else a)
+        if mode == "diff":
+            out = np.abs(r - a) * 4.0
+        else:
+            y = r @ np.array([0.2126, 0.7152, 0.0722], np.float32)
+            hp = np.abs(y - cv2.GaussianBlur(y, (0, 0), 1.2))
+            out = np.repeat((np.clip(hp * 6.0, 0, 1) ** 0.7)[:, :, None], 3, 2)
+        img = Image.fromarray((np.clip(out, 0, 1) * 255.0 + 0.5).astype(np.uint8))
+        self._det_mode_imgs = {mode: img}
+        return img
+
+    def _det_layout(self):
+        cv = self.det_canvas
+        cw, ch = int(cv.winfo_width()), int(cv.winfo_height())
+        a = self._det_orig
+        if a is None or cw < 10 or ch < 10:
+            return None
+        iw, ih = a.size
+        sc = min(cw / iw, ch / ih) * self._det_zoom
+        nw, nh = max(1, int(iw * sc)), max(1, int(ih * sc))
+        ox = (cw - nw) // 2 + int(self._det_pan[0])
+        oy = (ch - nh) // 2 + int(self._det_pan[1])
+        return cw, ch, nw, nh, ox, oy
+
+    def _det_draw(self):
+        try:
+            from PIL import ImageTk, ImageDraw
+            cv = self.det_canvas
+            lay = self._det_layout()
+            cv.delete("all")
+            if lay is None:
+                if self._det_orig is None:
+                    cv.create_text(max(10, cv.winfo_width()) // 2,
+                                   max(10, cv.winfo_height()) // 2,
+                                   text="Select a sequence or a movie",
+                                   fill="#444444", font=FSM)
+                return
+            cw, ch, nw, nh, ox, oy = lay
+            a, b = self._det_orig, self._det_res
+            mode = self._det_mode
+            if mode in ("diff", "detail") and (b is not None or mode == "detail"):
+                comp = self._ups_render(self._det_mode_image(mode),
+                                        cw, ch, nw, nh, ox, oy)
+                self._det_tk = ImageTk.PhotoImage(comp)
+                cv.create_image(0, 0, anchor="nw", image=self._det_tk)
+                txt = (("detail — " if b is not None else "input — ")
+                       + ("difference from input ×4" if mode == "diff"
+                          else "fine detail on black"))
+                cv.create_text(6, 8, anchor="nw", font=FM, fill=W, text=txt)
+                return
+            comp = self._ups_render(a, cw, ch, nw, nh, ox, oy)
+            if b is not None:
+                right = self._ups_render(b, cw, ch, nw, nh, ox, oy)
+                split = int(self._det_wipe_t * cw)
+                comp.paste(right.crop((split, 0, cw, ch)), (split, 0))
+                ImageDraw.Draw(comp).line([(split, 0), (split, ch)],
+                                          fill=(180, 180, 180), width=1)
+            self._det_tk = ImageTk.PhotoImage(comp)
+            cv.create_image(0, 0, anchor="nw", image=self._det_tk)
+            cv.create_text(6, 8, anchor="nw", font=FM, fill=W,
+                           text=f"input  {a.width}×{a.height}")
+            if b is not None:
+                s, pr, only = self._det_params()
+                cv.create_text(int(self._det_wipe_t * cw) + 8, 8, anchor="nw",
+                               font=FM, fill=GR,
+                               text=f"detail  {int(s * 100)}%  protect "
+                                    f"{int(pr * 100)}%"
+                                    + ("" if only else "  (full blend)"))
+            else:
+                cv.create_text(6, 24, anchor="nw", font=FM, fill="#666666",
+                               text="Press Preview to re-synthesise this frame")
+        except Exception:
+            pass
+
+    def _det_canvas_drag(self, e):
+        if getattr(self, "_det_panning", False):
+            return
+        cw = max(1, self.det_canvas.winfo_width())
+        self._det_wipe_t = max(0.0, min(1.0, e.x / cw))
+        self._det_draw()
+
+    def _det_canvas_scroll(self, e):
+        d = getattr(e, "delta", 0) or (-120 if getattr(e, "num", 0) == 5 else 120)
+        self._det_zoom = max(0.1, min(32.0, self._det_zoom * (1.15 if d > 0
+                                                              else 1 / 1.15)))
+        self._det_draw()
+
+    def _det_pan_start(self, e):
+        self._det_panning = True
+        self._det_pan0 = (e.x, e.y, self._det_pan[0], self._det_pan[1])
+
+    def _det_pan_move(self, e):
+        x0, y0, px, py = getattr(self, "_det_pan0", (e.x, e.y, 0, 0))
+        self._det_pan = [px + e.x - x0, py + e.y - y0]
+        self._det_draw()
+        self.after(10, lambda: setattr(self, "_det_panning", False))
+
+    def _det_zoom_reset(self):
+        self._det_zoom, self._det_pan = 1.0, [0, 0]
+        self._det_draw()
+
+    def _det_zoom_1to1(self):
+        lay = self._det_layout()
+        if lay is None:
+            return
+        cw, ch = lay[0], lay[1]
+        a = self._det_orig
+        self._det_zoom = 1.0 / min(cw / a.width, ch / a.height)
+        self._det_pan = [0, 0]
+        self._det_draw()
+
+    def _det_reset_sash(self):
+        try:
+            vp = self._det_vpaned
+            vp.update()
+            total = vp.winfo_height()
+            if total > 200:
+                vp.sash_place(0, 0, max(200, total - 200))
+            self._det_draw()
+        except Exception:
+            pass
+
+    # -- render ------------------------------------------------------------
+    def _det_cancel_run(self):
+        if not messagebox.askyesno("Cancel", "Cancel detail run?"):
+            return
+        self._det_cancel = True
+        self._ip_vace_cancel = True
+        self.log(self.det_log, "Cancelling…", "err")
+
+    def _det_encode_movie(self, folder, codec, fps):
+        spec = self.X264_CODECS[codec]
+        base = os.path.basename(str(self._det_src_movie or folder))
+        out = os.path.join(os.path.dirname(str(self._det_src_movie)) or folder,
+                           os.path.splitext(base)[0] + "_DETAIL" + spec["ext"])
+        cmd = (["ffmpeg", "-v", "error", "-y", "-framerate", f"{fps:g}",
+                "-i", os.path.join(folder, "%05d.png"), "-c:v", spec["enc"]]
+               + list(spec["opts"]) + ["-pix_fmt", spec["pix"]] + [out])
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode != 0 or not os.path.exists(out):
+            tail = (r.stderr or "").strip().splitlines()[-1:] or [""]
+            raise RuntimeError(tail[0][:200] or "movie encode failed")
+        return out
+
+    def _det_run(self):
+        if not self._det_folder or not self._det_frames:
+            return
+        if self._det_previewing:
+            self.log(self.det_log, "A preview is running — cancel it "
+                     "or let it finish, then Run.", "err")
+            return
+        folder, frames = self._det_folder, list(self._det_frames)
+        name = self.det_fmt_var.get()
+        spec = self.USC_FORMATS.get(name, self.USC_FORMATS[self.USC_DEFAULT_FORMAT])
+        r0, r1 = self._det_range()
+        sel = frames[r0:r1 + 1]
+        m, k = self._det_model(), self._det_k()
+        nm = dict(self.DET_MODELS)[m]
+        s, pr, only = self._det_params()
+        mode = self._det_in_mode
+        base_dir = (os.path.dirname(str(self._det_src_movie))
+                    if self._det_is_movie else folder)
+        self._det_cancel = False
+        self._ip_vace_cancel = False
+        self._det_running = True
+        self.det_run_btn.configure(text="CANCEL", bg="#2A0A0A", fg="#FF4444",
+                                   command=self._det_cancel_run)
+        what = (f"{nm}, 1/{k}, {int(s * 100)}%"
+                + (f", protect {int(pr * 100)}%" if pr else "")
+                + ("" if only else ", full blend"))
+        self.setstatus(f"Detail ({what})…", R)
+        self.log(self.det_log, f"Run — {what}.", "hi")
+        import threading
+
+        def go():
+            errors = 0
+            fell_back = False
+            try:
+                import numpy as np
+                from PIL import Image
+                first = self._det_read(os.path.join(folder, sel[0]))[0]
+                size = (first.width, first.height)
+                if (self._det_src_hdr and spec["ext"] != ".exr" and mode != "pq"):
+                    self.after(0, lambda: self.log(
+                        self.det_log, "This source is HDR and the output "
+                        "is an SDR movie: values above white are clipped. "
+                        "Write EXR to keep them.", "err"))
+                use_fal = m in self.UPS_ENDPOINTS
+                if use_fal:
+                    try:
+                        for c0 in range(0, len(sel), self.UPS_RUN_CHUNK):
+                            if self._det_cancel:
+                                break
+                            chunk = sel[c0:c0 + self.UPS_RUN_CHUNK]
+                            self._ups_bar_prefix = (
+                                f"{nm}  frames {r0 + c0 + 1}–"
+                                f"{r0 + c0 + len(chunk)}")
+                            self._det_fal_span(
+                                m, chunk, size,
+                                lambda t: self.after(0, lambda t=t: self.log(
+                                    self.det_log, f"[{nm}] {t}", "dim")))
+                    except Exception as ex:
+                        if self._det_cancel:
+                            raise RuntimeError("Cancelled.")
+                        use_fal = False
+                        fell_back = True
+                        self.after(0, lambda e=str(ex): self.log(
+                            self.det_log, f"{nm} failed, using Real-ESRGAN "
+                            f"for its frames: {e}", "err"))
+                self._ups_bar_prefix = ""
+                if self._det_cancel:
+                    raise RuntimeError("Cancelled.")
+                out = self._adw_versioned_output_dir(base_dir, "DETAIL")
+                aces = spec["ext"] == ".exr" and mode == "aces"
+                self._adw_write_colorspace(
+                    out, "scene-linear" if spec["ext"] == ".exr" else "display",
+                    primaries=self.ACES_NAME if aces else None)
+                os.makedirs(out, exist_ok=True)
+                self.after(0, lambda: self.log(self.det_log,
+                                               f"Output → {out}/", "ok"))
+                total = len(sel)
+                eotf = self._ups_eotf()
+                for i, fname in enumerate(sel):
+                    if self._det_cancel:
+                        break
+                    src = os.path.join(folder, fname)
+                    dst = os.path.join(out, f"{i + 1:05d}{spec['ext']}")
+                    try:
+                        orig, gain = self._det_read(src)
+                        base = np.asarray(orig, np.float32) / 255.0
+                        up = (self._det_fal_result(m, fname, size)
+                              if use_fal else None)
+                        if up is None:
+                            up = self._det_synth_esrgan(base, k)
+                        res = self._det_blend(base, up, k, s, pr, only)
+                        px = self._ups_out_px(res, gain, spec, eotf, mode=mode)
+                        self._usc_write_frame(px, dst, spec, aces=aces)
+                        if i % 10 == 0:
+                            u = Image.fromarray((res * 255 + .5).astype(np.uint8))
+                            self.after(0, lambda o=orig, u=u, kk=r0 + i: (
+                                setattr(self, "_det_orig", o),
+                                setattr(self, "_det_res", u),
+                                setattr(self, "_det_preview_idx", kk),
+                                setattr(self, "_det_mode_imgs", {}),
+                                self._det_draw()))
+                    except Exception as ex:
+                        errors += 1
+                        self.after(0, lambda e=str(ex), f=fname: self.log(
+                            self.det_log, f"{f}: {e}", "err"))
+                    self.after(0, lambda p=(i + 1) / total, n=i + 1, t=total: (
+                        self.progress(p, f"Detail  {n} / {t}")))
+                if spec["movie"] and not self._det_cancel and errors == 0:
+                    self.after(0, lambda: self.progress(1.0, "Encoding movie…"))
+                    mv = self._det_encode_movie(out, spec["movie"],
+                                                self._det_src_fps or 24.0)
+                    self.after(0, lambda mv=mv: self.log(
+                        self.det_log, f"✓ {os.path.basename(mv)}", "ok"))
+                if self._det_cancel:
+                    self.after(0, lambda: (self.log(self.det_log, "Cancelled.", "err"),
+                                           self.setstatus("Cancelled", RB)))
+                elif errors:
+                    self.after(0, lambda e=errors: (
+                        self.log(self.det_log, f"{e} frame(s) failed.", "err"),
+                        self.setstatus("Error", RB)))
+                else:
+                    self.after(0, lambda n=total: (
+                        self.log(self.det_log,
+                                 f"Done — {n} frame(s) written ({what})"
+                                 + (" — fell back to Real-ESRGAN." if fell_back
+                                    else "."),
+                                 "err" if fell_back else "ok"),
+                        self.setstatus("Complete (fell back)" if fell_back
+                                       else "Complete", RB if fell_back else GR)))
+                    self.after(0, lambda o=out: self._adw_propagate_output(
+                        o, "detail", self.det_log))
+            except Exception as ex:
+                if self._det_cancel:
+                    self.after(0, lambda: (self.log(self.det_log, "Cancelled.", "err"),
+                                           self.setstatus("Cancelled", RB)))
+                else:
+                    self.after(0, lambda e=str(ex): (
+                        self.log(self.det_log, f"Run error: {e}", "err"),
+                        self.setstatus("Error", RB)))
+            finally:
+                def _done():
+                    self._det_running = False
+                    self._ups_bar_prefix = ""
+                    self._ip_vace_cancel = False
+                    self.progress(-1)
+                    self.det_run_btn.configure(
+                        text="RUN DETAIL", bg="#2A0A0A", fg="#CC4444",
+                        command=self._det_run, state="normal")
                 self.after(0, _done)
         threading.Thread(target=go, daemon=True).start()
 

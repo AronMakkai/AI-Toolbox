@@ -9,6 +9,7 @@ AI-Toolbox is a comprehensive VFX processing suite featuring:
 - **Lens Studio** — Optical effects (chromatic aberration, bloom, vignette, grain)
 - **Expansion Studio** — SDR-to-HDR tone mapping with AI upsampling
 - **Upscale Studio** — Video upscaling (SeedVR2, FlashVSR, ESRGAN)
+- **Detail Studio** — Texture at the input resolution: downscale, upscale back, keep only the invented detail
 - **Paint Studio** — Per-frame hand painting and smudging
 - Plus: MOV ↔ EXR conversion, temporal smoothing, segmentation, and more
 

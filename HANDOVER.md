@@ -30,6 +30,7 @@ prefixes. Use this table before searching.
 | Setup & Install | `setup` | `_setup_*` |
 | MOV ↔ EXR | `exr` | `_exr_*`, `_e2m_*`, `_m2e_*` |
 | Upscale Studio | `upstudio` | `_ups_*` |
+| Detail Studio | `detail` | `_det_*` |
 | Expansion Studio | `upscale` | `_usc_*` |
 | Lens Studio (was ADW-Organic) | `organic` | `_organic_*` |
 | Paint Studio (was ADW-Paint) | `smudge` | `_smudge_*`, `sm_*` |
@@ -43,6 +44,19 @@ prefixes. Use this table before searching.
   (`fal-ai/seedvr/upscale/video`), FlashVSR
   (`fal-ai/flashvsr/upscale/video`) and local ESRGAN. SeedVR2 is capped
   (`UPS_MAX_SHORT_SIDE`), with a popup stating the resulting resolution.
+- **Detail Studio** (added 23 Oct 2026) adds texture at the input
+  resolution: each frame is downscaled (½ or ¼, `_det_downscale`), upscaled
+  back with ESRGAN / SeedVR2 / FlashVSR, and the invented high band laid
+  over the original (`_det_blend`: Detail only keeps the original's low
+  band; Protect keeps the plate's own HF where its local energy matches
+  the upscaler's; Strength blends). The preview re-synthesises once per
+  frame and the sliders re-blend instantly. It calls Upscale Studio's
+  helpers (`_ups_read_source`, `_ups_scene`, `_ups_out_px`,
+  `_ups_fal_upscale`, `_rife_upscale`, `_usc_write_frame`) with its own
+  state passed as parameters (`mode=`, `hdr=`, `sig=`, `read=`) — never
+  through `_ups_*` state. Paid models get the 1/k frames staged under
+  `~/.ai_toolbox/detail_stage/<hash>/` so the fal cache hits on re-runs.
+  Output `ADW/DETAIL_vNN/`, EXR tagged scene-linear.
 - **Lens Studio** applies lens and sensor effects in linear float. Output
   goes to `ADW/Lens_Studio_vNN/Lens_Studio.NNNNN.exr`.
 - **Paint Studio** is hand paint/smudge per frame.
