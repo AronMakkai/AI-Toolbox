@@ -16,6 +16,7 @@ Studio Toolbox is a VFX processing suite featuring:
 - **Lens Studio** — Optical effects (chromatic aberration, bloom, vignette, grain)
 - **Expansion Studio** — SDR-to-HDR tone mapping with AI upsampling
 - **Upscale Studio** — Video upscaling (SeedVR2, FlashVSR, ESRGAN)
+- **Detail Studio** — Texture at the input resolution: downscale, upscale back, keep only the invented detail
 - **Paint Studio** — Per-frame hand painting and smudging
 - **Fix Missing Frames** — rebuild dropped, black or held frames with RIFE or Wan VACE
 - Plus: MOV ↔ EXR conversion and SAM 3 segmentation

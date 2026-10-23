@@ -12455,6 +12455,247 @@ class TestSamInputColour(unittest.TestCase):
         self.assertEqual(app._sam_in_mode, "srgb")
 
 
+class TestDetailStudio(unittest.TestCase):
+    """Detail Studio: texture at the input resolution. A frame is
+    downscaled by k, upscaled back, and the invented high band laid over
+    the original -- the low band stays the plate's (Detail only), the
+    plate's own fine detail is kept where it has some (Protect), and
+    Strength blends. The upscalers, colour handling, cache and writer
+    are Upscale Studio's, called with Detail Studio's own state."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.dir = tempfile.mkdtemp()
+        cls.seq = os.path.join(cls.dir, "seq")
+        os.makedirs(cls.seq)
+        rs = np.random.RandomState(3)
+        cls.n = 5
+        for i in range(cls.n):
+            tex = cv2.resize(rs.rand(68, 120, 3).astype(np.float32), (240, 136),
+                             interpolation=cv2.INTER_CUBIC)
+            img = cv2.GaussianBlur(tex, (0, 0), 2.5) * 0.6 + 0.2
+            u8 = (np.clip(img, 0, 1) * 255 + .5).astype(np.uint8)
+            cv2.putText(u8, "SHARP", (20 + i * 3, 100),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 255), 2)
+            cv2.imwrite(os.path.join(cls.seq, f"plate.{i + 1:04d}.png"), u8[:, :, ::-1])
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.dir, ignore_errors=True)
+
+    def _plate(self):
+        return cv2.cvtColor(cv2.imread(os.path.join(self.seq, "plate.0001.png")),
+                            cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+
+    def _up(self, base, k):
+        """A stand-in re-synthesis: the 1/k plate back up with texture
+        the plate never had (noise in the high band)."""
+        small = App._det_downscale(base, k)
+        up = cv2.resize(small, (base.shape[1], base.shape[0]),
+                        interpolation=cv2.INTER_CUBIC)
+        noise = np.random.RandomState(7).randn(*base.shape).astype(np.float32) * 0.08
+        return np.clip(up + noise - cv2.GaussianBlur(noise, (0, 0), 1.0), 0, 1)
+
+    # -- registration ------------------------------------------------------
+    def test_the_module_is_wired_in_everywhere_a_module_must_be(self):
+        with open(SRC, encoding="utf-8") as fh:
+            src = fh.read()
+        self.assertIn('("Detail Studio",      "detail")', src)
+        self.assertIn("self._tab_detail()", src)
+        self.assertIn('("detail",  "_det_load_folder",   "Detail Studio")', src)
+        self.assertIn('data["modules"]["detail"]', src)
+        self.assertIn('dm = mods.get("detail")', src)
+        comp = src[src.index("_COMP_MODULES = {"):][:600]
+        self.assertRegex(comp, r'"ffmpeg": \{[^}]*"detail"')
+        self.assertRegex(comp, r'"esrgan": \{[^}]*"detail"')
+        tl = src[src.index("self._tl_frames = {}"):][:300]
+        self.assertIn('"detail"', tl)
+        self.assertIn('if key == "detail":', src)
+        self.assertTrue(callable(getattr(App, "_tab_detail", None)))
+        for fn in ("_det_load_folder", "_det_preview", "_det_run", "_det_blend",
+                   "_det_downscale", "_det_synth_esrgan", "_det_fal_span",
+                   "_det_reblend", "_det_draw", "_det_reset_sash"):
+            self.assertTrue(callable(getattr(App, fn, None)), fn)
+
+    def test_it_shares_upscale_studios_helpers_by_parameter_not_state(self):
+        """The shared helpers take the mode / hdr / sig / reader as
+        arguments and default to Upscale Studio's own, so neither
+        studio reads the other's state."""
+        import inspect
+        self.assertIn("mode=None", str(inspect.signature(App._ups_read_source)))
+        self.assertIn("hdr=None", str(inspect.signature(App._ups_read_source)))
+        self.assertIn("mode=None", str(inspect.signature(App._ups_scene)))
+        self.assertIn("mode=None", str(inspect.signature(App._ups_out_px)))
+        sig = str(inspect.signature(App._ups_fal_upscale))
+        self.assertIn("sig=None", sig)
+        self.assertIn("read=None", sig)
+        det = inspect.getsource(App._det_read)
+        self.assertIn("mode=self._det_in_mode", det)
+        self.assertIn("hdr=self._det_src_hdr", det)
+        span = inspect.getsource(App._det_fal_span)
+        self.assertIn("sig=self._det_sig(m, size)", span)
+        self.assertIn("read=self._det_read_png", span)
+        self.assertNotIn("_ups_in_mode", inspect.getsource(App._det_run))
+        self.assertIn("detail|", inspect.getsource(App._det_sig))
+
+    # -- the blend ---------------------------------------------------------
+    def test_downscale_is_area_averaged_at_one_over_k(self):
+        base = self._plate()
+        for k in (2, 4):
+            small = App._det_downscale(base, k)
+            self.assertEqual(small.shape, (136 // k, 240 // k, 3))
+        self.assertAlmostEqual(float(App._det_downscale(base, 2).mean()),
+                               float(base.mean()), places=2)
+
+    def test_strength_zero_is_the_original(self):
+        base = self._plate()
+        up = self._up(base, 2)
+        out = App._det_blend(base, up, 2, 0.0, 0.5, True)
+        self.assertLess(float(np.abs(out - base).max()), 1e-5)
+        out = App._det_blend(base, up, 2, 0.0, 0.0, False)
+        self.assertLess(float(np.abs(out - base).max()), 1e-5)
+
+    def test_full_blend_at_strength_one_is_the_upscale(self):
+        base = self._plate()
+        up = self._up(base, 2)
+        out = App._det_blend(base, up, 2, 1.0, 0.0, False)
+        self.assertLess(float(np.abs(out - up).max()), 1e-5)
+
+    def test_detail_only_keeps_the_low_band_of_the_original(self):
+        """The invented texture goes in, but blurred to the band the
+        downscale lost the result is the original: colour, exposure
+        and grade untouched."""
+        base = self._plate()
+        up = self._up(base, 2)
+        # a tone shift in the re-synthesis must not reach the output
+        up_shifted = np.clip(up * 0.7 + 0.25, 0, 1)
+        out = App._det_blend(base, up_shifted, 2, 1.0, 0.0, True)
+        self.assertGreater(float(np.abs(out - base).mean()), 0.01)   # texture went in
+        lo_out = cv2.GaussianBlur(out, (0, 0), 1.6)
+        lo_base = cv2.GaussianBlur(base, (0, 0), 1.6)
+        self.assertLess(float(np.abs(lo_out - lo_base).mean()), 0.01)
+        self.assertLess(abs(float(out.mean()) - float(base.mean())), 0.005)
+        # without Detail only the shift goes straight through
+        full = App._det_blend(base, up_shifted, 2, 1.0, 0.0, False)
+        self.assertGreater(abs(float(full.mean()) - float(base.mean())), 0.03)
+
+    def test_protect_keeps_the_plates_own_sharp_detail(self):
+        """The text is sharp in the plate and soft in the re-synthesis;
+        with Protect it stays the plate's, the soft texture around it
+        still gets the boost."""
+        base = self._plate()
+        up = self._up(base, 2)
+        text = (slice(80, 104), slice(20, 130))      # where SHARP sits
+        soft = (slice(5, 60), slice(5, 235))
+        none = App._det_blend(base, up, 2, 1.0, 0.0, True)
+        kept = App._det_blend(base, up, 2, 1.0, 1.0, True)
+        d_text_none = float(np.abs(none[text] - base[text]).mean())
+        d_text_kept = float(np.abs(kept[text] - base[text]).mean())
+        self.assertLess(d_text_kept, d_text_none * 0.5)
+        d_soft_kept = float(np.abs(kept[soft] - base[soft]).mean())
+        self.assertGreater(d_soft_kept, 0.01)
+
+    def test_a_result_of_another_size_is_resized_first(self):
+        base = self._plate()
+        up = cv2.resize(self._up(base, 2), (120, 68))
+        out = App._det_blend(base, up, 2, 0.5, 0.5, True)
+        self.assertEqual(out.shape, base.shape)
+
+    def test_esrgan_synthesis_is_the_input_size_and_textured(self):
+        app = App.__new__(App)
+        app.rife_upscale_var = None
+        base = self._plate()
+        up = app._det_synth_esrgan(base, 2)
+        self.assertEqual(up.shape, base.shape)
+        self.assertEqual(up.dtype, np.float32)
+        self.assertLessEqual(float(up.max()), 1.0)
+        self.assertGreater(float(np.abs(up - base).mean()), 0.001)
+
+    # -- the tab, headless ---------------------------------------------------
+    def test_load_preview_reblend_and_run(self):
+        """The tab loads a folder, Preview re-synthesises the frame on
+        screen with the local upscaler, the sliders re-blend without
+        running it again, and Run writes the range as EXR at the input
+        size with the scene-linear tag. Driven from inside mainloop:
+        the worker threads report through after(), which Tk refuses
+        outside it."""
+        try:
+            app = App()
+        except Exception as ex:
+            self.skipTest(f"no display: {ex}")
+        errors = []
+        state = {"up_before": None, "before": None}
+
+        def step(fn, *a):
+            try:
+                fn(*a)
+            except Exception as ex:          # AssertionError included
+                errors.append(ex)
+                app.quit()
+
+        def s1():
+            app.show("detail")
+            app._det_load_folder(self.seq)
+            self.assertEqual(len(app._det_frames), self.n)
+            self.assertEqual(app._det_in_mode, "srgb")
+            app._det_preview()
+            wait(lambda: not app._det_previewing, s2, 600)
+
+        def wait(cond, then, n):
+            if cond():
+                app.after(50, lambda: step(then))
+            elif n <= 0:
+                errors.append(AssertionError("timed out: " + app.det_log.get("1.0", "end")))
+                app.quit()
+            else:
+                app.after(50, lambda: wait(cond, then, n - 1))
+
+        def s2():
+            self.assertIsNotNone(app._det_res, app.det_log.get("1.0", "end"))
+            self.assertEqual(app._det_res.size, (240, 136))
+            self.assertEqual(app._det_up_key, (0, "esrgan", 2, "srgb"))
+            state["before"] = np.asarray(app._det_res).copy()
+            state["up_before"] = app._det_up
+            app.det_strength_var.set(100)
+            self.assertIs(app._det_up, state["up_before"])        # no re-synthesis
+            self.assertGreater(float(np.abs(np.asarray(app._det_res, float)
+                                            - state["before"]).mean()), 0.1)
+            app.det_strength_var.set(0)
+            self.assertLess(float(np.abs(np.asarray(app._det_res, int)
+                                         - np.asarray(app._det_orig, int)).max()), 2)
+            app.det_down_var.set(4)
+            self.assertNotEqual(app._det_up_key, app._det_key(0))   # stale, says so
+            app.det_down_var.set(2)
+            app.det_range_bar.set_view(0, 3)
+            app._det_run()
+            wait(lambda: not app._det_running, s3, 1200)
+
+        def s3():
+            out = os.path.join(self.dir, "ADW", "DETAIL_v01")
+            self.assertTrue(os.path.isdir(out), app.det_log.get("1.0", "end"))
+            exrs = sorted(f for f in os.listdir(out) if f.endswith(".exr"))
+            self.assertEqual(len(exrs), 3, app.det_log.get("1.0", "end"))
+            self.assertEqual(App._adw_read_colorspace(out), "scene-linear")
+            import OpenEXR
+            dw = OpenEXR.InputFile(os.path.join(out, exrs[0])).header()["dataWindow"]
+            self.assertEqual((dw.max.x + 1, dw.max.y + 1), (240, 136))
+            # the other modules were offered the result
+            self.assertEqual(getattr(app, "_ups_folder", None), out)
+            app.quit()
+
+        app.after(300, lambda: step(s1))
+        app.after(120000, lambda: (errors.append(AssertionError("hung")), app.quit()))
+        try:
+            app.mainloop()
+        finally:
+            try:
+                app.destroy()
+            except Exception:
+                pass
+        if errors:
+            raise errors[0]
+
+
 class TestSetupRifeLabel(unittest.TestCase):
     """The Setup & Install component row for the RIFE install is
     labelled "RIFE" and names its one remaining consumer, Fix Missing
@@ -16503,11 +16744,14 @@ class TestUpscaleStudioInputColour(unittest.TestCase):
         self.assertIn("+hdr", body)
 
     def test_every_read_goes_through_the_one_reader(self):
+        """...called, or -- in _ups_fal_upscale, which Detail Studio
+        shares by passing its own reader -- the default for `read`."""
         for fn in (App._ups_run, App._ups_fal_upscale,
                    App._ups_load_preview_frame):
             with self.subTest(fn=fn.__name__):
                 body = self._src(fn)
-                self.assertIn("self._ups_read_source(", body)
+                self.assertTrue("self._ups_read_source(" in body
+                                or "read = self._ups_read_source" in body)
                 self.assertNotIn("self._usc_read_rgb(", body)
 
     def test_auto_reads_tags_type_and_over_range(self):
