@@ -135,6 +135,26 @@ prefixes. Use this table before searching.
   the EXR codec compiled out. PNG/JPG/TIF are display pictures whatever
   the choice says.
 
+## Anamorphic (Upscale Studio and Detail Studio)
+
+- Checkbox + squeeze factor (`UPS_SQUEEZES`: 1.33 / 1.5 / 1.8 / 2.0) in
+  the Input card of both studios (`_anam_row`); `ups_anam_var` /
+  `ups_squeeze_var` and `det_anam_var` / `det_squeeze_var`. An EXR with
+  `pixelAspectRatio` > 1 ticks it and sets the factor on load
+  (`_anam_autodetect`, `_exr_pixel_aspect`); a non-EXR source leaves the
+  choice alone.
+- Desqueeze happens in the reader: `_ups_read_source(..., squeeze=)`
+  widens the base (and the HDR gain map) by the factor, so the
+  upscalers, the viewer and the graph all see square pixels. Both runs
+  call `_resqueeze` on the pixels to write (after `_ups_out_px`, i.e. a
+  squeeze of linear light) and pass `pixel_aspect=` to the writers, which
+  tag the EXR (`_exr_write_planes`, `_organic_write_exr`,
+  `_usc_write_exr_layers`, `_usc_write_frame`).
+- Output size: `_ups_model_size` = `_usc_target` on the desqueezed
+  picture. A fixed preset (UHD) means 3840 wide AS SEEN, so the file is
+  3840 / squeeze wide and keeps its aspect; a factor is a factor either
+  way. Cache signatures carry `|sq=`.
+
 ## Colour handling
 
 - Every studio has an "Input colour" choice: Auto, display-encoded

@@ -12779,6 +12779,210 @@ class TestDetailStudio(unittest.TestCase):
             raise errors[0]
 
 
+class TestAnamorphic(unittest.TestCase):
+    """Anamorphic on Upscale Studio and Detail Studio: the frames are
+    desqueezed (width x squeeze) before any upscaler sees them, so it
+    works on real shapes; the render is squeezed back to storage width
+    when written, and the EXR carries pixelAspectRatio. An EXR that
+    says its own pixel aspect ticks the box itself."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.dir = tempfile.mkdtemp()
+        cls.seq = os.path.join(cls.dir, "anam")
+        os.makedirs(cls.seq)
+        import OpenEXR, Imath
+        cls.n = 3
+        for i in range(cls.n):
+            a = np.full((136, 240, 3), 0.05, np.float32)
+            cv2.circle(a, (120 + i * 4, 68), 44, (0.6, 0.4, 0.2), -1)
+            sq = cv2.resize(a, (120, 136), interpolation=cv2.INTER_AREA)
+            h = OpenEXR.Header(120, 136)
+            h["channels"] = {c: Imath.Channel(Imath.PixelType(Imath.PixelType.FLOAT))
+                             for c in "RGB"}
+            h["pixelAspectRatio"] = 2.0
+            f = OpenEXR.OutputFile(os.path.join(cls.seq, f"anam.{i + 1:04d}.exr"), h)
+            f.writePixels({c: sq[:, :, k].tobytes() for k, c in enumerate("RGB")})
+            f.close()
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.dir, ignore_errors=True)
+
+    def test_desqueeze_and_resqueeze_are_width_only_and_inverse_in_shape(self):
+        from PIL import Image
+        img = Image.new("RGB", (120, 136))
+        self.assertEqual(App._desqueeze(img, 2.0).size, (240, 136))
+        self.assertIs(App._desqueeze(img, 1.0), img)
+        a = np.zeros((136, 120, 3), np.float32)
+        self.assertEqual(App._desqueeze(a, 1.5).shape, (136, 180, 3))
+        self.assertEqual(App._resqueeze(App._desqueeze(a, 2.0), 2.0).shape, a.shape)
+        self.assertIs(App._resqueeze(a, 1.0), a)
+        g = np.zeros((136, 120), np.float32)
+        self.assertEqual(App._desqueeze(g, 2.0).shape, (136, 240))
+
+    def test_the_factor_comes_from_the_checkbox_and_the_combo(self):
+        class _V:
+            def __init__(s, v): s.v = v
+            def get(s): return s.v
+        self.assertEqual(App._squeeze_from(None, None), 1.0)
+        self.assertEqual(App._squeeze_from(_V(False), _V("2.0")), 1.0)
+        self.assertEqual(App._squeeze_from(_V(True), _V("2.0")), 2.0)
+        self.assertEqual(App._squeeze_from(_V(True), _V("1.33")), 1.33)
+        self.assertEqual(App._squeeze_from(_V(True), None), 2.0)
+        self.assertEqual(App._squeeze_from(_V(True), _V("0.5")), 1.0)
+
+    def test_an_exr_says_its_own_pixel_aspect(self):
+        self.assertEqual(App._exr_pixel_aspect(os.path.join(self.seq, "anam.0001.exr")), 2.0)
+        self.assertEqual(App._exr_pixel_aspect(os.path.join(self.dir, "none.png")), 1.0)
+        self.assertEqual(App._nearest_squeeze(1.95), "2.0")
+        self.assertEqual(App._nearest_squeeze(1.35), "1.33")
+        self.assertEqual(App._nearest_squeeze(1.78), "1.8")
+
+    def test_the_writers_carry_the_pixel_aspect(self):
+        import OpenEXR
+        a = np.zeros((4, 8, 3), np.float32)
+        p1 = os.path.join(self.dir, "w1.exr")
+        App._organic_write_exr(p1, a, pixel_aspect=2.0)
+        self.assertEqual(OpenEXR.InputFile(p1).header()["pixelAspectRatio"], 2.0)
+        p2 = os.path.join(self.dir, "w2.exr")
+        App._organic_write_exr(p2, a, aces=True, pixel_aspect=1.5)
+        self.assertEqual(OpenEXR.InputFile(p2).header()["pixelAspectRatio"], 1.5)
+        p3 = os.path.join(self.dir, "w3.exr")
+        App._usc_write_exr_layers(p3, a, {"esrgan": a}, pixel_aspect=1.33)
+        hdr = OpenEXR.InputFile(p3).header()
+        self.assertAlmostEqual(hdr["pixelAspectRatio"], 1.33, places=5)
+        self.assertIn("esrgan.R", hdr["channels"])
+        p4 = os.path.join(self.dir, "w4.exr")
+        App._organic_write_exr(p4, a)
+        self.assertEqual(OpenEXR.InputFile(p4).header()["pixelAspectRatio"], 1.0)
+        # a PNG frame has nowhere to put it and must not mind
+        app = App.__new__(App)
+        app._usc_write_frame(a, os.path.join(self.dir, "w5.png"),
+                             {"ext": ".png", "movie": None}, pixel_aspect=2.0)
+        self.assertTrue(os.path.exists(os.path.join(self.dir, "w5.png")))
+
+    def test_the_reader_desqueezes_the_base_and_the_gain(self):
+        app = App.__new__(App)
+        path = os.path.join(self.seq, "anam.0001.exr")
+        base, gain = app._ups_read_source(path, mode="srgb", hdr=False, squeeze=2.0)
+        self.assertEqual(base.size, (240, 136))
+        self.assertIsNone(gain)
+        base1, _ = app._ups_read_source(path, mode="srgb", hdr=False, squeeze=1.0)
+        self.assertEqual(base1.size, (120, 136))
+        # the circle is round again: as wide as it is tall
+        y = np.asarray(base, np.float32).mean(axis=2) > 40
+        cols = np.nonzero(y.any(axis=0))[0]; rows = np.nonzero(y.any(axis=1))[0]
+        self.assertLess(abs((cols[-1] - cols[0]) - (rows[-1] - rows[0])), 4)
+        # HDR: the gain map is desqueezed with the base
+        app._ups_src_hdr = True
+        base, gain = app._ups_read_source(path, mode="linear", hdr=True, squeeze=2.0)
+        self.assertEqual(base.size, (240, 136))
+        self.assertEqual(gain.shape, (136, 240))
+
+    def test_a_fixed_output_is_the_picture_as_seen(self):
+        """UHD means 3840 wide desqueezed: the file is 1920 wide and
+        keeps its aspect. A factor is a factor either way."""
+        app = App.__new__(App)
+        app.ups_anam_var = None
+        self.assertEqual(app._ups_model_size(240, 136, "UHD", "x2"), (3840, 2160))
+        self.assertEqual(app._ups_model_size(240, 136, "factor", "x2"), (480, 272))
+        self.assertEqual(App._resqueeze(np.zeros((2160, 3840, 3), np.float32), 2.0).shape,
+                         (2160, 1920, 3))
+
+    def test_both_studios_have_the_row_and_read_through_it(self):
+        import inspect
+        for tab, var in ((App._tab_upstudio, "self.ups_anam_var"),
+                         (App._tab_detail, "self.det_anam_var")):
+            body = inspect.getsource(tab)
+            self.assertIn("self._anam_row(c1, " + var, body)
+        self.assertIn("self._anam_autodetect(", inspect.getsource(App._ups_load_folder))
+        self.assertIn("self._anam_autodetect(", inspect.getsource(App._det_load_folder))
+        self.assertIn("squeeze=self._det_squeeze()", inspect.getsource(App._det_read))
+        self.assertIn("squeeze = self._ups_squeeze()", inspect.getsource(App._ups_read_source))
+        for fn in (App._ups_run, App._det_run):
+            body = inspect.getsource(fn)
+            self.assertIn("self._resqueeze(", body)
+            self.assertEqual(body.count("pixel_aspect=pa"), 2)
+        self.assertIn("|sq=", inspect.getsource(App._ups_model_sig))
+        self.assertIn("|sq=", inspect.getsource(App._det_sig))
+        self.assertIn("sq=", inspect.getsource(App._det_stage_dir))
+
+    def test_loading_the_exr_ticks_anamorphic_and_the_render_is_storage_width(self):
+        """Upscale Studio, headless: the EXR's pixel aspect ticks the
+        box, the frame on screen is round, a x2 run writes 2x the
+        STORAGE width with pixelAspectRatio 2, and unticking reads the
+        frame squeezed again."""
+        try:
+            app = App()
+        except Exception as ex:
+            self.skipTest(f"no display: {ex}")
+        errors = []
+
+        def step(fn):
+            try:
+                fn()
+            except Exception as ex:
+                errors.append(ex)
+                app.quit()
+
+        def wait(cond, then, n):
+            if cond():
+                app.after(50, lambda: step(then))
+            elif n <= 0:
+                errors.append(AssertionError("timed out: " + app.ups_log.get("1.0", "end")))
+                app.quit()
+            else:
+                app.after(50, lambda: wait(cond, then, n - 1))
+
+        def s1():
+            app.show("upstudio")
+            app._ups_load_folder(self.seq)
+            self.assertTrue(app.ups_anam_var.get())
+            self.assertEqual(app.ups_squeeze_var.get(), "2.0")
+            self.assertIn("pixel aspect 2", app.ups_log.get("1.0", "end"))
+            wait(lambda: app._ups_orig is not None, s2, 200)
+
+        def s2():
+            self.assertEqual(app._ups_orig.size, (240, 136))
+            app.ups_fac_var.set("x2"); app.ups_res_var.set("factor")
+            self.assertEqual(app._ups_target_size(), (480, 272))
+            self.assertIn("|sq=2", app._ups_model_sig("esrgan"))
+            app.ups_range_bar.set_view(0, 2)
+            app._ups_run()
+            wait(lambda: not app._ups_running, s3, 1200)
+
+        def s3():
+            out = os.path.join(self.dir, "ADW", "UPSCALE_v01")
+            exrs = sorted(f for f in os.listdir(out) if f.endswith(".exr"))
+            self.assertEqual(len(exrs), 2, app.ups_log.get("1.0", "end"))
+            import OpenEXR
+            hdr = OpenEXR.InputFile(os.path.join(out, exrs[0])).header()
+            dw = hdr["dataWindow"]
+            self.assertEqual((dw.max.x + 1, dw.max.y + 1), (240, 272))
+            self.assertEqual(hdr["pixelAspectRatio"], 2.0)
+            app.ups_anam_var.set(False)
+            wait(lambda: app._ups_orig is not None and app._ups_orig.size[0] == 120,
+                 s4, 200)
+
+        def s4():
+            self.assertEqual(app._ups_orig.size, (120, 136))
+            self.assertNotIn("|sq=", app._ups_model_sig("esrgan"))
+            app.quit()
+
+        app.after(300, lambda: step(s1))
+        app.after(120000, lambda: (errors.append(AssertionError("hung")), app.quit()))
+        try:
+            app.mainloop()
+        finally:
+            try:
+                app.destroy()
+            except Exception:
+                pass
+        if errors:
+            raise errors[0]
+
+
 class TestSetupRifeLabel(unittest.TestCase):
     """The Setup & Install component row for the RIFE install is
     labelled "RIFE" and names its one remaining consumer, Fix Missing
@@ -15903,7 +16107,10 @@ class TestUpscaleStudio(unittest.TestCase):
 
     def test_it_upscales_through_the_same_helpers(self):
         body = self._src(App._ups_run)
-        for frag in ("self._usc_target(", "self._ups_esrgan(",
+        # the output size goes through _ups_model_size, which is
+        # _usc_target on the (desqueezed) picture on screen
+        self.assertIn("self._usc_target(", self._src(App._ups_model_size))
+        for frag in ("self._ups_model_size(", "self._ups_esrgan(",
                      "self._usc_write_frame(", '"UPSCALE"',
                      "self._adw_versioned_output_dir(",
                      "self._usc_write_exr_layers("):
@@ -16720,14 +16927,16 @@ class TestUpscaleStudioInputColour(unittest.TestCase):
             FF_LINEAR_EXTS = App.FF_LINEAR_EXTS
             HDR_SDR_WHITE = App.HDR_SDR_WHITE
             UPS_HDR_KNEE = App.UPS_HDR_KNEE
+            ups_anam_var = None          # Anamorphic off: squeeze 1.0
+            ups_squeeze_var = None
         st = S()
         for n in ("_ups_read_source", "_ups_out_px", "_ups_scene",
-                  "_ups_raw_float", "_ff_read_frame"):
+                  "_ups_raw_float", "_ff_read_frame", "_ups_squeeze"):
             setattr(st, n, getattr(App, n).__get__(st))
         for n in ("_ups_shoulder", "_ups_gain_from_base", "_ups_read16",
                   "_organic_linear_to_display", "_srgb_to_linear",
                   "_linear_to_srgb", "_hdr_pq_decode", "_hdr_pq_encode",
-                  "_hdr_eotf_1886"):
+                  "_hdr_eotf_1886", "_squeeze_from", "_desqueeze"):
             setattr(st, n, getattr(App, n))
         st._ups_in_mode, st._ups_src_hdr = mode, hdr
         return st
