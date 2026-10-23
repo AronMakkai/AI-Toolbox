@@ -12983,6 +12983,129 @@ class TestAnamorphic(unittest.TestCase):
             raise errors[0]
 
 
+class TestFalLivenessAndPanel(unittest.TestCase):
+    """Aron's SeedVR2 runs were ending in "Timed out after 30 min with
+    no response" while fal was still reporting progress: the watchdog's
+    clock started at the call and never looked at the queue updates.
+    Now every queue position and log line is a sign of life, the
+    timeout is measured from the last one, a hard cap still ends a job
+    that talks forever, and both studios show Expansion Studio's
+    standing fal panel (endpoint, phase, frames, elapsed, ETA, queue,
+    request id, verdict) while a paid model is out."""
+
+    def _app(self):
+        app = App.__new__(App)
+        app._ip_vace_cancel = False
+        app.after = lambda ms, fn=None, *a: (fn() if fn else None)
+        return app
+
+    def test_a_call_that_keeps_reporting_is_not_timed_out(self):
+        import time, threading
+        app = self._app()
+        with unittest.mock.patch.object(App, "VACE_FAL_POLL_S", 0.02):
+            life = [time.time()]
+
+            def fn():
+                for _ in range(10):
+                    time.sleep(0.03)
+                    life[0] = time.time()
+                return "done"
+            # 0.1 s of silence allowed, 0.3 s of work: alive keeps it going
+            self.assertEqual(app._fal_call_with_watchdog(
+                fn, timeout_s=0.1, alive=lambda: life[0]), "done")
+            # ...and without alive the same call is killed by the clock
+            with self.assertRaises(RuntimeError) as cm:
+                app._fal_call_with_watchdog(fn, timeout_s=0.1)
+            self.assertIn("Timed out", str(cm.exception))
+
+    def test_silence_still_times_out_and_the_cap_still_ends_a_talker(self):
+        import time
+        app = self._app()
+        with unittest.mock.patch.object(App, "VACE_FAL_POLL_S", 0.02):
+            t0 = time.time()
+            with self.assertRaises(RuntimeError) as cm:
+                app._fal_call_with_watchdog(lambda: time.sleep(1.0),
+                                            timeout_s=0.1, alive=lambda: t0)
+            self.assertIn("no response", str(cm.exception))
+            with unittest.mock.patch.object(App, "VACE_FAL_HARD_CAP_S", 0.1):
+                with self.assertRaises(RuntimeError) as cm:
+                    app._fal_call_with_watchdog(
+                        lambda: time.sleep(1.0), timeout_s=10.0,
+                        alive=lambda: time.time())
+                self.assertIn("Gave up", str(cm.exception))
+
+    def test_video_submit_feeds_the_panel_and_counts_updates_as_life(self):
+        """A fake fal client: queued at 3, then 1, then rendering with a
+        log line. The panel hears the request id, every queue move, the
+        phases and the message; the watchdog is handed an alive clock."""
+        app = self._app()
+        app._fal_get_key = lambda: "k"
+        app._vace_work_dir = lambda: tempfile.mkdtemp()
+
+        class Queued:                       # fal names the class, we read it
+            def __init__(s, pos): s.position = pos; s.request_id = "req-42"
+        class InProgress:
+            request_id = "req-42"
+            logs = [{"message": "denoising 12/50"}]
+        _Q, _P = Queued, InProgress
+
+        class _Client:
+            def upload_file(s, p): return "https://fal/up.mp4"
+            def subscribe(s, endpoint, arguments, with_logs, on_queue_update):
+                on_queue_update(_Q(3)); on_queue_update(_Q(1))
+                on_queue_update(_P()); on_queue_update(_P())
+                return {"video": {"url": "https://fal/out.mov"}}
+        app._fal_client = lambda key=None: _Client()
+        seen = {}
+
+        def fake_watchdog(fn, on_log=None, cancel_check=None, timeout_s=None,
+                          label="fal", alive=None):
+            seen[label] = alive
+            return fn()
+        app._fal_call_with_watchdog = fake_watchdog
+        panel, phases, logs = [], [], []
+        src = os.path.join(tempfile.mkdtemp(), "src.mp4")
+        with open(src, "wb") as fh:
+            fh.write(b"0" * 1000)
+        with unittest.mock.patch("urllib.request.urlretrieve",
+                                 lambda u, d: open(d, "wb").close()):
+            out = app._fal_video_submit(
+                "fal-ai/seedvr/upscale/video", src, {"upscale_factor": 2},
+                on_log=logs.append, on_phase=lambda ph, d="": phases.append(ph),
+                label="SeedVR2", on_panel=lambda **kw: panel.append(kw))
+        self.assertTrue(out.endswith(".mov"))
+        self.assertIn({"req": "req-42"}, panel)
+        self.assertIn({"queue": 3}, panel)
+        self.assertIn({"queue": 1}, panel)
+        self.assertIn({"msg": "denoising 12/50"}, panel)
+        self.assertEqual([p for p in phases if p == "render"], ["render", "render"])
+        self.assertEqual(phases[0], "upload")
+        self.assertEqual(phases[-1], "download")
+        # the subscribe wait got an alive clock; the upload did not need one
+        self.assertIsNotNone(seen["fal (fal-ai/seedvr/upscale/video)"])
+        self.assertTrue(any("fal request req-42" in l for l in logs))
+        self.assertTrue(any("Queued at position 3" in l for l in logs))
+        self.assertEqual(sum("denoising" in l for l in logs), 1)   # said once
+
+    def test_both_studios_have_the_standing_panel_and_drive_it(self):
+        import inspect
+        for tab, lbl, state in ((App._tab_upstudio, "self.ups_fal_panel", "_ups_fal_state"),
+                                (App._tab_detail, "self.det_fal_panel", "_det_fal_state")):
+            body = inspect.getsource(tab)
+            self.assertIn(lbl + " = tk.Label(", body)
+            self.assertIn(f'self.{state} = {{}}', body)
+        up = inspect.getsource(App._ups_fal_upscale)
+        for frag in ("self._fal_panel_begin(", "self._fal_panel_note(",
+                     "self._fal_panel_end(", "self._vace_estimate(",
+                     "self._vace_record_render(", "on_panel=_panel",
+                     'panel = (getattr(self, "ups_fal_panel", None), "_ups_fal_state")'):
+            with self.subTest(fragment=frag):
+                self.assertIn(frag, up)
+        self.assertIn('panel=(getattr(self, "det_fal_panel", None), "_det_fal_state")',
+                      inspect.getsource(App._det_fal_span))
+        self.assertIn("alive=lambda: life[0]", inspect.getsource(App._fal_video_submit))
+
+
 class TestSetupRifeLabel(unittest.TestCase):
     """The Setup & Install component row for the RIFE install is
     labelled "RIFE" and names its one remaining consumer, Fix Missing
