@@ -12427,15 +12427,32 @@ class TestDetailStudio(unittest.TestCase):
         self.assertIn('("detail",  "_det_load_folder",   "Detail Studio")', src)
         self.assertIn('data["modules"]["detail"]', src)
         self.assertIn('dm = mods.get("detail")', src)
-        self.assertIn('"upstudio","detail","fixframes"}', src)
-        self.assertIn('"esrgan": {"rife","upstudio","detail","fixframes"}', src)
-        self.assertIn('"upstudio","detail","curve"', src)
+        comp = src[src.index("_COMP_MODULES = {"):][:600]
+        self.assertRegex(comp, r'"ffmpeg": \{[^}]*"detail"')
+        self.assertRegex(comp, r'"esrgan": \{[^}]*"detail"')
+        tl = src[src.index("self._tl_frames = {}"):][:300]
+        self.assertIn('"detail"', tl)
         self.assertIn('if key == "detail":', src)
         self.assertTrue(callable(getattr(App, "_tab_detail", None)))
         for fn in ("_det_load_folder", "_det_preview", "_det_run", "_det_blend",
                    "_det_downscale", "_det_synth_esrgan", "_det_fal_span",
                    "_det_reblend", "_det_draw", "_det_reset_sash"):
             self.assertTrue(callable(getattr(App, fn, None)), fn)
+
+    def test_project_load_keeps_the_pre_split_fallback_on_upstudio(self):
+        """The Detail section is read after the whole Upscale Studio
+        block: the old-combined-tab fallback (`elif um ...`) belongs to
+        the upstudio `if`, and a project with no Detail section must not
+        trigger it."""
+        import inspect
+        body = inspect.getsource(App._project_load)
+        i_pm = body.index('pm = mods.get("upstudio")')
+        i_el = body.index('elif um and um.get("vars"):')
+        i_dm = body.index('dm = mods.get("detail")')
+        self.assertLess(i_pm, i_el)
+        self.assertLess(i_el, i_dm)
+        self.assertNotIn('self._project_restore_vars(dm.get("vars"))\n'
+                         '                elif', body)
 
     def test_it_shares_upscale_studios_helpers_by_parameter_not_state(self):
         """The shared helpers take the mode / hdr / sig / reader as

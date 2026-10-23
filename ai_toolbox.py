@@ -1101,11 +1101,6 @@ class App(tk.Tk):
                         self._ups_load_folder(pm["folder"])
                     self._project_restore_vars(pm.get("vars"))
 
-                dm = mods.get("detail")
-                if dm:
-                    if dm.get("folder") and os.path.isdir(dm["folder"]):
-                        self._det_load_folder(dm["folder"])
-                    self._project_restore_vars(dm.get("vars"))
                 elif um and um.get("vars"):
                     # A project saved before the split: its resolution
                     # settings belonged to the old combined tab.
@@ -1116,6 +1111,12 @@ class App(tk.Tk):
                             ("ups_fac_var", "usc_fac_var"),
                             ("ups_fmt_var", "usc_fmt_var"))
                         if _uv.get(old) is not None})
+
+                dm = mods.get("detail")
+                if dm:
+                    if dm.get("folder") and os.path.isdir(dm["folder"]):
+                        self._det_load_folder(dm["folder"])
+                    self._project_restore_vars(dm.get("vars"))
 
                 sm = mods.get("sam")
                 if sm:
