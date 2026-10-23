@@ -44,17 +44,23 @@ prefixes. Use this table before searching.
   (`fal-ai/seedvr/upscale/video`), FlashVSR
   (`fal-ai/flashvsr/upscale/video`) and local ESRGAN. SeedVR2 is capped
   (`UPS_MAX_SHORT_SIDE`), with a popup stating the resulting resolution.
-- **Detail Studio** (added 23 Oct 2026) adds texture at the input
-  resolution: each frame is downscaled (½ or ¼, `_det_downscale`), upscaled
-  back with ESRGAN / SeedVR2 / FlashVSR, and the invented high band laid
-  over the original (`_det_blend`: Detail only keeps the original's low
-  band; Protect keeps the plate's own HF where its local energy matches
-  the upscaler's; Strength blends). The preview re-synthesises once per
-  frame and the sliders re-blend instantly. It calls Upscale Studio's
-  helpers (`_ups_read_source`, `_ups_scene`, `_ups_out_px`,
-  `_ups_fal_upscale`, `_rife_upscale`, `_usc_write_frame`) with its own
-  state passed as parameters (`mode=`, `hdr=`, `sig=`, `read=`) — never
-  through `_ups_*` state. Paid models get the 1/k frames staged under
+- **Detail Studio** (added 23 Oct 2026) is Upscale Studio's workflow
+  for texture at the input resolution: model tiles (ESRGAN / SeedVR2 /
+  FlashVSR), Preview & Compare (Wipe / Diff / Detail on black), the
+  frequency graph (limit line at 0.5/k = the downscale), per-model
+  settings (`det_seedvr_noise_var`, `det_flash_accel_var`), the shared
+  cache button and Multi model output (EXR layers). Each frame is
+  downscaled (½ or ¼, `_det_downscale`), upscaled back, and the invented
+  high band laid over the original (`_det_blend`: Detail only keeps the
+  original's low band; Protect keeps the plate's own HF where its local
+  energy matches the upscaler's; Strength blends). A model runs once per
+  frame (`_det_mem` / fal cache); the sliders re-blend instantly
+  (`_det_reblend` → `_det_view`). It calls Upscale Studio's helpers
+  (`_ups_read_source`, `_ups_scene`, `_ups_out_px`, `_ups_fal_upscale`,
+  `_ups_fal_args`, `_rife_upscale`, `_usc_write_frame`,
+  `_usc_write_exr_layers`, `_ups_spectrum`, `_ups_render`) with its own
+  state passed as parameters (`mode=`, `hdr=`, `sig=`, `read=`,
+  `fal_kw=`, `noise=`, `accel=`) — never through `_ups_*` state. Paid models get the 1/k frames staged under
   `~/.ai_toolbox/detail_stage/<hash>/` so the fal cache hits on re-runs.
   Output `ADW/DETAIL_vNN/`, EXR tagged scene-linear.
 - **Lens Studio** applies lens and sensor effects in linear float. Output

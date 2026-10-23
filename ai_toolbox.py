@@ -4090,10 +4090,12 @@ class App(tk.Tk):
         _w("Downscale\n", "param")
         _w("\u00bd invents fine texture and stays close to the plate; "
            "\u00bc invents more and coarser.\n\n", "body_indent")
-        _w("Upscaler\n", "param")
-        _w("ESRGAN is local and free; SeedVR2 and FlashVSR run on fal.ai "
-           "(preview sends a short span, run sends the range in chunks, "
-           "every paid frame is cached).\n\n", "body_indent")
+        _w("Upscalers\n", "param")
+        _w("The same tiles, Preview & Compare, frequency graph and Multi "
+           "model output as Upscale Studio. ESRGAN is local and free; "
+           "SeedVR2 and FlashVSR run on fal.ai (preview sends a short span, "
+           "run sends the range in chunks, every paid frame is cached).\n\n",
+           "body_indent")
         _w("Strength / Protect / Detail only\n", "param")
         _w("Strength blends the invented detail in. Protect keeps the "
            "plate's own fine detail where it already has some. Detail only "
@@ -51511,21 +51513,28 @@ print("EXR write complete")
         return n, tot / 1e6
 
     def _ups_sync_cache_button(self):
-        btn = getattr(self, "ups_cache_btn", None)
-        if btn is None:
+        """Both studios share the one cache, so both buttons say the
+        same thing."""
+        btns = [b for b in (getattr(self, "ups_cache_btn", None),
+                            getattr(self, "det_cache_btn", None))
+                if b is not None]
+        if not btns:
             return
         n, mb = self._ups_cache_stats()
-        try:
-            btn.configure(text=(f"Clear upscale cache  ({n} frame(s), {mb:.0f} MB)"
-                                if n else "Clear upscale cache  (empty)"))
-        except Exception:
-            pass
+        for btn in btns:
+            try:
+                btn.configure(text=(
+                    f"Clear upscale cache  ({n} frame(s), {mb:.0f} MB)"
+                    if n else "Clear upscale cache  (empty)"))
+            except Exception:
+                pass
 
-    def _ups_clear_cache(self):
+    def _ups_clear_cache(self, log_w=None):
         import shutil as _sh
+        log_w = log_w if log_w is not None else self.ups_log
         n, mb = self._ups_cache_stats()
         if not n:
-            self.log(self.ups_log, "Upscale cache is already empty.", "dim")
+            self.log(log_w, "Upscale cache is already empty.", "dim")
             return
         if not messagebox.askyesno(
                 "Clear upscale cache",
@@ -51537,7 +51546,9 @@ print("EXR write complete")
         _sh.rmtree(self._ups_cache_dir(), ignore_errors=True)
         self._ups_sync_cache_button()
         self._ups_models_changed()
-        self.log(self.ups_log,
+        if getattr(self, "_det_tiles", None):
+            self._det_models_changed()
+        self.log(log_w,
                  f"Upscale cache cleared ({n} frame(s), {mb:.0f} MB).", "hi")
 
     def _ups_frame_colour(self, i):
@@ -52339,20 +52350,25 @@ print("EXR write complete")
             except Exception:
                 pass
 
-    def _ups_fal_args(self, m, factor):
+    def _ups_fal_args(self, m, factor, noise=None, accel=None):
         """The request body for model m (minus video_url). Values are
-        the endpoints' own schema enums, verbatim."""
+        the endpoints' own schema enums, verbatim. `noise` / `accel`
+        default to this studio's own settings; Detail Studio passes
+        its own."""
         args = {"upscale_factor": round(float(factor), 3),
                 "output_format": self.UPS_FAL_FORMAT,
                 "output_quality": "maximum"}
         if m == "seedvr":
             args["upscale_mode"] = "factor"
             try:
-                args["noise_scale"] = float(self.ups_seedvr_noise_var.get())
+                args["noise_scale"] = float(
+                    noise if noise is not None
+                    else self.ups_seedvr_noise_var.get())
             except Exception:
                 args["noise_scale"] = 0.1
         elif m == "flashvsr":
-            args["acceleration"] = self.ups_flash_accel_var.get() or "regular"
+            args["acceleration"] = (accel if accel is not None
+                                    else self.ups_flash_accel_var.get()) or "regular"
             args["color_fix"] = True
             args["quality"] = 90
         return args
@@ -52428,7 +52444,7 @@ print("EXR write complete")
         return dst
 
     def _ups_fal_upscale(self, m, folder, names, size, on_log=None,
-                         on_frac=None, sig=None, read=None):
+                         on_frac=None, sig=None, read=None, fal_kw=None):
         """Upscale `names` (one contiguous span) with paid model m to
         `size`, into the cache. Cache-first: a span already fully cached
         costs nothing. Returns the number of frames newly generated.
@@ -52442,6 +52458,7 @@ print("EXR write complete")
             sig = self._ups_model_sig(m)
         if read is None:
             read = self._ups_read_source
+        fal_kw = dict(fal_kw or {})
         if all(self._ups_cached(m, folder, n, sig) for n in names):
             if on_log:
                 on_log(f"all {len(names)} frame(s) already cached — "
@@ -52496,7 +52513,7 @@ print("EXR write complete")
             factor = _plan()
             try:
                 out = self._fal_video_submit(
-                    endpoint, src, self._ups_fal_args(m, factor),
+                    endpoint, src, self._ups_fal_args(m, factor, **fal_kw),
                     on_log=on_log, on_phase=_bar, label=nm)
             except Exception as ex:
                 # fal knows the real limit for THIS clip and says it in
@@ -52526,7 +52543,7 @@ print("EXR write complete")
                         f"{nm} output size", t))
                 factor = _plan()
                 out = self._fal_video_submit(
-                    endpoint, src, self._ups_fal_args(m, factor),
+                    endpoint, src, self._ups_fal_args(m, factor, **fal_kw),
                     on_log=on_log, on_phase=_bar, label=nm)
             return self._ups_fal_ingest(m, folder, names, out, work, sig,
                                         (sw, sh), (tw, th), on_log, _bar)
@@ -52963,22 +52980,23 @@ print("EXR write complete")
         threading.Thread(target=go, daemon=True).start()
 
     # ══ Detail Studio ════════════════════════════════════════════════
-    # Texture at the input resolution. An upscaler is trained to invent
-    # plausible fine detail from a soft picture, so a frame downscaled
-    # by ½ or ¼ and upscaled back by the same factor comes back with
-    # texture the plate never had -- pores, weave, foliage -- which a
-    # sharpen cannot make. Gen-AI video upres'd internally and arriving
-    # mushy is exactly the material this is for.
+    # Upscale Studio's workflow, for texture at the input resolution:
+    # pick upscalers (tiles turn amber), Preview runs each on the frame
+    # on screen with its own tile filling as a progress bar, a finished
+    # model gets a green box and can be clicked to compare, Run renders
+    # the model on screen -- or, with Multi model output, every ticked
+    # model as its own EXR layer. The frequency graph shows what each
+    # model put above the band the downscale threw away.
     #
-    # Two rules keep it usable on a real shot. The invented texture is
-    # only ever the HIGH band: the output's low frequencies are the
-    # original's, so colour, exposure and grade stay the plate's and
-    # only texture changes (Detail only). And where the plate already
-    # holds fine detail, that detail is kept rather than replaced by a
-    # guess -- a protect mask from the ratio of the plate's local
-    # high-band energy to the upscaler's (Protect). Strength blends the
-    # result against the original. Sliders re-blend the preview on the
-    # spot: the upscaler runs once per frame, the blend is instant.
+    # What a model does here: the frame is downscaled by ½ or ¼
+    # (_det_downscale), upscaled back by the same factor, and the
+    # invented fine detail laid over the original (_det_blend). The
+    # invented texture is only ever the HIGH band: the output's low
+    # frequencies are the original's, so colour, exposure and grade
+    # stay the plate's (Detail only). Where the plate already holds
+    # fine detail it is kept rather than replaced by a guess (Protect).
+    # Strength blends. A model runs once per frame; the sliders re-blend
+    # the re-synthesis on screen instantly.
     #
     # The upscalers, the input colour handling, the cache and the
     # writer are Upscale Studio's, called with Detail Studio's own
@@ -52986,8 +53004,6 @@ print("EXR write complete")
     DET_DOWN = (("½", 2), ("¼", 4))
     DET_MODELS = (("esrgan", "ESRGAN"), ("seedvr", "SeedVR2"),
                   ("flashvsr", "FlashVSR"))
-    DET_MODEL_KEYS = {"ESRGAN": "esrgan", "SeedVR2": "seedvr",
-                      "FlashVSR": "flashvsr"}
     DET_PREVIEW_SPAN = 12
 
     _det_folder = None
@@ -52995,16 +53011,19 @@ print("EXR write complete")
     _det_is_movie = False
     _det_src_movie = None
     _det_src_fps = 24.0
+    _det_src_size = None
     _det_in_mode = "srgb"
     _det_src_hdr = False
     _det_previewing = False
+    _det_prev_cancelled = False
     _det_running = False
     _det_cancel = False
+    _det_bar_prefix = ""
     _det_mode = "wipe"
     _det_orig = None            # PIL, the input frame on screen
-    _det_res = None             # PIL, the blended result on screen
-    _det_up = None              # float RGB, the upscaler's re-synthesis
-    _det_up_key = None          # (idx, model, k, in_mode)
+    _det_res = None             # PIL, the viewed model's blend
+    _det_view_pref = None
+    _det_view_model = None
     _det_preview_idx = None
     _det_show_seq = 0
     _det_tl_idx = 0
@@ -53013,8 +53032,13 @@ print("EXR write complete")
     det_strength_var = None
     det_protect_var = None
     det_only_var = None
-    det_model_var = None
     det_down_var = None
+    det_multi_var = None
+    det_multi_chk = None
+    det_multi_lbl = None
+    det_freq_canvas = None
+    det_seedvr_noise_var = None
+    det_flash_accel_var = None
 
     def _tab_detail(self):
         p = self._frame("detail")
@@ -53026,17 +53050,28 @@ print("EXR write complete")
         self._det_is_movie = False
         self._det_src_movie = None
         self._det_src_fps = 24.0
+        self._det_src_size = None
         self._det_orig = None
         self._det_res = None
-        self._det_up = None
-        self._det_up_key = None
         self._det_wipe_t = 0.5
         self._det_zoom = 1.0
         self._det_pan = [0, 0]
         self._det_mode = "wipe"
+        self._det_sel = {"esrgan": True, "seedvr": False, "flashvsr": False}
+        self._det_tiles = {}
+        self._det_tile_state = {m: {"phase": "idle", "frac": 0.0}
+                                for m, _n in self.DET_MODELS}
+        self._det_mem = {}          # (m, idx, sig) -> re-synthesis, float RGB
+        self._det_spec = {}         # (m, idx, sig, params) -> spectrum
         self._det_mode_imgs = {}
+        self._det_view_pref = None
+        self._det_view_model = None
+        self._det_preview_idx = None
         self._det_show_seq = 0
         self._det_tl_idx = 0
+        self._det_previewing = False
+        self._det_prev_cancelled = False
+        self._det_bar_prefix = ""
 
         _hd = tk.Frame(lf, bg=BG)
         _hd.pack(fill="x", padx=16, pady=(14, 0))
@@ -53046,15 +53081,17 @@ print("EXR write complete")
                         cursor="hand2")
         _hdi.pack(side="left", padx=(8, 0))
         self._tooltip(
-            "Texture at the input resolution. Each frame is\n"
-            "downscaled, upscaled back by the same factor, and\n"
-            "the invented fine detail laid over the original.\n\n"
+            "Texture at the input resolution, compared across\n"
+            "upscalers. Each frame is downscaled, upscaled back\n"
+            "by the same factor, and the invented fine detail\n"
+            "laid over the original.\n\n"
             "Detail only keeps the original's colour, exposure\n"
             "and grade: only the high band changes. Protect\n"
             "keeps the plate's own fine detail where it already\n"
             "has some, so the boost lands on the soft areas.\n\n"
-            "Preview runs the upscaler once; the sliders then\n"
-            "re-blend instantly. Same size in, same size out.")(_hdi)
+            "Preview runs each selected upscaler once; the\n"
+            "sliders then re-blend instantly. Same size in,\n"
+            "same size out.")(_hdi)
 
         self.det_path_lbl = self._path_bar(lf)
         c1 = self._card(lf, "Input")
@@ -53075,6 +53112,7 @@ print("EXR write complete")
         self.det_in_lbl.pack(fill="x", pady=(2, 0))
         self.det_in_var.trace_add("write", lambda *_: self._det_in_changed())
 
+        # ── Detail: downscale + blend sliders ──
         c2 = self._card(lf, "Detail")
         _dr = tk.Frame(c2, bg=S); _dr.pack(fill="x", pady=(0, 4))
         tk.Label(_dr, text="Downscale", font=FSM, bg=S, fg=G, width=12,
@@ -53104,16 +53142,6 @@ print("EXR write complete")
             self._det_settings_changed()
         self.det_down_var.trace_add("write", _paint_down)
         _paint_down()
-
-        self.det_model_var = self._combo(
-            c2, "Upscaler", [n for _k, n in self.DET_MODELS],
-            tip="ESRGAN is local and free. SeedVR2 and FlashVSR are\n"
-                "video models on fal.ai: a preview sends a short span\n"
-                "around the frame, a run sends the range in chunks,\n"
-                "and every paid frame is cached. SeedVR2 re-imagines\n"
-                "texture the most; FlashVSR stays closest to the plate.")
-        self.det_model_var.trace_add("write",
-                                     lambda *_: self._det_settings_changed())
 
         def _cs(parent, label, var, from_, to, res, fmt, tip=""):
             row = tk.Frame(parent, bg=S); row.pack(fill="x", pady=1)
@@ -53166,8 +53194,10 @@ print("EXR write complete")
                   self.det_only_var):
             v.trace_add("write", lambda *_: self._det_reblend())
 
-        # ── Preview & Compare ──
-        _pc = tk.Frame(c2, bg=S)
+        # ── Upscalers: tiles, Preview & Compare, frequency graph, Preview ──
+        c_m = self._card(lf, "Upscalers")
+        self._det_build_model_tiles(c_m)
+        _pc = tk.Frame(c_m, bg=S)
         _pc.pack(fill="x", pady=(8, 0))
         tk.Frame(_pc, bg=BD, height=1).pack(fill="x")
         tk.Label(_pc, text="Preview & Compare", font=FSM, bg=S,
@@ -53186,10 +53216,75 @@ print("EXR write complete")
             b.grid(row=0, column=col, sticky="ew",
                    padx=(0, 2) if col < 2 else 0)
             self._det_mode_btns[mode] = b
-        self.det_preview_btn = self._runbtn(c2, "Preview", self._det_preview)
+        _fh = tk.Frame(_pc, bg=S); _fh.pack(fill="x", pady=(4, 0))
+        _fi = tk.Label(_fh, text="ⓘ", font=FSM, bg=S, fg="#555555",
+                       cursor="hand2")
+        _fi.pack(side="left")
+        tk.Label(_fh, text="  frequency distribution", font=FSM, bg=S,
+                 fg="#555555").pack(side="left")
+        self._tooltip(
+            "How much of the picture sits at each level of\n"
+            "detail, coarse on the left to the finest the frame\n"
+            "can hold on the right (log power, luminance).\n\n"
+            "Grey: the input. Coloured: each previewed upscaler's\n"
+            "result at the current sliders; the one on screen is\n"
+            "drawn bold.\n\n"
+            "The dashed line is the DOWNSCALE LIMIT — the finest\n"
+            "detail that survives the downscale. Everything to\n"
+            "its right was made by the upscaler. The red number\n"
+            "is how much more of that fine detail the result on\n"
+            "screen has than the input.")(_fi)
+        self.det_freq_canvas = tk.Canvas(_pc, height=124, bg="#0D0D0D",
+            highlightthickness=1, highlightbackground=BD)
+        self.det_freq_canvas.pack(fill="x", pady=(2, 0))
+        self.det_freq_canvas.bind("<Configure>",
+                                  lambda e: self._det_freq_refresh())
+        self.det_preview_btn = self._runbtn(c_m, "Preview", self._det_preview)
         self.det_preview_btn.pack_configure(padx=0, pady=(6, 4))
         self.det_preview_btn.configure(state="disabled")
 
+        # per-model settings (Detail Studio's own, not Upscale Studio's)
+        _sv = tk.Frame(c_m, bg=S); _sv.pack(fill="x", pady=(4, 0))
+        tk.Label(_sv, text="SeedVR2 noise", font=FSM, bg=S, fg=G, width=14,
+                 anchor="w").pack(side="left")
+        self.det_seedvr_noise_var = tk.StringVar(value="0.1")
+        ttk.Combobox(_sv, textvariable=self.det_seedvr_noise_var,
+                     values=list(self.UPS_SEEDVR_NOISE), state="readonly",
+                     font=FSM, width=8).pack(side="left", padx=(4, 0))
+        _svi = tk.Label(_sv, text="ⓘ", font=FSM, bg=S, fg="#555555",
+                        cursor="hand2")
+        _svi.pack(side="left", padx=(6, 0))
+        self._tooltip(
+            "SeedVR2 is a diffusion restorer: it re-imagines\n"
+            "texture rather than sharpening what is there.\n"
+            "Noise adds freedom to invent — 0 stays closest to\n"
+            "the plate, 0.25+ invents more (and can drift).")(_svi)
+        _fv = tk.Frame(c_m, bg=S); _fv.pack(fill="x", pady=(4, 0))
+        tk.Label(_fv, text="FlashVSR speed", font=FSM, bg=S, fg=G, width=14,
+                 anchor="w").pack(side="left")
+        self.det_flash_accel_var = tk.StringVar(value="regular")
+        ttk.Combobox(_fv, textvariable=self.det_flash_accel_var,
+                     values=list(self.UPS_FLASH_ACCEL), state="readonly",
+                     font=FSM, width=8).pack(side="left", padx=(4, 0))
+        _fvi = tk.Label(_fv, text="ⓘ", font=FSM, bg=S, fg="#555555",
+                        cursor="hand2")
+        _fvi.pack(side="left", padx=(6, 0))
+        self._tooltip(
+            "FlashVSR is a fast one-step video super-resolver,\n"
+            "closer to the plate than SeedVR2. 'regular' is the\n"
+            "best quality; 'high' / 'full' trade detail for speed.")(_fvi)
+        for v in (self.det_seedvr_noise_var, self.det_flash_accel_var):
+            v.trace_add("write", lambda *_: self._det_settings_changed())
+        _cr = tk.Frame(c_m, bg=S); _cr.pack(fill="x", pady=(6, 0))
+        self.det_cache_btn = tk.Label(_cr, text="", font=FSM, bg="#1A1A1A",
+            fg=G, cursor="hand2", padx=8, pady=3, highlightthickness=1,
+            highlightbackground=BD)
+        self.det_cache_btn.pack(side="left")
+        self.det_cache_btn.bind(
+            "<Button-1>", lambda e: self._ups_clear_cache(self.det_log))
+        self._ups_sync_cache_button()
+
+        # ── Output format ──
         c_of = self._card(lf, "Output Format")
         self.det_fmt_var = self._combo(
             c_of, "Write", list(self.USC_FORMATS.keys()),
@@ -53197,6 +53292,33 @@ print("EXR write complete")
             tip="EXR holds the result as linear light, decoded with\n"
                 "the same curve the frames were encoded with. MOV is\n"
                 "a display delivery, encoded from the frames on disk.")
+        _mmrow = tk.Frame(c_of, bg=S); _mmrow.pack(fill="x", pady=(4, 0))
+        self.det_multi_var = tk.BooleanVar(value=False)
+        self.det_multi_chk = tk.Checkbutton(
+            _mmrow, text="Multi model output", variable=self.det_multi_var,
+            bg=S, fg=W, selectcolor="#222222", activebackground=S,
+            activeforeground=W, disabledforeground="#3A3A3A",
+            font=FSM, bd=0, command=self._det_multi_changed)
+        self.det_multi_chk.pack(side="left")
+        _mm_i = tk.Label(_mmrow, text="ⓘ", font=FSM, bg=S, fg="#555555",
+                         cursor="hand2")
+        _mm_i.pack(side="left", padx=(4, 0))
+        self._tooltip(
+            "Writes every ticked upscaler's result into the same\n"
+            "EXR, each in its own layer:\n\n"
+            "  esrgan.R/G/B\n  seedvr2.R/G/B\n  flashvsr.R/G/B\n\n"
+            "The main RGB holds the model you are viewing, so the\n"
+            "file reads normally anywhere; switch layers in Nuke or\n"
+            "Resolve to compare the rest on the whole shot.\n\n"
+            "EXR only. Each paid model ticked is generated for the\n"
+            "whole range, so this costs what running each would.")(_mm_i)
+        self.det_multi_lbl = tk.Label(c_of, text="", font=FSM, bg=S,
+                                      fg="#555555", anchor="w",
+                                      justify="left")
+        self.det_multi_lbl.pack(fill="x", pady=(2, 0))
+        self.det_fmt_var.trace_add("write",
+                                   lambda *_: self._det_multi_changed())
+
         c4 = self._card(lf, "Output")
         self.det_out_lbl = tk.Label(c4, text="Select a folder to see output path",
             font=FSM, bg=S, fg=G, anchor="w", wraplength=380, justify="left")
@@ -53260,8 +53382,11 @@ print("EXR write complete")
         self.det_range_lbl = tk.Label(_th, text="", font=FM, bg=BG, fg="#666666")
         self.det_range_lbl.pack(side="right")
         _tr = tk.Frame(_tb2, bg=BG); _tr.pack(fill="x", pady=(2, 0))
-        self._det_tl_proxy = self._timeline(_tr, lambda i: self._det_tl_click(i))
+        self._det_tl_proxy = self._timeline(
+            _tr, lambda i: self._det_tl_click(i),
+            get_frame_color=self._det_frame_colour)
         self._det_paint_mode_btns()
+        self._det_models_changed()
 
     # -- input -----------------------------------------------------------
     def _det_pick(self):
@@ -53321,11 +53446,16 @@ print("EXR write complete")
         self._det_folder = d
         self._det_frames = fs
         self._det_resolve_input()
-        self._det_up = None
-        self._det_up_key = None
         self._det_res = None
+        self._det_src_size = None
+        self._det_mem = {}
+        self._det_spec = {}
         self._det_mode_imgs = {}
+        self._det_view_pref = None
+        self._det_view_model = None
         self._det_preview_idx = None
+        for _st in self._det_tile_state.values():
+            _st["phase"], _st["frac"] = "idle", 0.0
         self.det_path_lbl.configure(text=d, fg=W)
         self.det_picker_lbl.configure(
             text=f"{len(fs)} frames  —  {fs[0]}  …  {fs[-1]}", fg=W)
@@ -53339,6 +53469,7 @@ print("EXR write complete")
         self._det_tl_idx = 0
         self.log(self.det_log, f"Loaded: {len(fs)} frames from "
                  f"{os.path.basename(d)}", "ok")
+        self._det_models_changed()
         self._det_show_frame(0)
 
     def _det_range(self):
@@ -53394,32 +53525,20 @@ print("EXR write complete")
         if not self._det_folder:
             return
         self._det_resolve_input()
-        self._det_up, self._det_up_key = None, None
         self.log(self.det_log, "Input colour: " + self.det_in_lbl.cget("text"),
                  "dim")
+        self._det_settings_changed()
         self._det_show_frame(self._det_tl_idx)
-
-    def _det_settings_changed(self):
-        """A new downscale or upscaler makes the re-synthesis on screen
-        stale: the blend stays until Preview runs the upscaler again."""
-        if self._det_up_key is not None and self._det_up_key != self._det_key(
-                self._det_preview_idx):
-            try:
-                self.log(self.det_log, "Settings changed — press Preview "
-                         "to re-synthesise; the sliders still re-blend "
-                         "the last result.", "dim")
-            except Exception:
-                pass
 
     def _det_read(self, path):
         """(PIL base, gain) for a frame, read the Detail Studio way."""
         return self._ups_read_source(path, mode=self._det_in_mode,
                                      hdr=self._det_src_hdr)
 
-    def _det_model(self):
-        return self.DET_MODEL_KEYS.get(
-            self.det_model_var.get() if self.det_model_var else "ESRGAN",
-            "esrgan")
+    @staticmethod
+    def _det_read_png(path):
+        from PIL import Image
+        return Image.open(path).convert("RGB"), None
 
     def _det_k(self):
         try:
@@ -53427,8 +53546,42 @@ print("EXR write complete")
         except Exception:
             return 2
 
-    def _det_key(self, idx):
-        return (idx, self._det_model(), self._det_k(), self._det_in_mode)
+    def _det_params(self):
+        try:
+            s = self.det_strength_var.get() / 100.0
+            pr = self.det_protect_var.get() / 100.0
+            only = bool(self.det_only_var.get())
+        except Exception:
+            s, pr, only = 0.7, 0.5, True
+        return s, pr, only
+
+    def _det_fal_kw(self, m):
+        """This studio's own per-model settings for the fal request."""
+        try:
+            if m == "seedvr" and self.det_seedvr_noise_var is not None:
+                return {"noise": float(self.det_seedvr_noise_var.get())}
+            if m == "flashvsr" and self.det_flash_accel_var is not None:
+                return {"accel": self.det_flash_accel_var.get()}
+        except Exception:
+            pass
+        return {}
+
+    def _det_sig(self, m, size=None):
+        """Everything besides the frame a re-synthesis depends on: the
+        size, the downscale, how the source is read, and that model's
+        own setting. Part of the cache key, and distinct from Upscale
+        Studio's, so the two never serve each other's frames."""
+        if size is None:
+            size = self._det_src_size
+        base = f"detail|{size[0]}x{size[1]}" if size else "detail|?"
+        sig = f"{base}|k={self._det_k()}|in={self._det_in_mode}" + (
+            "+hdr" if self._det_src_hdr else "")
+        kw = self._det_fal_kw(m)
+        if "noise" in kw:
+            sig += f"|noise={kw['noise']:g}"
+        if "accel" in kw:
+            sig += f"|accel={kw['accel']}"
+        return sig
 
     # -- engine ------------------------------------------------------------
     @staticmethod
@@ -53483,7 +53636,7 @@ print("EXR write complete")
         import hashlib
         tag = hashlib.sha1(
             f"{os.path.abspath(str(self._det_folder))}|{k}|{self._det_in_mode}"
-            .encode("utf-8")).hexdigest()[:16]
+            f"|{int(bool(self._det_src_hdr))}".encode("utf-8")).hexdigest()[:16]
         d = os.path.join(os.path.expanduser("~"), ".ai_toolbox",
                          "detail_stage", tag)
         os.makedirs(d, exist_ok=True)
@@ -53507,25 +53660,6 @@ print("EXR write complete")
             out.append(pn)
         return out
 
-    def _det_sig(self, m, size):
-        """The cache signature: everything besides the frame a paid
-        re-synthesis depends on. Distinct from Upscale Studio's, so the
-        two never serve each other's frames."""
-        sig = f"detail|{size[0]}x{size[1]}|k={self._det_k()}|in={self._det_in_mode}"
-        try:
-            if m == "seedvr" and self.ups_seedvr_noise_var is not None:
-                sig += f"|noise={self.ups_seedvr_noise_var.get()}"
-            if m == "flashvsr" and self.ups_flash_accel_var is not None:
-                sig += f"|accel={self.ups_flash_accel_var.get()}"
-        except Exception:
-            pass
-        return sig
-
-    @staticmethod
-    def _det_read_png(path):
-        from PIL import Image
-        return Image.open(path).convert("RGB"), None
-
     def _det_fal_span(self, m, names, size, on_log=None, on_frac=None):
         """Re-synthesise `names` (a contiguous span of source frames)
         with paid model m: the 1/k frames staged, sent as a clip, the
@@ -53533,16 +53667,22 @@ print("EXR write complete")
         k = self._det_k()
         stage = self._det_stage_dir(k)
         pngs = self._det_stage_names(names, k, stage)
-        return self._ups_fal_upscale(m, stage, pngs, size, on_log, on_frac,
-                                     sig=self._det_sig(m, size),
-                                     read=self._det_read_png)
+        self._ups_bar_prefix = self._det_bar_prefix
+        try:
+            return self._ups_fal_upscale(m, stage, pngs, size, on_log, on_frac,
+                                         sig=self._det_sig(m, size),
+                                         read=self._det_read_png,
+                                         fal_kw=self._det_fal_kw(m))
+        finally:
+            self._ups_bar_prefix = ""
 
-    def _det_fal_result(self, m, name, size):
-        """The cached re-synthesis of source frame `name`, or None."""
+    def _det_fal_cached(self, m, name, size=None):
+        """The cache path of source frame `name`'s re-synthesis, or None."""
+        if m not in self.UPS_ENDPOINTS or not self._det_folder:
+            return None
         stage = self._det_stage_dir(self._det_k())
         pn = os.path.splitext(name)[0] + ".png"
-        p = self._ups_cached(m, stage, pn, self._det_sig(m, size))
-        return self._ups_read16(p) if p else None
+        return self._ups_cached(m, stage, pn, self._det_sig(m, size))
 
     def _det_synth_esrgan(self, base_f32, k):
         """Real-ESRGAN (or Lanczos + sharpen): the 1/k frame back to
@@ -53557,22 +53697,309 @@ print("EXR write complete")
             up = cv2.resize(up, (w, h), interpolation=cv2.INTER_LANCZOS4)
         return up
 
-    def _det_params(self):
-        try:
-            s = self.det_strength_var.get() / 100.0
-            pr = self.det_protect_var.get() / 100.0
-            only = bool(self.det_only_var.get())
-        except Exception:
-            s, pr, only = 0.7, 0.5, True
-        return s, pr, only
+    # -- model state -------------------------------------------------------
+    def _det_render_model(self):
+        """What Run renders: the model last clicked to view, else the
+        first selected one, else Real-ESRGAN."""
+        if self._det_view_pref:
+            return self._det_view_pref
+        sel = getattr(self, "_det_sel", {}) or {}
+        for m, _n in self.DET_MODELS:
+            if sel.get(m):
+                return m
+        return "esrgan"
 
-    # -- preview -----------------------------------------------------------
+    def _det_model_available(self, m):
+        idx = self._det_preview_idx
+        if idx is None or getattr(self, "_det_orig", None) is None:
+            return False
+        if (m, idx, self._det_sig(m)) in self._det_mem:
+            return True
+        return bool(self._det_fal_cached(m, self._det_frames[idx]))
+
+    def _det_model_result(self, m):
+        """The re-synthesis of the frame on screen by model m, as display
+        float RGB at the input size, or None."""
+        idx = self._det_preview_idx
+        if idx is None:
+            return None
+        sig = self._det_sig(m)
+        hit = self._det_mem.get((m, idx, sig))
+        if hit is not None:
+            return hit
+        p = self._det_fal_cached(m, self._det_frames[idx])
+        if p:
+            arr = self._ups_read16(p)
+            self._det_mem[(m, idx, sig)] = arr
+            return arr
+        return None
+
+    def _det_frame_colour(self, i):
+        """Green on the timeline for a frame the paid model being
+        rendered already has, under the current settings."""
+        m = self._det_render_model()
+        if m not in self.UPS_ENDPOINTS or not self._det_folder:
+            return None
+        names = self._det_frames
+        if i >= len(names) or not self._det_src_size:
+            return None
+        return "#3FAF5A" if self._det_fal_cached(m, names[i]) else None
+
+    # -- tiles -------------------------------------------------------------
+    def _det_build_model_tiles(self, parent):
+        row = tk.Frame(parent, bg=S)
+        row.pack(fill="x", pady=(6, 0))
+        for col, (m, _name) in enumerate(self.DET_MODELS):
+            row.columnconfigure(col, weight=1, uniform="det_tiles")
+            cv = tk.Canvas(row, height=self.USC_TILE_H, bg=S2,
+                           highlightthickness=0, cursor="hand2")
+            cv.grid(row=0, column=col, sticky="ew",
+                    padx=(0 if col == 0 else 4, 0))
+            cv.bind("<Button-1>",
+                    lambda e, m=m: self._det_tile_click(m, e.x, e.y))
+            cv.bind("<Configure>", lambda e, m=m: self._det_draw_tile(m))
+            self._det_tiles[m] = cv
+        hint = tk.Frame(parent, bg=S)
+        hint.pack(fill="x", pady=(3, 0))
+        _hi = tk.Label(hint, text="ⓘ", font=FSM, bg=S, fg="#555555",
+                       cursor="hand2")
+        _hi.pack(side="left")
+        tk.Label(hint, text="  amber = selected  ·  green = preview ready",
+                 font=FSM, bg=S, fg="#555555").pack(side="left")
+        self._tooltip(
+            "Click a tile to select it (amber). Preview runs\n"
+            "every selected upscaler on the current frame, one\n"
+            "after another; each tile fills as its own progress\n"
+            "bar.\n\n"
+            "A green box means that model has a result for\n"
+            "this frame — click it to put it on screen and\n"
+            "compare. The bright green one is what you are\n"
+            "looking at, and what Run will render.\n\n"
+            "Real-ESRGAN — local, free, a few seconds a frame.\n"
+            "SeedVR2 — diffusion video restorer on fal; invents\n"
+            "texture, the most 'generative' of the three.\n"
+            "FlashVSR — fast one-step video super-resolution on\n"
+            "fal; sharper than ESRGAN, closer to the plate than\n"
+            "SeedVR2.\n"
+            "Paid models preview a short span around the frame;\n"
+            "every paid frame is cached, so it is only ever paid\n"
+            "for once.")(_hi)
+        return row
+
+    def _det_tile_look(self, m):
+        st = self._det_tile_state.get(m, {"phase": "idle", "frac": 0.0})
+        sel = bool(self._det_sel.get(m))
+        has = self._det_model_available(m)
+        viewing = has and self._det_view_model == m
+        fill = "#2A1A00" if sel else S2
+        border, bw = ("#5A4A20" if sel else "#2A2A2A"), 1
+        if sel:
+            border = self.USC_TILE_AMBER
+        status, scol = ("selected" if sel else "not selected"), \
+            (self.USC_TILE_AMBER if sel else "#666666")
+        ph = st.get("phase", "idle")
+        if ph == "queued":
+            status, scol = "queued", self.USC_TILE_AMBER
+        elif ph == "running":
+            status = f"{int(round(100 * st.get('frac', 0.0)))}%"
+            scol = W
+        elif ph == "failed":
+            border, bw = RB, 2
+            status, scol = "failed", RB
+        if has and ph not in ("running", "queued"):
+            border, bw = self.USC_TILE_GREEN, 2
+            status, scol = "✓ preview", self.USC_TILE_GREEN
+        if viewing and ph not in ("running", "queued"):
+            border, bw = self.USC_TILE_VIEW, 3
+            status, scol = "● viewing", self.USC_TILE_VIEW
+        return fill, border, bw, status, scol
+
+    def _det_draw_tile(self, m):
+        cv = self._det_tiles.get(m)
+        if cv is None:
+            return
+        try:
+            w = max(60, int(cv.winfo_width()))
+        except Exception:
+            return
+        h = self.USC_TILE_H
+        fill, border, bw, status, scol = self._det_tile_look(m)
+        sel = bool(self._det_sel.get(m))
+        st = self._det_tile_state.get(m, {})
+        icon = dict((k, i) for k, _n, i in self.UPS_MODELS).get(m, "robot")
+        cv.delete("all")
+        cv.create_rectangle(0, 0, w, h, fill=fill, outline="")
+        if st.get("phase") == "running":
+            fw = int(w * max(0.0, min(1.0, float(st.get("frac", 0.0)))))
+            if fw > 0:
+                cv.create_rectangle(0, 0, fw, h, fill="#8A6414", outline="")
+                cv.create_line(fw, 0, fw, h, fill="#FFCC55", width=2)
+        amber = self.USC_TILE_AMBER
+        self._ups_draw_glyph(cv, icon, 7, 6, amber if sel else "#555555")
+        bx, by = 11, 36
+        cv.create_rectangle(bx, by, bx + 11, by + 11,
+                            outline=amber if sel else "#666666",
+                            fill=amber if sel else "")
+        if sel:
+            cv.create_line(bx + 2, by + 6, bx + 5, by + 9, bx + 10, by + 2,
+                           fill="#2A1A00", width=2)
+        tx, room = 36, w - 36 - 6
+        nfont = FSM
+        sfont = ("Helvetica Neue", 9)
+        cv.create_text(tx, 17, anchor="w", font=nfont,
+                       fill=amber if sel else G,
+                       text=self._usc_fit_text(self.UPS_MODEL_NAMES[m],
+                                               nfont, room))
+        cv.create_text(tx, 40, anchor="w", font=sfont, fill=scol,
+                       text=self._usc_fit_text(status, sfont, room))
+        half = bw / 2.0
+        cv.create_rectangle(half, half, w - half, h - half,
+                            outline=border, width=bw)
+
+    def _det_redraw_tiles(self):
+        for m in self._det_tiles:
+            self._det_draw_tile(m)
+
+    def _det_tile_set(self, m, phase, frac=None):
+        st = self._det_tile_state.setdefault(m, {"phase": "idle", "frac": 0.0})
+        st["phase"] = phase
+        if frac is not None:
+            st["frac"] = max(0.0, min(1.0, float(frac)))
+        self.after(0, lambda: self._det_draw_tile(m))
+
+    def _det_tile_click(self, m, x=0, y=0):
+        """Body of a green tile: view it. Anywhere else (or the select
+        box under the icon): toggle selection."""
+        x0, y0, x1, y1 = self.USC_TILE_BOX
+        in_box = x0 <= x <= x1 and y0 <= y <= y1
+        if not in_box and self._det_model_available(m):
+            self._det_view(m)
+            return
+        self._det_toggle_model(m)
+
+    def _det_toggle_model(self, m):
+        on = not bool(self._det_sel.get(m))
+        self._det_sel[m] = on
+        st = self._det_tile_state.get(m)
+        if st is not None and st.get("phase") == "failed":
+            st["phase"] = "idle"
+        if not on and self._det_view_pref == m:
+            self._det_view_pref = None
+            self._det_models_changed()
+            self._det_view_best()
+            return
+        self._det_models_changed()
+
+    def _det_settings_changed(self):
+        """The downscale, the input colour or a model setting changed:
+        a re-synthesis made under the old one no longer applies (its
+        signature differs, so the tiles go grey until Preview)."""
+        self._det_mode_imgs = {}
+        try:
+            self._det_view_best()
+        except Exception:
+            pass
+
+    def _det_models_changed(self):
+        n = sum(1 for k, _n in self.DET_MODELS if self._det_sel.get(k))
+        btn = getattr(self, "det_preview_btn", None)
+        if btn is not None and not self._det_previewing:
+            try:
+                btn.configure(text=(
+                    "PREVIEW  ·  SELECT A MODEL" if n == 0 else
+                    f"PREVIEW  ·  {n} MODEL{'S' if n != 1 else ''}"))
+            except Exception:
+                pass
+        run = getattr(self, "det_run_btn", None)
+        if run is not None and not self._det_running:
+            try:
+                run.configure(text=self._det_run_label())
+            except Exception:
+                pass
+        self._det_multi_changed()
+        try:
+            self._det_tl_proxy.refresh()
+        except Exception:
+            pass
+        self._det_redraw_tiles()
+
+    def _det_run_label(self):
+        multi = self._det_multi_models()
+        if multi:
+            return (f"RUN  ·  {len(multi)} MODEL{'S' if len(multi) != 1 else ''}"
+                    " → EXR LAYERS")
+        return f"RUN  ·  {self.UPS_MODEL_NAMES[self._det_render_model()].upper()}"
+
+    # -- multi model output ------------------------------------------------
+    def _det_multi_models(self):
+        var = self.det_multi_var
+        try:
+            on = bool(var.get()) if var is not None else False
+        except Exception:
+            on = False
+        if not on:
+            return []
+        spec = self.USC_FORMATS.get(self.det_fmt_var.get(), {})
+        if spec.get("ext") != ".exr":
+            return []
+        return [m for m, _n in self.DET_MODELS if self._det_sel.get(m)]
+
+    def _det_multi_changed(self):
+        chk, lbl = self.det_multi_chk, self.det_multi_lbl
+        if chk is None or lbl is None:
+            return
+        try:
+            spec = self.USC_FORMATS.get(self.det_fmt_var.get(), {})
+            exr = spec.get("ext") == ".exr"
+            chk.configure(state="normal" if exr else "disabled")
+            models = self._det_multi_models()
+            if not exr:
+                txt, fg = "EXR only.", "#3A3A3A"
+                if self.det_multi_var.get():
+                    txt = "EXR only — off for a movie."
+            elif not self.det_multi_var.get():
+                txt, fg = "", "#555555"
+            elif not models:
+                txt, fg = "Tick at least one model.", RB
+            else:
+                main = self._det_render_model()
+                if main not in models:
+                    main = models[0]
+                layers = ", ".join(self.UPS_LAYER_NAMES[m] for m in models)
+                txt = (f"RGB = {self.UPS_MODEL_NAMES[main]}  ·  "
+                       f"layers: {layers}")
+                fg = "#DDAA44"
+            lbl.configure(text=txt, fg=fg)
+        except Exception:
+            pass
+        run = getattr(self, "det_run_btn", None)
+        if run is not None and not self._det_running:
+            try:
+                run.configure(text=self._det_run_label())
+            except Exception:
+                pass
+
+    # -- viewing -----------------------------------------------------------
     def _det_tl_click(self, i):
-        self._det_show_frame(i)
+        self._det_tl_idx = i
+        if self._det_folder and self._det_frames:
+            self._det_show_frame(i)
+
+    def _det_load_preview_frame(self, idx):
+        orig = self._det_read(
+            os.path.join(self._det_folder, self._det_frames[idx]))[0]
+        self._det_src_size = orig.size
+        # The in-memory store only ever needs the frame on screen.
+        for k in [k for k in self._det_mem if k[1] != idx]:
+            self._det_mem.pop(k, None)
+        for k in [k for k in self._det_spec if k[1] != idx]:
+            self._det_spec.pop(k, None)
+        self._det_mode_imgs = {}
+        return orig
 
     def _det_show_frame(self, idx=None):
-        """Show a frame and, if its re-synthesis is on screen already,
-        the blend; never runs the upscaler."""
+        """Show a frame and whatever is ALREADY available for it. Free:
+        never generates -- Preview is the only thing that spends."""
         if not self._det_folder or not self._det_frames:
             return
         if idx is None:
@@ -53585,126 +54012,81 @@ print("EXR write complete")
 
         def go():
             try:
-                img = self._det_read(
-                    os.path.join(self._det_folder, self._det_frames[idx]))[0]
+                img = self._det_load_preview_frame(idx)
 
                 def _apply():
                     if seq != self._det_show_seq:
                         return
                     self._det_orig = img
                     self._det_preview_idx = idx
-                    self._det_mode_imgs = {}
-                    if self._det_up_key != self._det_key(idx):
-                        self._det_res = None
-                        self._det_draw()
-                    else:
-                        self._det_reblend()
+                    self._det_view_best()
                 self.after(0, _apply)
             except Exception as ex:
                 self.after(0, lambda e=str(ex): self.log(
                     self.det_log, f"Could not read frame: {e}", "err"))
         threading.Thread(target=go, daemon=True).start()
 
-    def _det_reblend(self):
-        """The sliders applied to the re-synthesis on screen -- instant,
-        no upscaler."""
-        if self._det_orig is None or self._det_up is None:
-            return
-        if self._det_up_key is None or self._det_up_key[0] != self._det_preview_idx:
-            return
+    def _det_blend_model(self, m):
+        """The viewed picture for model m at the current sliders, as
+        display float RGB, or None."""
         import numpy as np
-        from PIL import Image
+        up = self._det_model_result(m)
+        if up is None or self._det_orig is None:
+            return None
         s, pr, only = self._det_params()
         base = np.asarray(self._det_orig, np.float32) / 255.0
-        out = self._det_blend(base, self._det_up, self._det_up_key[2], s, pr, only)
-        self._det_res = Image.fromarray((out * 255.0 + 0.5).astype(np.uint8))
+        return self._det_blend(base, up, self._det_k(), s, pr, only)
+
+    def _det_view(self, m, explicit=True):
+        arr = self._det_blend_model(m)
+        if arr is None:
+            return False
+        from PIL import Image
+        import numpy as np
+        if explicit:
+            self._det_view_pref = m
+        self._det_view_model = m
+        self._det_res = Image.fromarray(
+            (np.clip(arr, 0, 1) * 255.0 + 0.5).astype(np.uint8))
         self._det_mode_imgs = {}
+        self._det_models_changed()
         self._det_draw()
+        self._det_freq_refresh()
+        if explicit:
+            self.log(self.det_log,
+                     f"Viewing {self.UPS_MODEL_NAMES[m]} (frame "
+                     f"{(self._det_preview_idx or 0) + 1}) — Run will render "
+                     f"{self.UPS_MODEL_NAMES[m]}.", "hi")
+        return True
 
-    def _det_preview(self):
-        if not self._det_folder or not self._det_frames:
-            return
-        if self._det_previewing:
-            self._det_prev_cancelled = True
-            self._ip_vace_cancel = True
-            self.log(self.det_log, "Cancelling preview…", "err")
-            return
-        if self._det_running:
-            self.log(self.det_log, "A run is going — Preview is free "
-                     "again when it finishes.", "dim")
-            return
-        idx = max(0, min(int(self._det_tl_proxy.current()),
-                         len(self._det_frames) - 1))
-        self._det_tl_idx = idx
-        m = self._det_model()
-        k = self._det_k()
-        nm = dict(self.DET_MODELS)[m]
-        self._det_previewing = True
-        self._det_prev_cancelled = False
-        self._ip_vace_cancel = False
-        self.det_preview_btn.configure(text="✕  CANCEL PREVIEW", state="normal")
-        self.log(self.det_log, f"Preview frame {idx + 1} "
-                 f"({self._det_frames[idx]}): {nm}, downscale 1/{k}", "hi")
-        import threading
+    def _det_view_none(self):
+        self._det_view_model = None
+        self._det_res = None
+        self._det_mode_imgs = {}
+        self._det_models_changed()
+        self._det_draw()
+        self._det_freq_refresh()
 
-        def _log(msg):
-            self.after(0, lambda t=f"[{nm}] {msg}": self.log(self.det_log, t, "dim"))
+    def _det_view_best(self):
+        """Keep showing the model the artist chose if this frame has it,
+        else just the input -- never silently a DIFFERENT model."""
+        pref = self._det_view_pref
+        if pref and self._det_model_available(pref):
+            if self._det_view(pref, explicit=False):
+                return pref
+        self._det_view_none()
+        return None
 
-        def _frac(f):
-            self.after(0, lambda t=f: self.progress(t, f"Preview  {nm}"))
+    def _det_reblend(self):
+        """The sliders applied to the re-synthesis on screen -- instant,
+        no upscaler. The spectra follow, since they are of the blend."""
+        self._det_spec = {k: v for k, v in self._det_spec.items()
+                          if k[0] is None}
+        if self._det_view_model is not None:
+            self._det_view(self._det_view_model, explicit=False)
+        else:
+            self._det_freq_refresh()
 
-        def go():
-            try:
-                import numpy as np
-                name = self._det_frames[idx]
-                orig = self._det_read(os.path.join(self._det_folder, name))[0]
-                base = np.asarray(orig, np.float32) / 255.0
-                size = (orig.width, orig.height)
-                self.after(0, lambda: (setattr(self, "_det_orig", orig),
-                                       setattr(self, "_det_preview_idx", idx)))
-                if m == "esrgan":
-                    _frac(0.2)
-                    up = self._det_synth_esrgan(base, k)
-                    _frac(1.0)
-                else:
-                    r0, r1 = self._vace_span_for(idx, len(self._det_frames),
-                                                 want=self.DET_PREVIEW_SPAN)
-                    _log(f"re-synthesises frames {r0 + 1}–{r1 + 1} — "
-                         "this spends real money and takes a little while.")
-                    self._ups_bar_prefix = f"{nm} preview"
-                    self._det_fal_span(m, self._det_frames[r0:r1 + 1], size,
-                                       _log, _frac)
-                    up = self._det_fal_result(m, name, size)
-                    if up is None:
-                        raise RuntimeError("no result came back for this frame")
-                key = (idx, m, k, self._det_in_mode)
-
-                def _done_ok():
-                    self._det_up, self._det_up_key = up, key
-                    self._det_reblend()
-                    self.log(self.det_log, f"✓ {nm} preview ready — "
-                             "drag to wipe; Strength and Protect re-blend "
-                             "on the spot.", "ok")
-                self.after(0, _done_ok)
-            except Exception as ex:
-                if getattr(self, "_det_prev_cancelled", False):
-                    self.after(0, lambda: self.log(self.det_log,
-                                                   "Preview cancelled.", "err"))
-                else:
-                    self.after(0, lambda e=str(ex): self.log(
-                        self.det_log, f"✗ Preview failed: {e}", "err"))
-            finally:
-                def _fin():
-                    self._det_previewing = False
-                    self._det_prev_cancelled = False
-                    self._ip_vace_cancel = False
-                    self._ups_bar_prefix = ""
-                    self.det_preview_btn.configure(text="PREVIEW", state="normal")
-                    self.progress(-1)
-                self.after(0, _fin)
-        threading.Thread(target=go, daemon=True).start()
-
-    # -- viewer ------------------------------------------------------------
     def _det_set_mode(self, mode):
         self._det_mode = mode
         self._det_paint_mode_btns()
@@ -53720,12 +54102,16 @@ print("EXR write complete")
                 pass
 
     def _det_mode_image(self, mode):
-        """Diff (×4) between result and input, or the result's fine
-        detail on black (the input's when there is no result yet)."""
+        """Diff (×4) between the viewed result and the input, or the
+        result's fine detail on black (the input's when there is no
+        result yet). Detail on black works on the input alone too, so
+        switching tiles shows only what each model adds."""
         import numpy as np
         import cv2
         from PIL import Image
-        hit = self._det_mode_imgs.get(mode)
+        m = self._det_view_model
+        key = (mode, m, self._det_preview_idx)
+        hit = self._det_mode_imgs.get(key)
         if hit is not None:
             return hit
         a = np.asarray(self._det_orig, np.float32) / 255.0
@@ -53738,7 +54124,7 @@ print("EXR write complete")
             hp = np.abs(y - cv2.GaussianBlur(y, (0, 0), 1.2))
             out = np.repeat((np.clip(hp * 6.0, 0, 1) ** 0.7)[:, :, None], 3, 2)
         img = Image.fromarray((np.clip(out, 0, 1) * 255.0 + 0.5).astype(np.uint8))
-        self._det_mode_imgs = {mode: img}
+        self._det_mode_imgs = {key: img}
         return img
 
     def _det_layout(self):
@@ -53769,13 +54155,15 @@ print("EXR write complete")
                 return
             cw, ch, nw, nh, ox, oy = lay
             a, b = self._det_orig, self._det_res
+            who = (self.UPS_MODEL_NAMES.get(self._det_view_model, "detail")
+                   if b is not None else None)
             mode = self._det_mode
             if mode in ("diff", "detail") and (b is not None or mode == "detail"):
                 comp = self._ups_render(self._det_mode_image(mode),
                                         cw, ch, nw, nh, ox, oy)
                 self._det_tk = ImageTk.PhotoImage(comp)
                 cv.create_image(0, 0, anchor="nw", image=self._det_tk)
-                txt = (("detail — " if b is not None else "input — ")
+                txt = ((f"{who} — " if who else "input — ")
                        + ("difference from input ×4" if mode == "diff"
                           else "fine detail on black"))
                 cv.create_text(6, 8, anchor="nw", font=FM, fill=W, text=txt)
@@ -53795,12 +54183,12 @@ print("EXR write complete")
                 s, pr, only = self._det_params()
                 cv.create_text(int(self._det_wipe_t * cw) + 8, 8, anchor="nw",
                                font=FM, fill=GR,
-                               text=f"detail  {int(s * 100)}%  protect "
-                                    f"{int(pr * 100)}%"
+                               text=f"{who}  1/{self._det_k()}  {int(s * 100)}%"
+                                    f"  protect {int(pr * 100)}%"
                                     + ("" if only else "  (full blend)"))
             else:
                 cv.create_text(6, 24, anchor="nw", font=FM, fill="#666666",
-                               text="Press Preview to re-synthesise this frame")
+                               text="Select upscalers and press Preview")
         except Exception:
             pass
 
@@ -53852,6 +54240,279 @@ print("EXR write complete")
         except Exception:
             pass
 
+    # -- frequency distribution ------------------------------------------
+    def _det_spec_for(self, m):
+        """Cached spectrum of model m's blend at the current sliders
+        (None = the input) on the frame on screen."""
+        import numpy as np
+        idx = self._det_preview_idx
+        if m is None:
+            key = (None, idx, "", ())
+        else:
+            key = (m, idx, self._det_sig(m), self._det_params())
+        if key in self._det_spec:
+            return self._det_spec[key]
+        if m:
+            arr = self._det_blend_model(m)
+            if arr is None:
+                return None
+        else:
+            if self._det_orig is None:
+                return None
+            arr = np.asarray(self._det_orig, np.float32) / 255.0
+        s = self._ups_spectrum(arr)
+        self._det_spec[key] = s
+        return s
+
+    def _det_freq_refresh(self):
+        cv = self.det_freq_canvas
+        if cv is None:
+            return
+        try:
+            cv.delete("all")
+            w = max(1, cv.winfo_width())
+            h = max(1, cv.winfo_height())
+        except Exception:
+            return
+        if self._det_orig is None or self._det_preview_idx is None:
+            cv.create_text(w // 2, h // 2, text="no frame yet",
+                           fill="#444444", font=FSM)
+            return
+        base = h - 12
+        limit = 0.5 / float(self._det_k())
+        curves = []
+        ref = self._det_spec_for(None)
+        if ref is None:
+            return
+        curves.append((None, ref))
+        for m, _n in self.DET_MODELS:
+            if self._det_model_available(m):
+                s = self._det_spec_for(m)
+                if s is not None:
+                    curves.append((m, s))
+        import numpy as np
+        lo = min(float(np.percentile(c[1][1][1:], 2)) for c in curves)
+        hi = max(float(c[1][1][1:].max()) for c in curves)
+        span = max(1e-6, hi - lo)
+
+        def _x(fq):
+            return int(fq / 0.5 * (w - 1))
+
+        top = 34
+
+        def _y(v):
+            return base - (v - lo) / span * (base - top)
+        lx = _x(limit)
+        cv.create_rectangle(lx, 0, w, base, fill="#1A140A", outline="")
+        cv.create_text(w - 4, base - 2, text="made by the upscaler",
+                       anchor="se", font=("Futura", 8), fill="#6A5A32")
+        cv.create_line(lx, 0, lx, base, fill="#888888", dash=(3, 2))
+        cv.create_line(0, base, w, base, fill="#333333")
+        cv.create_text(2, base + 1, text="coarse", anchor="nw",
+                       font=("Futura", 8), fill="#666666")
+        cv.create_text(lx, base + 1, text="downscale limit", anchor="n",
+                       font=("Futura", 8), fill="#888888")
+        cv.create_text(w - 2, base + 1, text="fine", anchor="ne",
+                       font=("Futura", 8), fill="#666666")
+        f_ref, p_ref = ref
+        viewed = self._det_view_model
+        for m, (f, p) in sorted(curves, key=lambda c: c[0] == viewed):
+            pts = []
+            for fq, v in zip(f[1:], p[1:]):
+                pts.extend((_x(fq), _y(v)))
+            if len(pts) < 4:
+                continue
+            if m is None:
+                cv.create_line(*pts, fill="#777777", width=1, dash=(2, 2))
+            else:
+                bold = m == viewed
+                cv.create_line(*pts, fill=self.UPS_SPEC_COLOURS[m],
+                               width=2 if bold else 1)
+        lx0 = 4
+        for m, _s in curves:
+            name = "input" if m is None else self.UPS_MODEL_NAMES[m]
+            col = "#777777" if m is None else self.UPS_SPEC_COLOURS[m]
+            tid = cv.create_text(lx0, 2, text=name, anchor="nw",
+                                 font=("Futura", 8), fill=col)
+            bb = cv.bbox(tid)
+            lx0 = (bb[2] + 8) if bb else lx0 + 60
+        if viewed is not None and self._det_model_available(viewed):
+            s = self._det_spec_for(viewed)
+            if s is not None:
+                g = self._ups_hf_gain_db(s[0], s[1], p_ref, limit)
+                txt = f"{g:+.1f} dB fine detail"
+                _t = cv.create_text(w - 4, 17, text=txt, anchor="ne",
+                                    font=("Futura", 10, "bold"),
+                                    fill="#FF4040")
+                bb = cv.bbox(_t)
+                if bb:
+                    _plate = cv.create_rectangle(bb[0] - 3, bb[1] - 1,
+                                                 bb[2] + 3, bb[3] + 1,
+                                                 fill="#0D0D0D",
+                                                 outline="#FF4040")
+                    cv.tag_lower(_plate, _t)
+
+    # -- preview -----------------------------------------------------------
+    def _det_preview_model(self, m, idx, base, size, on_log, on_frac):
+        """One model's re-synthesis of frame idx into _det_mem (local)
+        or the cache (paid)."""
+        sig = self._det_sig(m, size)
+        if m == "esrgan":
+            on_frac(0.2)
+            self._det_mem[(m, idx, sig)] = self._det_synth_esrgan(base, self._det_k())
+            on_frac(1.0)
+            return
+        names = self._det_frames
+        r0, r1 = self._vace_span_for(idx, len(names), want=self.DET_PREVIEW_SPAN)
+        on_log(f"re-synthesises frames {r0 + 1}–{r1 + 1} — this spends "
+               "real money and takes a little while.")
+        self._det_fal_span(m, names[r0:r1 + 1], size, on_log, on_frac)
+        if self._det_fal_cached(m, names[idx], size) is None:
+            raise RuntimeError("no result came back for this frame")
+
+    def _det_preview(self):
+        """Preview every SELECTED upscaler on the current frame, one after
+        another. While it runs, this same button is its Cancel."""
+        if not self._det_folder or not self._det_frames:
+            return
+        if self._det_previewing:
+            self._det_preview_cancel()
+            return
+        if self._det_running:
+            self.log(self.det_log, "A run is going — Preview is free "
+                     "again when it finishes.", "dim")
+            return
+        models = [m for m, _n in self.DET_MODELS if self._det_sel.get(m)]
+        if not models:
+            self.log(self.det_log,
+                     "Select at least one upscaler, then Preview.", "err")
+            return
+        idx = max(0, min(int(self._det_tl_proxy.current()),
+                         len(self._det_frames) - 1))
+        self._det_tl_idx = idx
+        self._det_previewing = True
+        self._det_prev_cancelled = False
+        self._ip_vace_cancel = False
+        for m, _n in self.DET_MODELS:
+            self._det_tile_state[m] = {
+                "phase": "queued" if m in models else "idle", "frac": 0.0}
+        self._det_redraw_tiles()
+        try:
+            self.det_preview_btn.configure(text="✕  CANCEL PREVIEW",
+                                           state="normal")
+        except Exception:
+            pass
+        names_txt = ", ".join(self.UPS_MODEL_NAMES[m] for m in models)
+        self.log(self.det_log, f"Preview frame {idx + 1} "
+                 f"({self._det_frames[idx]}), downscale 1/{self._det_k()}: "
+                 f"{names_txt}", "hi")
+        n = len(models)
+        failed = []
+        import threading
+
+        def go():
+            ok = []
+            try:
+                import numpy as np
+                orig = self._det_load_preview_frame(idx)
+                base = np.asarray(orig, np.float32) / 255.0
+                size = (orig.width, orig.height)
+                self.after(0, lambda: (
+                    setattr(self, "_det_orig", orig),
+                    setattr(self, "_det_preview_idx", idx),
+                    self._det_view_best()))
+                for k, m in enumerate(models):
+                    name = self.UPS_MODEL_NAMES[m]
+                    if self._det_prev_cancelled:
+                        for mm in models[k:]:
+                            self._det_tile_set(mm, "idle", 0.0)
+                        break
+                    self._det_bar_prefix = f"{name} ({k + 1}/{n})"
+                    self._det_tile_set(m, "running", 0.0)
+                    self.after(0, lambda nm=name: self.log(
+                        self.det_log, f"{nm} — starting…", "hi"))
+
+                    def _log(msg, nm=name):
+                        self.after(0, lambda t=f"[{nm}] {msg}": self.log(
+                            self.det_log, t, "dim"))
+
+                    def _frac(f, m=m, k=k):
+                        if self._det_tile_state.get(m, {}).get(
+                                "phase") != "running":
+                            return
+                        self._det_tile_set(m, "running", f)
+                        tot = (k + max(0.0, min(1.0, float(f)))) / n
+                        self.after(0, lambda t=tot: self.progress(
+                            t, f"Preview  {self._det_bar_prefix}"))
+                    try:
+                        self._det_preview_model(m, idx, base, size, _log, _frac)
+                        self._det_tile_set(m, "done", 1.0)
+                        ok.append(m)
+                        self.after(0, lambda m=m: self._det_model_finished(m))
+                    except Exception as ex:
+                        if self._det_prev_cancelled:
+                            self._det_tile_set(m, "idle", 0.0)
+                            self.after(0, lambda nm=name: self.log(
+                                self.det_log, f"{nm} — cancelled.", "err"))
+                            continue
+                        self._det_tile_set(m, "failed", 0.0)
+                        failed.append((name, str(ex) or type(ex).__name__))
+                        self.after(0, lambda nm=name, e=str(ex): self.log(
+                            self.det_log, f"✗ {nm} preview failed: {e}",
+                            "err"))
+            except Exception as ex:
+                self.after(0, lambda e=str(ex): self.log(
+                    self.det_log, f"Preview error: {e}", "err"))
+            finally:
+                self.after(0, lambda: self._det_preview_finished(ok, n, failed))
+        threading.Thread(target=go, daemon=True).start()
+
+    def _det_preview_cancel(self):
+        if self._det_prev_cancelled:
+            return
+        self._det_prev_cancelled = True
+        self._ip_vace_cancel = True
+        self.log(self.det_log, "Cancelling preview…", "err")
+        try:
+            self.det_preview_btn.configure(text="CANCELLING…", state="disabled")
+        except Exception:
+            pass
+
+    def _det_model_finished(self, m):
+        self.log(self.det_log, f"✓ {self.UPS_MODEL_NAMES[m]} preview "
+                 "ready — click its tile to view; Strength and Protect "
+                 "re-blend on the spot.", "ok")
+        pref = self._det_view_pref
+        if pref is None or not self._det_model_available(pref):
+            self._det_view(m, explicit=True)
+        elif pref == m:
+            self._det_view(m, explicit=False)
+        else:
+            self._det_draw_tile(m)
+            self._det_freq_refresh()
+
+    def _det_preview_finished(self, ok, n, failed=()):
+        self._det_previewing = False
+        self._det_bar_prefix = ""
+        if self._det_prev_cancelled:
+            self._det_prev_cancelled = False
+            self._ip_vace_cancel = False
+        for st in self._det_tile_state.values():
+            if st.get("phase") in ("done", "queued", "running"):
+                st["phase"], st["frac"] = "idle", 0.0
+        try:
+            self.det_preview_btn.configure(state="normal")
+        except Exception:
+            pass
+        self.progress(-1)
+        self._det_models_changed()
+        self._det_freq_refresh()
+        self.log(self.det_log,
+                 f"Preview finished — {len(ok)} of {n} model(s) ready.",
+                 "ok" if len(ok) == n else "err")
+        for nm, why in failed:
+            self.log(self.det_log, f"✗ {nm} failed: {why[:300]}", "err")
+
     # -- render ------------------------------------------------------------
     def _det_cancel_run(self):
         if not messagebox.askyesno("Cancel", "Cancel detail run?"):
@@ -53886,60 +54547,73 @@ print("EXR write complete")
         spec = self.USC_FORMATS.get(name, self.USC_FORMATS[self.USC_DEFAULT_FORMAT])
         r0, r1 = self._det_range()
         sel = frames[r0:r1 + 1]
-        m, k = self._det_model(), self._det_k()
-        nm = dict(self.DET_MODELS)[m]
+        k = self._det_k()
         s, pr, only = self._det_params()
         mode = self._det_in_mode
         base_dir = (os.path.dirname(str(self._det_src_movie))
                     if self._det_is_movie else folder)
+        main = self._det_render_model()
+        multi = self._det_multi_models()
+        if multi and main not in multi:
+            main = multi[0]
+        models = multi or [main]
+        what = (f"{len(multi)} models → layers, RGB = "
+                f"{self.UPS_MODEL_NAMES[main]}" if multi
+                else self.UPS_MODEL_NAMES[main])
+        what += (f", 1/{k}, {int(s * 100)}%"
+                 + (f", protect {int(pr * 100)}%" if pr else "")
+                 + ("" if only else ", full blend"))
         self._det_cancel = False
         self._ip_vace_cancel = False
         self._det_running = True
         self.det_run_btn.configure(text="CANCEL", bg="#2A0A0A", fg="#FF4444",
                                    command=self._det_cancel_run)
-        what = (f"{nm}, 1/{k}, {int(s * 100)}%"
-                + (f", protect {int(pr * 100)}%" if pr else "")
-                + ("" if only else ", full blend"))
         self.setstatus(f"Detail ({what})…", R)
         self.log(self.det_log, f"Run — {what}.", "hi")
         import threading
 
         def go():
             errors = 0
-            fell_back = False
+            fell_back = []
             try:
                 import numpy as np
                 from PIL import Image
                 first = self._det_read(os.path.join(folder, sel[0]))[0]
-                size = (first.width, first.height)
+                self._det_src_size = first.size
+                size = first.size
                 if (self._det_src_hdr and spec["ext"] != ".exr" and mode != "pq"):
                     self.after(0, lambda: self.log(
                         self.det_log, "This source is HDR and the output "
                         "is an SDR movie: values above white are clipped. "
                         "Write EXR to keep them.", "err"))
-                use_fal = m in self.UPS_ENDPOINTS
-                if use_fal:
+                # Paid models first, for the whole range, in chunks: a
+                # video model needs the clip, not one frame at a time.
+                usable = set(models)
+                for m in models:
+                    if m not in self.UPS_ENDPOINTS:
+                        continue
+                    nm = self.UPS_MODEL_NAMES[m]
                     try:
                         for c0 in range(0, len(sel), self.UPS_RUN_CHUNK):
                             if self._det_cancel:
                                 break
                             chunk = sel[c0:c0 + self.UPS_RUN_CHUNK]
-                            self._ups_bar_prefix = (
+                            self._det_bar_prefix = (
                                 f"{nm}  frames {r0 + c0 + 1}–"
                                 f"{r0 + c0 + len(chunk)}")
                             self._det_fal_span(
                                 m, chunk, size,
-                                lambda t: self.after(0, lambda t=t: self.log(
+                                lambda t, nm=nm: self.after(0, lambda t=t: self.log(
                                     self.det_log, f"[{nm}] {t}", "dim")))
                     except Exception as ex:
                         if self._det_cancel:
-                            raise RuntimeError("Cancelled.")
-                        use_fal = False
-                        fell_back = True
-                        self.after(0, lambda e=str(ex): self.log(
+                            break
+                        usable.discard(m)
+                        fell_back.append(f"{nm} → Real-ESRGAN: {ex}")
+                        self.after(0, lambda nm=nm, e=str(ex): self.log(
                             self.det_log, f"{nm} failed, using Real-ESRGAN "
                             f"for its frames: {e}", "err"))
-                self._ups_bar_prefix = ""
+                self._det_bar_prefix = ""
                 if self._det_cancel:
                     raise RuntimeError("Cancelled.")
                 out = self._adw_versioned_output_dir(base_dir, "DETAIL")
@@ -53960,15 +54634,32 @@ print("EXR write complete")
                     try:
                         orig, gain = self._det_read(src)
                         base = np.asarray(orig, np.float32) / 255.0
-                        up = (self._det_fal_result(m, fname, size)
-                              if use_fal else None)
-                        if up is None:
-                            up = self._det_synth_esrgan(base, k)
-                        res = self._det_blend(base, up, k, s, pr, only)
-                        px = self._ups_out_px(res, gain, spec, eotf, mode=mode)
-                        self._usc_write_frame(px, dst, spec, aces=aces)
+                        by = {}
+                        esr = None
+                        for m in models:
+                            p = (self._det_fal_cached(m, fname, size)
+                                 if m in usable else None)
+                            if p:
+                                up = self._ups_read16(p)
+                            else:
+                                if esr is None:
+                                    esr = self._det_synth_esrgan(base, k)
+                                up = esr
+                            by[m] = self._det_blend(base, up, k, s, pr, only)
+
+                        def to_px(c, gain=gain):
+                            return self._ups_out_px(c, gain, spec, eotf, mode=mode)
+                        px = to_px(by[main])
+                        if multi and spec["ext"] == ".exr":
+                            self._usc_write_exr_layers(
+                                dst, px,
+                                {self.UPS_LAYER_NAMES[m]: to_px(by[m])
+                                 for m in multi},
+                                half=not spec.get("full", False), aces=aces)
+                        else:
+                            self._usc_write_frame(px, dst, spec, aces=aces)
                         if i % 10 == 0:
-                            u = Image.fromarray((res * 255 + .5).astype(np.uint8))
+                            u = Image.fromarray((by[main] * 255 + .5).astype(np.uint8))
                             self.after(0, lambda o=orig, u=u, kk=r0 + i: (
                                 setattr(self, "_det_orig", o),
                                 setattr(self, "_det_res", u),
@@ -53995,14 +54686,18 @@ print("EXR write complete")
                         self.log(self.det_log, f"{e} frame(s) failed.", "err"),
                         self.setstatus("Error", RB)))
                 else:
-                    self.after(0, lambda n=total: (
-                        self.log(self.det_log,
-                                 f"Done — {n} frame(s) written ({what})"
-                                 + (" — fell back to Real-ESRGAN." if fell_back
-                                    else "."),
-                                 "err" if fell_back else "ok"),
-                        self.setstatus("Complete (fell back)" if fell_back
-                                       else "Complete", RB if fell_back else GR)))
+                    if fell_back:
+                        self.after(0, lambda n=total, r="; ".join(fell_back): (
+                            self.log(self.det_log,
+                                     f"Done — {n} frame(s) written, but "
+                                     f"fell back to Real-ESRGAN: {r}", "err"),
+                            self.setstatus("Complete (fell back)", RB)))
+                    else:
+                        self.after(0, lambda n=total: (
+                            self.log(self.det_log,
+                                     f"Done — {n} frame(s) written ({what}).",
+                                     "ok"),
+                            self.setstatus("Complete", GR)))
                     self.after(0, lambda o=out: self._adw_propagate_output(
                         o, "detail", self.det_log))
             except Exception as ex:
@@ -54016,12 +54711,13 @@ print("EXR write complete")
             finally:
                 def _done():
                     self._det_running = False
-                    self._ups_bar_prefix = ""
+                    self._det_bar_prefix = ""
                     self._ip_vace_cancel = False
                     self.progress(-1)
                     self.det_run_btn.configure(
-                        text="RUN DETAIL", bg="#2A0A0A", fg="#CC4444",
-                        command=self._det_run, state="normal")
+                        text=self._det_run_label(), bg="#2A0A0A",
+                        fg="#CC4444", command=self._det_run, state="normal")
+                    self._det_models_changed()
                 self.after(0, _done)
         threading.Thread(target=go, daemon=True).start()
 
