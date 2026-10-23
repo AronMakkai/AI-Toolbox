@@ -8484,11 +8484,14 @@ class App(tk.Tk):
             np.float32)
 
     @classmethod
-    def _exr_write_planes(cls, path, planes, half=True, aces=False):
+    def _exr_write_planes(cls, path, planes, half=True, aces=False,
+                          pixel_aspect=None):
         """Named float planes ({"R": 2-D array, "topaz.R": ...}) to one
         EXR. With aces=True the file is tagged ACES2065-1 (chromaticities
         + container flag) where the OpenEXR binding can write that; the
-        values must already BE ACES2065-1."""
+        values must already BE ACES2065-1. `pixel_aspect` > 1 tags the
+        file anamorphic (pixelAspectRatio), so Nuke and Resolve desqueeze
+        it on their own."""
         import numpy as np
         import OpenEXR, Imath
         cast = np.float16 if half else np.float32
@@ -8501,6 +8504,8 @@ class App(tk.Tk):
                    "type": OpenEXR.scanlineimage,
                    "chromaticities": cls.ACES_AP0_CHROMA,
                    "acesImageContainerFlag": 1}
+            if pixel_aspect and pixel_aspect > 1.0:
+                hdr["pixelAspectRatio"] = float(pixel_aspect)
             with OpenEXR.File(hdr, {
                     k: np.ascontiguousarray(v).astype(cast)
                     for k, v in planes.items()}) as f:
@@ -8510,6 +8515,11 @@ class App(tk.Tk):
                              else Imath.PixelType.FLOAT)
         hdr = OpenEXR.Header(w, h)
         hdr["channels"] = {k: Imath.Channel(pt) for k in planes}
+        if pixel_aspect and pixel_aspect > 1.0:
+            try:
+                hdr["pixelAspectRatio"] = float(pixel_aspect)
+            except Exception:
+                pass
         f = OpenEXR.OutputFile(path, hdr)
         f.writePixels({k: np.ascontiguousarray(v).astype(cast).tobytes()
                        for k, v in planes.items()})
@@ -32959,20 +32969,21 @@ class App(tk.Tk):
                        "PNG 16-bit", "PNG 8-bit")
 
     @staticmethod
-    def _organic_write_exr(path, rgb, half=True, aces=False):
+    def _organic_write_exr(path, rgb, half=True, aces=False,
+                           pixel_aspect=None):
         """Scene-linear float out, the way the rest of the app writes
         EXRs -- OpenEXR rather than cv2.imwrite, whose EXR codec is
         compiled out of the pip wheels.
 
         aces=True: `rgb` is linear Rec.709 and is written as ACES2065-1,
-        tagged."""
+        tagged. `pixel_aspect` > 1 tags the file anamorphic."""
         import numpy as np
         import OpenEXR, Imath
         if aces:
             a = App._lin709_to_aces(rgb)
             App._exr_write_planes(
                 path, {c: a[:, :, i] for i, c in enumerate("RGB")},
-                half=half, aces=True)
+                half=half, aces=True, pixel_aspect=pixel_aspect)
             return
         a = np.ascontiguousarray(np.asarray(rgb, np.float32))
         h, w = a.shape[:2]
@@ -32980,6 +32991,11 @@ class App(tk.Tk):
                              else Imath.PixelType.FLOAT)
         hdr = OpenEXR.Header(w, h)
         hdr["channels"] = {c: Imath.Channel(pt) for c in "RGB"}
+        if pixel_aspect and pixel_aspect > 1.0:
+            try:
+                hdr["pixelAspectRatio"] = float(pixel_aspect)
+            except Exception:
+                pass
         f = OpenEXR.OutputFile(path, hdr)
         cast = np.float16 if half else np.float32
         f.writePixels({c: a[:, :, i].astype(cast).tobytes()
@@ -50120,7 +50136,7 @@ print("EXR write complete")
 
     @staticmethod
     def _usc_write_exr_layers(path, rgb, layers, half=True, aces=False,
-                              extra=None):
+                              extra=None, pixel_aspect=None):
         """Main RGB plus one named layer per model, in one EXR:
         R, G, B, <layer>.R, <layer>.G, <layer>.B, ...
 
@@ -50148,9 +50164,10 @@ print("EXR write complete")
                 import cv2
                 m = cv2.resize(m, (w, h), interpolation=cv2.INTER_LINEAR)
             planes[name] = m
-        App._exr_write_planes(path, planes, half=half, aces=aces)
+        App._exr_write_planes(path, planes, half=half, aces=aces,
+                              pixel_aspect=pixel_aspect)
 
-    def _usc_write_frame(self, rgb, dst, spec, aces=False):
+    def _usc_write_frame(self, rgb, dst, spec, aces=False, pixel_aspect=None):
         """One frame out, in the chosen container.
 
         EXR goes through OpenEXR rather than cv2.imwrite for the same
@@ -50162,7 +50179,7 @@ print("EXR write complete")
             # app writes an EXR.
             self._organic_write_exr(dst, rgb,
                                     half=not spec.get("full", False),
-                                    aces=aces)
+                                    aces=aces, pixel_aspect=pixel_aspect)
             return
         import cv2
         v = np.clip(np.asarray(rgb, np.float32), 0.0, 1.0)
@@ -50745,6 +50762,10 @@ print("EXR write complete")
         self.ups_in_lbl.pack(fill="x", pady=(2, 0))
         self.ups_in_var.trace_add("write",
                                   lambda *_: self._ups_in_changed())
+        self.ups_anam_var = tk.BooleanVar(value=False)
+        self.ups_squeeze_var = tk.StringVar(value="2.0")
+        self._anam_row(c1, self.ups_anam_var, self.ups_squeeze_var,
+                       self._ups_anam_changed)
 
         c2 = self._card(lf, "Resolution")
         self.ups_res_var = tk.StringVar(value="UHD")
@@ -51072,6 +51093,8 @@ print("EXR write complete")
         if not getattr(self, "_ups_is_movie", False):
             self._ups_src_transfer = ""
         self._ups_resolve_input()
+        self._anam_autodetect(d, fs, self.ups_anam_var, self.ups_squeeze_var,
+                              self.ups_log)
         self._ups_up = None
         self._ups_up_idx = None
         self._ups_src_size = None
@@ -51281,6 +51304,17 @@ print("EXR write complete")
             pass
         return mode, hdr
 
+    def _ups_anam_changed(self):
+        """Anamorphic on/off or a new factor: the source is read at a
+        new width, so the frame on screen and every preview are redone."""
+        if not self._ups_folder:
+            return
+        self._ups_mem = {}
+        self._ups_spec = {}
+        self._ups_mode_imgs = {}
+        self._ups_settings_changed()
+        self._ups_show_frame(self._ups_tl_idx)
+
     def _ups_in_changed(self):
         if not self._ups_folder or not self._ups_frames:
             return
@@ -51342,12 +51376,17 @@ print("EXR write complete")
                 / float(self.HDR_SDR_WHITE)
         return a
 
-    def _ups_read_source(self, path, mode=None, hdr=None):
+    def _ups_read_source(self, path, mode=None, hdr=None, squeeze=None):
         """(base, gain): the 8-bit display picture the upscalers and the
         viewer work on, and -- for HDR -- the per-pixel factor that turns
         the base's linear light back into the source's (None otherwise).
-        `mode` / `hdr` default to this studio's own resolution of the
-        source; Detail Studio passes its own.
+        `mode` / `hdr` / `squeeze` default to this studio's own resolution
+        of the source; Detail Studio passes its own.
+
+        `squeeze` > 1 is anamorphic material: the picture is desqueezed
+        (width x squeeze) here, so everything after -- the upscalers,
+        the viewer, the graph -- sees square pixels and real shapes;
+        _resqueeze puts the result back to storage width at write time.
 
         The split is the point. An upscaler shown raw HDR sees a blown
         or a flat-log image it was never trained on; shown the base it
@@ -51361,12 +51400,16 @@ print("EXR write complete")
             mode = self._ups_in_mode
         if hdr is None:
             hdr = self._ups_src_hdr
+        if squeeze is None:
+            squeeze = self._ups_squeeze()
         if mode == "srgb":
             if os.path.splitext(path)[1].lower() in self.FF_LINEAR_EXTS:
                 a = np.clip(self._ups_raw_float(path), 0.0, 1.0)
-                return Image.fromarray(
-                    (a * 255.0 + 0.5).astype(np.uint8), "RGB"), None
-            return Image.open(path).convert("RGB"), None
+                base = Image.fromarray(
+                    (a * 255.0 + 0.5).astype(np.uint8), "RGB")
+            else:
+                base = Image.open(path).convert("RGB")
+            return self._desqueeze(base, squeeze), None
         lin = self._ups_scene(path, mode)
         gain = None
         if hdr:
@@ -51375,8 +51418,134 @@ print("EXR write complete")
                                                   1e-6), 1.0)
             gain = g.astype(np.float32)
             lin = lin / gain[:, :, None]
+            gain = self._desqueeze(gain, squeeze)
         base = self._organic_linear_to_display(lin)
-        return Image.fromarray(np.ascontiguousarray(base), "RGB"), gain
+        return self._desqueeze(
+            Image.fromarray(np.ascontiguousarray(base), "RGB"), squeeze), gain
+
+    # ── anamorphic ──
+    # Squeezed material shown to an upscaler as stored is a picture of
+    # tall thin shapes it was never trained on; desqueezed first it is
+    # a normal picture. The choice is a checkbox and a factor on both
+    # studios; an EXR that says its own pixelAspectRatio ticks it.
+    UPS_SQUEEZES = ("1.33", "1.5", "1.8", "2.0")
+    ups_anam_var = None
+    ups_squeeze_var = None
+
+    def _ups_squeeze(self):
+        """The desqueeze factor for Upscale Studio's source, 1.0 when
+        Anamorphic is off."""
+        return self._squeeze_from(self.ups_anam_var, self.ups_squeeze_var)
+
+    @staticmethod
+    def _squeeze_from(anam_var, squeeze_var):
+        try:
+            if anam_var is None or not bool(anam_var.get()):
+                return 1.0
+            f = float(squeeze_var.get()) if squeeze_var is not None else 2.0
+            return f if f > 1.0 else 1.0
+        except Exception:
+            return 1.0
+
+    @staticmethod
+    def _desqueeze(img, f):
+        """PIL image or float array, width x f (Lanczos / cubic); as is
+        when f is 1."""
+        if not f or abs(float(f) - 1.0) < 1e-3:
+            return img
+        import numpy as np
+        from PIL import Image
+        if isinstance(img, Image.Image):
+            w, h = img.size
+            return img.resize((max(1, int(round(w * f))), h), Image.LANCZOS)
+        a = np.asarray(img, np.float32)
+        import cv2
+        h, w = a.shape[:2]
+        return cv2.resize(a, (max(1, int(round(w * f))), h),
+                          interpolation=cv2.INTER_LINEAR)
+
+    @staticmethod
+    def _resqueeze(arr, f):
+        """A float picture back to storage width (width / f), area
+        averaged so the squeeze adds no ringing; as is when f is 1."""
+        if not f or abs(float(f) - 1.0) < 1e-3:
+            return arr
+        import numpy as np
+        import cv2
+        a = np.asarray(arr, np.float32)
+        h, w = a.shape[:2]
+        return cv2.resize(a, (max(1, int(round(w / f))), h),
+                          interpolation=cv2.INTER_AREA)
+
+    @staticmethod
+    def _exr_pixel_aspect(path):
+        """An EXR's own pixelAspectRatio, 1.0 when it has none or the
+        file is not an EXR."""
+        try:
+            if not str(path).lower().endswith(".exr"):
+                return 1.0
+            import OpenEXR
+            v = OpenEXR.InputFile(path).header().get("pixelAspectRatio")
+            return float(v) if v else 1.0
+        except Exception:
+            return 1.0
+
+    @classmethod
+    def _nearest_squeeze(cls, f):
+        """The UPS_SQUEEZES entry closest to f."""
+        return min(cls.UPS_SQUEEZES, key=lambda s: abs(float(s) - float(f)))
+
+    def _anam_autodetect(self, folder, names, anam_var, squeeze_var, log_w):
+        """Tick Anamorphic and set the factor from the first EXR's
+        pixelAspectRatio; untick when the EXR says square pixels. A
+        non-EXR source says nothing, so the choice is left alone."""
+        if not names or anam_var is None:
+            return
+        first = os.path.join(folder, names[0])
+        if not first.lower().endswith(".exr"):
+            return
+        pa = self._exr_pixel_aspect(first)
+        try:
+            if pa > 1.05:
+                squeeze_var.set(self._nearest_squeeze(pa))
+                anam_var.set(True)
+                self.log(log_w, f"Anamorphic: the EXR says pixel aspect "
+                         f"{pa:g} — desqueezing ×{squeeze_var.get()} "
+                         "before the upscaler.", "hi")
+            elif anam_var.get():
+                anam_var.set(False)
+                self.log(log_w, "The EXR says square pixels — Anamorphic "
+                         "off.", "dim")
+        except Exception:
+            pass
+
+    def _anam_row(self, parent, anam_var, squeeze_var, on_change):
+        """The Anamorphic checkbox + squeeze factor row, shared by the
+        two studios."""
+        row = tk.Frame(parent, bg=S); row.pack(fill="x", pady=(4, 0))
+        tk.Checkbutton(row, text="Anamorphic", variable=anam_var,
+                       bg=S, fg=W, selectcolor="#222222", activebackground=S,
+                       activeforeground=W, font=FSM, bd=0).pack(side="left")
+        ttk.Combobox(row, textvariable=squeeze_var,
+                     values=list(self.UPS_SQUEEZES), state="readonly",
+                     font=FSM, width=5).pack(side="left", padx=(6, 0))
+        tk.Label(row, text="× squeeze", font=FSM, bg=S,
+                 fg="#555555").pack(side="left", padx=(4, 0))
+        i = tk.Label(row, text="ⓘ", font=FSM, bg=S, fg="#555555",
+                     cursor="hand2")
+        i.pack(side="left", padx=(6, 0))
+        self._tooltip(
+            "Anamorphic material: the frames are desqueezed\n"
+            "(width \u00d7 factor) BEFORE the upscaler sees them, so it\n"
+            "works on real shapes rather than tall thin ones,\n"
+            "and squeezed back to the storage width when written.\n"
+            "The viewer shows the desqueezed picture.\n\n"
+            "An EXR that carries a pixel aspect ratio ticks this\n"
+            "itself; a movie or PNG does not say, so set it here.\n"
+            "Output EXRs carry the pixel aspect ratio.")(i)
+        anam_var.trace_add("write", lambda *_: on_change())
+        squeeze_var.trace_add("write", lambda *_: on_change())
+        return row
 
     def _ups_out_px(self, up_disp, gain, spec, eotf, mode=None):
         """An upscaled display picture as the pixels to WRITE: linear
@@ -51420,8 +51589,18 @@ print("EXR write complete")
         sz = getattr(self, "_ups_src_size", None)
         if not sz:
             return None
-        return self._usc_target(sz[0], sz[1], self.ups_res_var.get(),
-                                self.ups_fac_var.get())
+        return self._ups_model_size(sz[0], sz[1], self.ups_res_var.get(),
+                                    self.ups_fac_var.get())
+
+    def _ups_model_size(self, w, h, res, fac, squeeze=None):
+        """The size the upscalers render at, from the source size on
+        screen -- which is the DESQUEEZED size for anamorphic material.
+        A fixed output (HD / UHD / 4K) means the picture as seen: UHD is
+        3840 wide desqueezed, so the file is 3840 / squeeze wide and
+        keeps its aspect (x2 squeeze: 1920x2160 in the file, 3840x2160
+        on screen). A factor is a factor either way. _resqueeze brings
+        the render back to storage width at write time."""
+        return self._usc_target(w, h, res, fac)
 
     def _ups_model_sig(self, m):
         """Everything besides the frame a model's result depends on: the
@@ -51429,6 +51608,9 @@ print("EXR write complete")
         cache key, so a changed setting can never serve an old result."""
         t = self._ups_target_size()
         base = f"{t[0]}x{t[1]}" if t else "?"
+        sq = self._ups_squeeze()
+        if sq > 1.0:
+            base += f"|sq={sq:g}"
         # ...and how the source was read: a different base picture is a
         # different request.
         if self._ups_in_mode != "srgb" or self._ups_src_hdr:
@@ -52658,9 +52840,9 @@ print("EXR write complete")
             ok = []
             try:
                 orig = self._ups_load_preview_frame(idx)
-                size = self._usc_target(orig.width, orig.height,
-                                        self.ups_res_var.get(),
-                                        self.ups_fac_var.get())
+                size = self._ups_model_size(orig.width, orig.height,
+                                            self.ups_res_var.get(),
+                                            self.ups_fac_var.get())
                 self.after(0, lambda: (
                     setattr(self, "_ups_orig", orig),
                     setattr(self, "_ups_preview_idx", idx),
@@ -52830,13 +53012,19 @@ print("EXR write complete")
                 first = self._ups_read_source(
                     os.path.join(folder, sel[0]))[0]
                 self._ups_src_size = first.size
+                sq = self._ups_squeeze()
+                if sq > 1.0:
+                    self.after(0, lambda: self.log(
+                        self.ups_log, f"Anamorphic ×{sq:g}: upscaling "
+                        "desqueezed, writing at storage width.", "dim"))
                 if (self._ups_src_hdr and spec["ext"] != ".exr"
                         and self._ups_in_mode != "pq"):
                     self.after(0, lambda: self.log(
                         self.ups_log, "This source is HDR and the output "
                         "is an SDR movie: values above white are clipped. "
                         "Write EXR to keep them.", "err"))
-                tw, th = self._usc_target(first.width, first.height, res, fac)
+                tw, th = self._ups_model_size(first.width, first.height,
+                                              res, fac)
                 # Paid models first, for the whole range, in chunks: a
                 # video model needs the clip, not one frame at a time.
                 usable = set(models)
@@ -52889,8 +53077,8 @@ print("EXR write complete")
                     dst = os.path.join(out, f"{i + 1:05d}{spec['ext']}")
                     try:
                         orig, gain = self._ups_read_source(src)
-                        tw, th = self._usc_target(orig.width, orig.height,
-                                                  res, fac)
+                        tw, th = self._ups_model_size(orig.width, orig.height,
+                                                      res, fac)
                         by = {}
                         esr = None
                         for m in models:
@@ -52903,16 +53091,22 @@ print("EXR write complete")
                                 esr = self._ups_esrgan(orig, (tw, th))
                             by[m] = esr
                         def to_px(c, gain=gain):
-                            return self._ups_out_px(c, gain, spec, eotf)
+                            # back to storage width LAST, after the
+                            # linearise: a squeeze of linear light
+                            return self._resqueeze(
+                                self._ups_out_px(c, gain, spec, eotf), sq)
                         px = to_px(by[main])
+                        pa = sq if sq > 1.0 else None
                         if multi and spec["ext"] == ".exr":
                             self._usc_write_exr_layers(
                                 dst, px,
                                 {self.UPS_LAYER_NAMES[m]: to_px(by[m])
                                  for m in multi},
-                                half=not spec.get("full", False), aces=aces)
+                                half=not spec.get("full", False), aces=aces,
+                                pixel_aspect=pa)
                         else:
-                            self._usc_write_frame(px, dst, spec, aces=aces)
+                            self._usc_write_frame(px, dst, spec, aces=aces,
+                                                  pixel_aspect=pa)
                         if i % 10 == 0:
                             u = Image.fromarray((np.clip(by[main], 0, 1)
                                                  * 255 + .5).astype(np.uint8))
@@ -53039,6 +53233,8 @@ print("EXR write complete")
     det_freq_canvas = None
     det_seedvr_noise_var = None
     det_flash_accel_var = None
+    det_anam_var = None
+    det_squeeze_var = None
 
     def _tab_detail(self):
         p = self._frame("detail")
@@ -53111,6 +53307,10 @@ print("EXR write complete")
                                    wraplength=370, justify="left")
         self.det_in_lbl.pack(fill="x", pady=(2, 0))
         self.det_in_var.trace_add("write", lambda *_: self._det_in_changed())
+        self.det_anam_var = tk.BooleanVar(value=False)
+        self.det_squeeze_var = tk.StringVar(value="2.0")
+        self._anam_row(c1, self.det_anam_var, self.det_squeeze_var,
+                       self._det_anam_changed)
 
         # ── Detail: downscale + blend sliders ──
         c2 = self._card(lf, "Detail")
@@ -53446,6 +53646,8 @@ print("EXR write complete")
         self._det_folder = d
         self._det_frames = fs
         self._det_resolve_input()
+        self._anam_autodetect(d, fs, self.det_anam_var, self.det_squeeze_var,
+                              self.det_log)
         self._det_res = None
         self._det_src_size = None
         self._det_mem = {}
@@ -53530,10 +53732,27 @@ print("EXR write complete")
         self._det_settings_changed()
         self._det_show_frame(self._det_tl_idx)
 
+    def _det_squeeze(self):
+        """The desqueeze factor for Detail Studio's source, 1.0 when
+        Anamorphic is off."""
+        return self._squeeze_from(self.det_anam_var, self.det_squeeze_var)
+
+    def _det_anam_changed(self):
+        """Anamorphic on/off or a new factor: the source is read at a
+        new width, so the frame on screen and every preview are redone."""
+        if not self._det_folder:
+            return
+        self._det_mem = {}
+        self._det_spec = {}
+        self._det_settings_changed()
+        self._det_show_frame(self._det_tl_idx)
+
     def _det_read(self, path):
-        """(PIL base, gain) for a frame, read the Detail Studio way."""
+        """(PIL base, gain) for a frame, read the Detail Studio way --
+        desqueezed when Anamorphic is on."""
         return self._ups_read_source(path, mode=self._det_in_mode,
-                                     hdr=self._det_src_hdr)
+                                     hdr=self._det_src_hdr,
+                                     squeeze=self._det_squeeze())
 
     @staticmethod
     def _det_read_png(path):
@@ -53576,6 +53795,9 @@ print("EXR write complete")
         base = f"detail|{size[0]}x{size[1]}" if size else "detail|?"
         sig = f"{base}|k={self._det_k()}|in={self._det_in_mode}" + (
             "+hdr" if self._det_src_hdr else "")
+        sq = self._det_squeeze()
+        if sq > 1.0:
+            sig += f"|sq={sq:g}"
         kw = self._det_fal_kw(m)
         if "noise" in kw:
             sig += f"|noise={kw['noise']:g}"
@@ -53636,7 +53858,8 @@ print("EXR write complete")
         import hashlib
         tag = hashlib.sha1(
             f"{os.path.abspath(str(self._det_folder))}|{k}|{self._det_in_mode}"
-            f"|{int(bool(self._det_src_hdr))}".encode("utf-8")).hexdigest()[:16]
+            f"|{int(bool(self._det_src_hdr))}|sq={self._det_squeeze():g}"
+            .encode("utf-8")).hexdigest()[:16]
         d = os.path.join(os.path.expanduser("~"), ".ai_toolbox",
                          "detail_stage", tag)
         os.makedirs(d, exist_ok=True)
@@ -54581,6 +54804,11 @@ print("EXR write complete")
                 first = self._det_read(os.path.join(folder, sel[0]))[0]
                 self._det_src_size = first.size
                 size = first.size
+                sq = self._det_squeeze()
+                if sq > 1.0:
+                    self.after(0, lambda: self.log(
+                        self.det_log, f"Anamorphic ×{sq:g}: working "
+                        "desqueezed, writing at storage width.", "dim"))
                 if (self._det_src_hdr and spec["ext"] != ".exr" and mode != "pq"):
                     self.after(0, lambda: self.log(
                         self.det_log, "This source is HDR and the output "
@@ -54648,16 +54876,20 @@ print("EXR write complete")
                             by[m] = self._det_blend(base, up, k, s, pr, only)
 
                         def to_px(c, gain=gain):
-                            return self._ups_out_px(c, gain, spec, eotf, mode=mode)
+                            return self._resqueeze(self._ups_out_px(
+                                c, gain, spec, eotf, mode=mode), sq)
                         px = to_px(by[main])
+                        pa = sq if sq > 1.0 else None
                         if multi and spec["ext"] == ".exr":
                             self._usc_write_exr_layers(
                                 dst, px,
                                 {self.UPS_LAYER_NAMES[m]: to_px(by[m])
                                  for m in multi},
-                                half=not spec.get("full", False), aces=aces)
+                                half=not spec.get("full", False), aces=aces,
+                                pixel_aspect=pa)
                         else:
-                            self._usc_write_frame(px, dst, spec, aces=aces)
+                            self._usc_write_frame(px, dst, spec, aces=aces,
+                                                  pixel_aspect=pa)
                         if i % 10 == 0:
                             u = Image.fromarray((by[main] * 255 + .5).astype(np.uint8))
                             self.after(0, lambda o=orig, u=u, kk=r0 + i: (
