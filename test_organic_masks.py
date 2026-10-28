@@ -13368,6 +13368,72 @@ class TestTargetPeakTip(unittest.TestCase):
             self.assertIn(peak, tip)
 
 
+class TestMaskButtonsToggle(unittest.TestCase):
+    """Show blown mask / Show crushed mask are toggles: the first click
+    keeps the picture that was on screen, the second puts it back, the
+    button lights while a mask is up, and a new preview or frame ends
+    the mask on its own."""
+
+    def _app(self):
+        from PIL import Image
+        app = App.__new__(App)
+        app.usc_log = None
+        app.log = lambda *a, **k: None
+        app._usc_mask_controls_relevant = lambda: True
+        app._usc_orig_base = Image.new("RGB", (32, 16), (250, 250, 250))
+        app._usc_up_base = Image.new("RGB", (32, 16), (10, 200, 10))
+        app._usc_up_float = "float"
+        app._usc_mode = "wipe"
+        app._usc_view_model = "tonemap"
+        app.usc_ai_thresh = type("V", (), {"get": lambda s: 0.9})()
+        app.usc_ai_shadow_thresh = type("V", (), {"get": lambda s: 0.05})()
+        app._usc_redraw_tiles = lambda: None
+        app._usc_display = lambda: None
+        app.usc_ai_mask_btn = None
+        app.usc_shadow_mask_btn = None
+        return app
+
+    def test_show_then_hide_restores_the_picture(self):
+        app = self._app()
+        before = app._usc_up_base
+        app._usc_ai_toggle_mask("blown")
+        self.assertEqual(app._usc_mask_on, "blown")
+        self.assertIsNot(app._usc_up_base, before)          # the mask is up
+        self.assertEqual(app._usc_mode, "preview")
+        self.assertIsNone(app._usc_view_model)
+        app._usc_ai_toggle_mask("blown")
+        self.assertIsNone(app._usc_mask_on)
+        self.assertIs(app._usc_up_base, before)
+        self.assertEqual(app._usc_up_float, "float")
+        self.assertEqual(app._usc_mode, "wipe")
+        self.assertEqual(app._usc_view_model, "tonemap")
+
+    def test_switching_masks_keeps_the_one_saved_picture(self):
+        app = self._app()
+        before = app._usc_up_base
+        app._usc_ai_toggle_mask("blown")
+        app._usc_ai_toggle_mask("crushed")
+        self.assertEqual(app._usc_mask_on, "crushed")
+        app._usc_ai_toggle_mask("crushed")
+        self.assertIs(app._usc_up_base, before)
+
+    def test_a_mask_that_cannot_be_shown_leaves_nothing_saved(self):
+        app = self._app()
+        app._usc_orig_base = None
+        app._usc_ai_toggle_mask("blown")
+        self.assertIsNone(app._usc_mask_on)
+        self.assertIsNone(app._usc_mask_saved)
+
+    def test_a_new_view_ends_the_mask(self):
+        import inspect
+        for fn in (App._usc_view, App._usc_view_none):
+            self.assertIn("self._usc_mask_on, self._usc_mask_saved = None, None",
+                          inspect.getsource(fn))
+        body = inspect.getsource(App._tab_upscale)
+        self.assertIn('self._usc_ai_toggle_mask("blown")', body)
+        self.assertIn('self._usc_ai_toggle_mask("crushed")', body)
+
+
 class TestSetupRifeLabel(unittest.TestCase):
     """The Setup & Install component row for the RIFE install is
     labelled "RIFE" and names its one remaining consumer, Fix Missing

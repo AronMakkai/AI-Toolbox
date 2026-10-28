@@ -29116,7 +29116,7 @@ print("EXR write complete")
             highlightthickness=1, highlightbackground=BD)
         self.usc_ai_mask_btn.pack(anchor="w", pady=(2, 0))
         self.usc_ai_mask_btn.bind("<Button-1>",
-                                  lambda e: self._usc_ai_show_mask())
+                                  lambda e: self._usc_ai_toggle_mask("blown"))
 
         _pprow = tk.Frame(_hi_tab, bg=S); _pprow.pack(fill="x", pady=(4, 0))
         tk.Label(_pprow, text="Surface", font=FSM, bg=S, fg=G,
@@ -29183,7 +29183,7 @@ print("EXR write complete")
             highlightthickness=1, highlightbackground=BD)
         self.usc_shadow_mask_btn.pack(anchor="w", pady=(2, 0))
         self.usc_shadow_mask_btn.bind(
-            "<Button-1>", lambda e: self._usc_ai_show_shadow_mask())
+            "<Button-1>", lambda e: self._usc_ai_toggle_mask("crushed"))
 
         _s_pprow = tk.Frame(_lo_tab, bg=S); _s_pprow.pack(fill="x", pady=(4, 0))
         tk.Label(_s_pprow, text="Surface", font=FSM, bg=S, fg=G,
@@ -30772,6 +30772,9 @@ print("EXR write complete")
         px = self._usc_model_result(m)
         if px is None:
             return False
+        # a new picture on screen ends any mask that was up
+        self._usc_mask_on, self._usc_mask_saved = None, None
+        self._usc_paint_mask_btns()
         if explicit:
             self._usc_view_pref = m
         self._usc_view_model = m
@@ -30798,6 +30801,8 @@ print("EXR write complete")
 
     def _usc_view_none(self):
         """Input only: nothing previewed on this frame yet."""
+        self._usc_mask_on, self._usc_mask_saved = None, None
+        self._usc_paint_mask_btns()
         self._usc_view_model = None
         self._usc_view_label = "Expanded"
         self._usc_up_float = None
@@ -31675,6 +31680,64 @@ print("EXR write complete")
             shadow_thresh=self._usc_shadow_thresh(),
             shadow_amount=self._usc_shadow_amount())
 
+    # ── the mask buttons are toggles ──
+    # Showing a mask used to overwrite the picture on screen (the
+    # model's result or the input) with no way back short of another
+    # Preview. Now the first click keeps what was there, the second
+    # click puts it back, and the button lights while a mask is up.
+    _usc_mask_on = None            # None / "blown" / "crushed"
+    _usc_mask_saved = None         # (up_base, up_float, mode, view_model)
+
+    def _usc_ai_toggle_mask(self, kind):
+        if self._usc_mask_on == kind:
+            self._usc_ai_hide_mask()
+            return
+        if self._usc_mask_on is None:
+            # remember the picture under the mask, once
+            self._usc_mask_saved = (self._usc_up_base, self._usc_up_float,
+                                    self._usc_mode, self._usc_view_model)
+        shown = (self._usc_ai_show_mask() if kind == "blown"
+                 else self._usc_ai_show_shadow_mask())
+        if shown is False:
+            if self._usc_mask_on is None:
+                self._usc_mask_saved = None
+            return
+        self._usc_mask_on = kind
+        self._usc_paint_mask_btns()
+
+    def _usc_ai_hide_mask(self):
+        """Put back whatever the mask replaced."""
+        saved = self._usc_mask_saved
+        self._usc_mask_on = None
+        self._usc_mask_saved = None
+        if saved is not None:
+            (self._usc_up_base, self._usc_up_float,
+             self._usc_mode, self._usc_view_model) = saved
+        self._usc_paint_mask_btns()
+        try:
+            self._usc_redraw_tiles()
+            self._usc_display()
+        except Exception:
+            pass
+        self.log(self.usc_log, "Mask off.", "dim")
+
+    def _usc_paint_mask_btns(self):
+        for kind, name in (("blown", "usc_ai_mask_btn"),
+                           ("crushed", "usc_shadow_mask_btn")):
+            b = getattr(self, name, None)
+            if b is None:
+                continue
+            on = self._usc_mask_on == kind
+            try:
+                b.configure(bg="#2A0A0A" if on else "#1A1A1A",
+                            fg="#CC4444" if on else G,
+                            text=("Hide blown mask" if on and kind == "blown"
+                                  else "Show blown mask" if kind == "blown"
+                                  else "Hide crushed mask" if on
+                                  else "Show crushed mask"))
+            except Exception:
+                pass
+
     def _usc_ai_show_mask(self):
         """Put the blown mask in the viewer.
 
@@ -31685,11 +31748,11 @@ print("EXR write complete")
         from PIL import Image
         import numpy as np
         if not self._usc_mask_controls_relevant():
-            return
+            return False
         base = self._usc_orig_base
         if base is None:
             self.log(self.usc_log, "Preview a frame first.", "err")
-            return
+            return False
         code = np.asarray(base, np.float32) / 255.0
         m8 = self._hdr_ai_mask_frame(code, float(self.usc_ai_thresh.get()))
         pct = 100.0 * float((m8 > 127).mean())
@@ -31702,7 +31765,9 @@ print("EXR write complete")
         self._usc_redraw_tiles()
         self._usc_display()
         self.log(self.usc_log,
-                 f"Blown mask: {pct:.2f}% of pixels", "hi")
+                 f"Blown mask: {pct:.2f}% of pixels \u2014 click again to "
+                 "put the picture back", "hi")
+        return True
 
     def _usc_ai_show_shadow_mask(self):
         """The mirror of _usc_ai_show_mask, for the crushed-shadow
@@ -31711,11 +31776,11 @@ print("EXR write complete")
         from PIL import Image
         import numpy as np
         if not self._usc_mask_controls_relevant():
-            return
+            return False
         base = self._usc_orig_base
         if base is None:
             self.log(self.usc_log, "Preview a frame first.", "err")
-            return
+            return False
         code = np.asarray(base, np.float32) / 255.0
         m = self._hdr_crushed_mask(code, float(self.usc_ai_shadow_thresh.get()))
         m8 = (np.clip(m, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
@@ -31735,7 +31800,9 @@ print("EXR write complete")
         self._usc_redraw_tiles()
         self._usc_display()
         self.log(self.usc_log,
-                 f"Crushed-shadow mask: {pct:.2f}% of pixels", "hi")
+                 f"Crushed-shadow mask: {pct:.2f}% of pixels \u2014 click "
+                 "again to put the picture back", "hi")
+        return True
 
     def _usc_ai_shadow_preset_changed(self):
         """The Shadows-tab mirror of _usc_ai_preset_changed."""
