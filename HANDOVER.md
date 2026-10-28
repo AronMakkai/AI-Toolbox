@@ -161,6 +161,20 @@ prefixes. Use this table before searching.
 - Output while a batch runs: `_adw_versioned_output_dir` / `_adw_peek_next_version_dir` defer to `_batch_output_dir` → one version folder per module per batch with a subfolder per shot (`ADW/UPSCALE_v03/sh010`). The version folder is itself a batch root for the next module. `_adw_propagate_output` and `_batch_reveal` only fire on the last shot; `_slow_model_notice` once per batch.
 - `_batch_confirm` (None → messagebox) is injected by tests. Tests: `TestBatchShots`.
 
+## Colourspaces — one list, every module (28 Oct 2026)
+- `CS_KEYS` linear/srgb/rec709/pq/acescg/aces; `CS_NAMES` ("Scene-linear Rec.709", "Display sRGB", "Display Rec.709", "Display PQ / Rec.2020", "Working ACEScg (AP1)", "Archive ACES2065-1 (AP0)"); `CS_IN_CHOICES` = Auto + names, `CS_OUT_CHOICES` = Same as input + names; `CS_LEGACY` maps every old dropdown string; `_cs_key(choice)`; `CS_IN_TIP` / `CS_OUT_TIP` are the ⓘ texts; `_cs_combo` builds a dropdown.
+- Hub is scene-linear Rec.709 (1.0 = diffuse white): `_cs_to_lin709(a, key)`, `_cs_from_lin709(lin, key)`, `_cs_convert(a, src, dst)`. PQ = ST.2084 with Rec.2020 primaries, 1.0 linear = `HDR_SDR_WHITE` (100 nits). ACEScg via `_M_709_TO_AP1`. `CS_NUMPY_SRC` is the same maths as plain numpy for venv scripts (SAM EXR merge); a test checks parity.
+- `_cs_out_key(choice, in_key, movie)` — Same as input = the input's key; a movie only holds a display space (rec709 fallback). `_cs_sidecar(key)` → (colorspace, primaries) for `_adw_write_colorspace`; `_cs_tagged_key(folder)` reads it back (primaries now also "acescg"/"pq"/"srgb"/"rec709"). EXR writers take `tag=` (chromaticities for aces / acescg, `ACES_AP1_CHROMA`).
+- Upscale / Detail: `UPS_IN_CHOICES = CS_IN_CHOICES`; `_resolve_input_colour` resolves via `_cs_key` + tagged key; modes now include rec709 / acescg; `_ups_eotf(mode, explicit)` — sRGB curve only when Display sRGB was chosen by hand; `_ups_out_px(..., out=key)`; `ups_cs_out_var` / `det_cs_out_var` + "Writes →" labels (`_ups_cs_out_key`, `_det_cs_out_key`, `_cs_out_note`).
+- Expansion: `usc_cs_out_var` (default Archive ACES2065-1) replaces the EXR colour combo; `_usc_cs_out_key(exr)` — Same as input on an expanding run = linear EXR / PQ movie; the HDR write converts `_lin` with `_cs_from_lin709`; `_usc_exr_aces()` kept.
+- Lens: `LENS_IN_CHOICES = CS_IN_CHOICES`; `_organic_source_cs` holds rec709 / acescg on top of the old flags; `_organic_in_key`, `_organic_cs_out_key(fmt)`, `organic_cs_out_var`; `_organic_write_frame(..., cs=)`; `_organic_load_linear(..., cs=)`.
+- MOV→EXR: `_m2e_keys(csp, out, transfer)`, `_m2e_plan(in, out)` → (zscale vf or "", mid_key); everything from mid_key to out_key is `_cs_convert` in the app (one loop replaced the linearise + ACES loops); `_m2e_src_transfer` probed on pick.
+- Paint: `sm_cs_out_var`; `_smudge_natural_out`, `_smudge_cs_out_key`, `_smudge_aces_out(lin, dst, g=)` rewrites the ffmpeg EXR in the output space; a Run with a different Output re-encodes copied frames too (`_reencode`).
+- Fix Missing Frames: `ff_cs_var` is now Input colour (Auto…), `ff_cs_out_var`; `_ff_target_convention` returns (ext, CS key); `_ff_write_repaired_frame` takes the key; the copy step converts EXRs when Output differs.
+- SAM 3: `sam_cs_out_var`; the EXR merge script gets `cs_in` / `cs_out` and converts RGB with `CS_NUMPY_SRC`; the SAM runner's `float_rgb_to_display_u8` knows rec709 / acescg / pq-2020.
+- ADW modules (AI-Toolbox only): one shared row `_adw_cs_row` bound to `adw_cs_in_var` / `adw_cs_out_var`; Input drives `adw_source_encoded_var` and `_adw_gamma_encode` converts aces/acescg/pq to 709 linear first; `_adw_cs_finish(out_dir, log)` converts written EXRs after the render (called from the four `*_after_run_sendto` / `_vace_apply_done`).
+- Tests: `TestColourspaceToolkit`; the old name-based tests were rewritten.
+
 ## Colour handling
 
 - Every studio has an "Input colour" choice: Auto, display-encoded
