@@ -183,6 +183,15 @@ DMG_STAGE="$BUILD/dmg_stage"
 mkdir -p "$DMG_STAGE"
 cp -R "$APP" "$DMG_STAGE/"
 ln -s /Applications "$DMG_STAGE/Applications"
+# What a colleague needs beside the app: the install notes (with the
+# xattr / chmod commands that let an unsigned app run) and a
+# double-clickable script that runs them. Both live in dmg/ in the
+# repo so they are versioned with the build script.
+if [ -d "$DIR/dmg" ]; then
+    cp "$DIR/dmg/"* "$DMG_STAGE/"
+    chmod +x "$DMG_STAGE/"*.command 2>/dev/null || true
+    echo "Install notes and Fix Permissions.command included"
+fi
 
 rm -f "$DIR/$DMG_NAME"
 hdiutil create -volname "$APP_NAME" -srcfolder "$DMG_STAGE" \
@@ -211,6 +220,7 @@ fi
 
 echo ""
 echo "Done — $DMG_NAME"
-echo "    Open DMG → drag Studio-Toolbox to Applications → launch"
+echo "    Open DMG → drag Studio-Toolbox to Applications →"
+echo "    double-click 'Fix Permissions.command' (or follow READ ME FIRST) → launch"
 echo ""
 open "$DIR"

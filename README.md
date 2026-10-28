@@ -57,4 +57,13 @@ macOS .dmg:
 bash build_dmg.sh
 ```
 
+That produces `Studio-Toolbox-Installer.dmg` with the app (icon from
+`AppIcon.icns`), `READ ME FIRST.txt` and `Fix Permissions.command` from
+`dmg/` — the notes and the one-click fix a colleague needs to run an
+unsigned app (`xattr -cr`, `chmod +x`). Build it on a Mac: `hdiutil` and
+`codesign` are macOS-only.
+
+```
+```
+
 Windows launcher: `Studio-Toolbox.bat`

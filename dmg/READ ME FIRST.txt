@@ -1,0 +1,57 @@
+STUDIO TOOLBOX — INSTALL (macOS)
+=================================
+
+1. INSTALL THE APP
+   Drag "Studio-Toolbox" onto the "Applications" folder in this window.
+
+2. LET macOS RUN IT (one time)
+   The app is not signed with a paid Apple Developer ID, so macOS will
+   say it "cannot be opened because the developer cannot be verified"
+   or that it "is damaged". It is neither. Either:
+
+   a) Double-click "Fix Permissions.command" in this window
+      (it runs the command in b for you, then opens the app), or
+
+   b) Open Terminal (Spotlight -> "Terminal") and paste:
+
+        xattr -cr /Applications/Studio-Toolbox.app
+        chmod +x /Applications/Studio-Toolbox.app/Contents/MacOS/Studio-Toolbox
+        open /Applications/Studio-Toolbox.app
+
+   If macOS still refuses: right-click the app -> Open -> "Open",
+   or System Settings -> Privacy & Security -> scroll to the
+   "Studio-Toolbox was blocked" line -> "Open Anyway".
+
+3. PYTHON (one time)
+   The app runs on a Python that already has its libraries. If you
+   see "Python not found" when you launch it, install Miniconda from
+   https://docs.conda.io/en/latest/miniconda.html (Apple Silicon or
+   Intel to match your Mac), then in Terminal:
+
+        conda create -y -n studio python=3.13
+        conda activate studio
+        pip install torch opencv-python numpy pillow OpenEXR
+        open /Applications/Studio-Toolbox.app
+
+   The app looks in ~/miniconda3 first, so after this it will start
+   from the Dock without Terminal.
+
+4. FIRST RUN — SETUP TAB
+   Open the "Setup & Install" tab and press the install buttons for
+   the parts you need. They download into ~/RifeApp:
+      ffmpeg        - needed by everything
+      Real-ESRGAN   - local upscaler (Upscale Studio, Detail Studio)
+      RIFE          - Fix Missing Frames
+      SAM 3         - segmentation (asks for a Hugging Face token)
+   For the paid cloud models (SeedVR2, FlashVSR, Topaz, VACE) enter a
+   fal.ai key on the same tab. Everything local works without one.
+
+5. WHERE THINGS GO
+   Renders are written next to your footage in an "ADW" folder,
+   one versioned sub-folder per module (UPSCALE_v01, DETAIL_v01, ...).
+
+UPDATING
+   Replace the app in /Applications with the new one and repeat
+   step 2. Your settings and the installs in ~/RifeApp are kept.
+
+Questions: Aron Makkai
