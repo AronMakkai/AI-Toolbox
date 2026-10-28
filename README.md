@@ -10,6 +10,7 @@ AI-Toolbox is a comprehensive VFX processing suite featuring:
 - **Expansion Studio** — SDR-to-HDR tone mapping with AI upsampling
 - **Upscale Studio** — Video upscaling (SeedVR2, FlashVSR, ESRGAN)
 - **Detail Studio** — Texture at the input resolution: downscale, upscale back, keep only the invented detail
+- **Colourspaces** — Every module has the same Input colour / Output colour dropdowns (Auto / Same as input, Scene-linear Rec.709, Display sRGB, Display Rec.709, Display PQ / Rec.2020, Working ACEScg, Archive ACES2065-1) with a ⓘ explaining each
 - **Batch** — Tick *Batch: all shots in this folder* in Upscale, Detail, Expansion or MOV→EXR and Run applies the tab's settings to every shot under the picked folder, one version folder with a subfolder per shot
 - **Paint Studio** — Per-frame hand painting and smudging
 - Plus: MOV ↔ EXR conversion, temporal smoothing, segmentation, and more

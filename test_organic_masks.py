@@ -2373,21 +2373,26 @@ class TestLensStudioSaysWhatItWrites(unittest.TestCase):
 
     def test_exr_is_scene_linear_709(self):
         self.assertEqual(self._app()._organic_out_space("EXR 16-bit half"),
-                         "Scene-linear, Rec.709 primaries")
+                         "Scene-linear Rec.709")
 
     def test_aces_in_is_aces_out_for_exr_only(self):
         app = self._app(enc=False, aces=True)
         self.assertIn("ACES2065-1", app._organic_out_space("EXR 32-bit float"))
-        self.assertIn("sRGB", app._organic_out_space("PNG 16-bit"))
+        self.assertIn("Display", app._organic_out_space("PNG 16-bit"))
 
-    def test_png_is_display_srgb(self):
+    def test_png_is_display(self):
+        # a PNG cannot hold linear light: Same as input becomes Rec.709
         self.assertEqual(self._app()._organic_out_space("PNG 8-bit"),
-                         "Display-encoded sRGB (PNG)")
+                         "Display Rec.709 (PNG)")
+        app = self._app(enc=True)
+        app._organic_source_cs = "srgb"
+        self.assertEqual(app._organic_out_space("PNG 8-bit"),
+                         "Display sRGB (PNG)")
 
     def test_the_label_and_the_log_exist(self):
         import inspect
         self.assertIn("self.organic_out_lbl = ", inspect.getsource(App._tab_organic))
-        self.assertIn("_organic_out_space(f)", inspect.getsource(App._organic_run_worker))
+        self.assertIn("self._cs_name(k)", inspect.getsource(App._organic_run_worker))
         app = self._app()
         class L:
             def __init__(s): s.kw = {}
@@ -2395,7 +2400,138 @@ class TestLensStudioSaysWhatItWrites(unittest.TestCase):
         app.organic_out_lbl = L()
         app._organic_out_refresh_label()
         self.assertEqual(app.organic_out_lbl.kw["text"],
-                         "Writes \u2192 Scene-linear, Rec.709 primaries")
+                         "Writes \u2192 Scene-linear Rec.709")
+
+
+class TestColourspaceToolkit(unittest.TestCase):
+    """One list of colourspaces for every module's Input colour and
+    Output colour, one set of conversions through scene-linear Rec.709,
+    and one pair of \u24d8 texts."""
+
+    def test_the_names_and_their_prefixes(self):
+        self.assertEqual(App.CS_IN_CHOICES[0], "Auto")
+        self.assertEqual(App.CS_OUT_CHOICES[0], "Same as input")
+        self.assertEqual(App.CS_IN_CHOICES[1:], App.CS_OUT_CHOICES[1:])
+        names = App.CS_IN_CHOICES[1:]
+        self.assertEqual(sum(n.startswith("Display ") for n in names), 3)
+        self.assertIn("Working ACEScg (AP1)", names)
+        self.assertIn("Archive ACES2065-1 (AP0)", names)
+        self.assertIn("Scene-linear Rec.709", names)
+        for n in names:
+            self.assertIn(App._cs_key(n), App.CS_KEYS)
+        self.assertEqual(App._cs_key("Auto"), "auto")
+        self.assertEqual(App._cs_key("Same as input", "same"), "same")
+
+    def test_every_space_round_trips_through_linear_709(self):
+        x = np.array([[[0.18, 0.5, 1.0], [0.0, 2.0, 8.0]]], np.float32)
+        for k in App.CS_KEYS:
+            r = App._cs_to_lin709(App._cs_from_lin709(x, k), k)
+            want = np.clip(x, 0, 1) if k in ("srgb", "rec709") else x
+            self.assertLess(float(np.abs(r - want).max()), 1e-3, k)
+        # PQ keeps the highlights, in absolute nits: 1.0 linear = 100
+        self.assertAlmostEqual(
+            float(App._cs_from_lin709(np.full((1, 1, 3), 10.0, np.float32),
+                                      "pq")[0, 0, 0]), 0.7518, places=3)
+
+    def test_display_spaces_differ_only_in_the_curve(self):
+        c = np.full((1, 1, 3), 0.5, np.float32)
+        self.assertAlmostEqual(float(App._cs_to_lin709(c, "srgb")[0, 0, 0]),
+                               0.214, places=3)
+        self.assertAlmostEqual(float(App._cs_to_lin709(c, "rec709")[0, 0, 0]),
+                               0.189, places=3)
+
+    def test_acescg_and_ap0_are_different_primaries(self):
+        x = np.array([[[1.0, 0.0, 0.0]]], np.float32)
+        cg = App._cs_from_lin709(x, "acescg")
+        ap0 = App._cs_from_lin709(x, "aces")
+        self.assertGreater(float(np.abs(cg - ap0).max()), 0.05)
+        self.assertTrue(np.allclose(App._cs_convert(cg, "acescg", "aces"), ap0,
+                                    atol=1e-5))
+
+    def test_output_key_rules(self):
+        self.assertEqual(App._cs_out_key("Same as input", "aces"), "aces")
+        self.assertEqual(App._cs_out_key("Display sRGB", "aces"), "srgb")
+        # a movie can only hold a display space
+        self.assertEqual(App._cs_out_key("Same as input", "linear", movie=True),
+                         "rec709")
+        self.assertEqual(App._cs_out_key("Working ACEScg (AP1)", "srgb",
+                                         movie=True), "rec709")
+        self.assertEqual(App._cs_out_key("Display PQ / Rec.2020", "srgb",
+                                         movie=True), "pq")
+
+    def test_the_sidecar_round_trips_every_key(self):
+        import tempfile
+        for k in App.CS_KEYS:
+            d = tempfile.mkdtemp()
+            App._adw_write_colorspace(d, *App._cs_sidecar(k))
+            self.assertEqual(App._cs_tagged_key(d), k, k)
+        d = tempfile.mkdtemp()
+        App._adw_write_colorspace(d, "scene-linear")
+        self.assertEqual(App._cs_tagged_key(d), "linear")
+        self.assertIsNone(App._cs_tagged_key(tempfile.mkdtemp()))
+
+    def test_the_embedded_numpy_copy_matches(self):
+        ns = {}
+        exec(App.CS_NUMPY_SRC, ns)
+        x = (np.random.default_rng(5).random((3, 4, 3)) * 3).astype(np.float32)
+        for k in App.CS_KEYS:
+            self.assertLess(float(np.abs(ns["cs_from_lin709"](x, k)
+                                         - App._cs_from_lin709(x, k)).max()),
+                            1e-5, k)
+            self.assertLess(float(np.abs(ns["cs_to_lin709"](x, k)
+                                         - App._cs_to_lin709(x, k)).max()),
+                            1e-5, k)
+
+    def test_both_tips_explain_every_space(self):
+        for tip in (App.CS_IN_TIP, App.CS_OUT_TIP):
+            for n in App.CS_IN_CHOICES[1:]:
+                self.assertIn(n, tip)
+
+    def test_every_module_offers_both_dropdowns(self):
+        import inspect
+        for tab, in_src, out_src in (
+                ("_tab_upstudio", "self.UPS_IN_CHOICES", 'self.ups_cs_out_var = self._cs_combo'),
+                ("_tab_detail", "self.UPS_IN_CHOICES", 'self.det_cs_out_var = self._cs_combo'),
+                ("_tab_upscale", "self.UPS_IN_CHOICES", 'self.usc_cs_out_var = self._cs_combo'),
+                ("_tab_organic", "self.LENS_IN_CHOICES", "self.organic_cs_out_var = "),
+                ("_tab_exr", "self.CS_IN_CHOICES", "list(self.CS_OUT_CHOICES)"),
+                ("_tab_smudge", "self.UPS_IN_CHOICES", 'self.sm_cs_out_var = self._cs_combo'),
+                ("_tab_fixframes", 'self._cs_combo(c_in, "Input colour"', 'self.ff_cs_out_var = self._cs_combo'),
+                ("_tab_sam", "self.UPS_IN_CHOICES", 'self.sam_cs_out_var = self._cs_combo')):
+            fn = getattr(App, tab, None)
+            if fn is None:
+                continue
+            body = inspect.getsource(fn)
+            with self.subTest(tab=tab):
+                self.assertIn(in_src, body)
+                self.assertIn(out_src, body)
+        for tab in ("_tab_rife", "_tab_interp", "_tab_curve", "_tab_area"):
+            fn = getattr(App, tab, None)
+            if fn is None:
+                continue
+            with self.subTest(tab=tab):
+                self.assertIn("self._adw_cs_row(c", inspect.getsource(fn))
+
+    def test_the_adw_modules_convert_after_the_render(self):
+        import tempfile
+        d = tempfile.mkdtemp()
+        lin = np.full((4, 4, 3), 0.5, np.float32)
+        App._organic_write_exr(os.path.join(d, "a.exr"), lin, half=False)
+        app = App.__new__(App)
+        class V:
+            def __init__(s, v): s.v = v
+            def get(s): return s.v
+        app.adw_cs_in_var = V("Scene-linear Rec.709")
+        app.adw_cs_out_var = V("Archive ACES2065-1 (AP0)")
+        app.log = lambda *a, **k: None
+        self.assertEqual(app._adw_cs_finish(d), 1)
+        got = app._ff_read_frame(os.path.join(d, "a.exr"))
+        self.assertTrue(np.allclose(got, App._lin709_to_aces(lin), atol=1e-3))
+        self.assertEqual(App._cs_tagged_key(d), "aces")
+        # Same as input: nothing touched, folder tagged
+        app.adw_cs_out_var = V("Same as input")
+        self.assertEqual(app._adw_cs_finish(d), 0)
+        self.assertEqual(App._cs_tagged_key(d), "linear")
 
 
 class TestHashNoise(unittest.TestCase):
@@ -4808,7 +4944,7 @@ class TestFixFramesMissingSlots(unittest.TestCase):
         import inspect
         body = inspect.getsource(App._ff_fix_worker)
         i = body.index("Copying source")
-        self.assertIn("if i in missing:", body[i:i + 400])
+        self.assertIn("if i in missing:", body[i:i + 1200])
 
     def test_the_clip_builder_is_given_a_stand_in(self):
         """It reads real files, so an absent frame would abort the
@@ -8042,7 +8178,7 @@ class TestGenerativeWiring(unittest.TestCase):
         signals."""
         body = self._src(App._usc_run)
         i = body.index("_usc_ai_apply(_lin")
-        self.assertLess(i, body.index("_hdr_pq_encode", i))
+        self.assertLess(i, body.index("_cs_from_lin709(", i))
 
     def test_both_output_families_get_it(self):
         """EXR and the display deliveries -- one wired and the other
@@ -9307,9 +9443,10 @@ class TestColorspaceHandoff(unittest.TestCase):
     def test_the_expanded_output_marks_itself(self):
         import inspect
         body = inspect.getsource(App._usc_run)
-        self.assertIn("_adw_write_colorspace", body)
-        self.assertIn('"scene-linear"', body)
-        self.assertIn('"display"', body)
+        self.assertIn("_adw_write_colorspace(out, _cs, primaries=_prim)", body)
+        self.assertEqual(App._cs_sidecar("linear"), ("scene-linear", None))
+        self.assertEqual(App._cs_sidecar("srgb"), ("display", "srgb"))
+        self.assertEqual(App._cs_sidecar("aces"), ("scene-linear", "aces2065-1"))
 
     # ── the over-range fallback ──
     def test_a_single_hot_pixel_does_not_flip_a_sequence(self):
@@ -9655,8 +9792,8 @@ class TestOrganicOutputFormat(unittest.TestCase):
         """So loading it into another module does not depend on a
         global default being right."""
         body = self._src(App._organic_run_worker)
-        self.assertIn("_adw_write_colorspace", body)
-        self.assertIn('"scene-linear"', body)
+        self.assertIn("_adw_write_colorspace(out_dir, *self._cs_sidecar(_out_key))",
+                      body)
 
     def test_the_control_is_built(self):
         body = self._src(App._tab_organic)
@@ -10495,7 +10632,7 @@ class TestRenderColourspaceSnapshot(unittest.TestCase):
         body = self._src(App._organic_run_worker)
         # encoded AND the ACES decision, both snapshotted
         self.assertIn("_organic_load_linear(src, encoded=_enc,", body)
-        self.assertIn("aces=_aces)", body)
+        self.assertIn("aces=_aces, cs=_cs_in)", body)
         self.assertNotIn("_organic_load_linear(src)", body)
 
     def test_an_undecided_sequence_still_gets_a_value(self):
@@ -11662,7 +11799,7 @@ class TestFixFramesRepairedFrameFormat(unittest.TestCase):
         body = self._src(App._ff_fix_worker)
         self.assertIn("_ff_target_convention(", body)
         fallback_body = self._src(App._ff_target_convention)
-        self.assertIn("ff_cs_var", fallback_body)
+        self.assertIn("self._ff_source_encoded()", fallback_body)
 
 
 class TestFixFramesRepairMatchesNeighbours(unittest.TestCase):
@@ -11765,7 +11902,7 @@ class TestFixFramesRepairMatchesNeighbours(unittest.TestCase):
         ext, is_linear = app._ff_target_convention(
             self.dir, names, 3, untrusted)
         self.assertEqual(ext, ".exr")
-        self.assertTrue(is_linear)
+        self.assertEqual(is_linear, "linear")
 
     def test_the_sidecar_outranks_over_range_detection(self):
         """A sidecar this app wrote is stronger evidence than inferring
@@ -11777,7 +11914,7 @@ class TestFixFramesRepairMatchesNeighbours(unittest.TestCase):
         app._adw_write_colorspace(self.dir, "display")
         _ext, is_linear = app._ff_target_convention(
             self.dir, names, 2, set())
-        self.assertFalse(is_linear)
+        self.assertEqual(is_linear, "srgb")
 
     def test_falls_back_to_the_manual_toggle_with_no_real_neighbour(self):
         """The only case where the setting is trusted: there is
@@ -11786,7 +11923,7 @@ class TestFixFramesRepairMatchesNeighbours(unittest.TestCase):
         app = self._Stub(cs="Scene-linear")
         _ext, is_linear = app._ff_target_convention(
             self.dir, names, 1, avoid={0, 1, 2})
-        self.assertTrue(is_linear)
+        self.assertEqual(is_linear, "linear")
 
     def test_a_non_exr_neighbour_means_no_curve_regardless_of_the_toggle(self):
         names = [f"f{i}.png" for i in range(3)]
@@ -12381,8 +12518,7 @@ class TestSamInputColour(unittest.TestCase):
         body = inspect.getsource(App._tab_sam)
         self.assertIn('self._combo(c, "Input colour", list(self.UPS_IN_CHOICES)', body)
         self.assertIn("self.sam_in_lbl", body)
-        self.assertEqual(App.UPS_IN_CHOICES,
-                         ("Auto", "sRGB / display", "Linear", "ACES2065-1", "HDR PQ"))
+        self.assertIs(App.UPS_IN_CHOICES, App.CS_IN_CHOICES)
 
     def test_the_choice_reaches_viewer_preview_and_run(self):
         import inspect
@@ -13310,9 +13446,9 @@ class TestMovToExrWithoutZscale(unittest.TestCase):
         app = App.__new__(App)
         App._ff_filters_cache = set()                        # no zscale
         m = app._m2e_frame_values(self.clip, "Rec.709", "Scene-linear", "16-bit half", at=0.5)
-        self.assertIn("scene-linear", m["desc"])
+        self.assertIn("Scene-linear", m["desc"])
         self.assertFalse(m["display"])
-        d = app._m2e_frame_values(self.clip, "None \u2014 passthrough", "Scene-linear",
+        d = app._m2e_frame_values(self.clip, "None \u2014 passthrough", App.CS_SAME,
                                   "16-bit half", at=0.5)
         self.assertTrue(d["display"])
         # linearised mid-tones sit below their code values
@@ -13324,7 +13460,7 @@ class TestMovToExrWithoutZscale(unittest.TestCase):
         import inspect
         body = inspect.getsource(App._erun)
         self.assertIn('lin_in_app = bool(vf) and not self._ff_has_filter("zscale")', body)
-        self.assertIn("self._m2e_linearise(self._ff_read_frame(_p), vf)", body)
+        self.assertIn("self._cs_convert(self._ff_read_frame(_p),", body)
         self.assertIn("zscale refused this clip", body)
         pv = inspect.getsource(App._m2e_frame_values)
         self.assertIn("in_app = True", pv)                 # the refused-clip retry
@@ -16124,57 +16260,52 @@ class TestMovToExrColorspaceSidecar(unittest.TestCase):
         self.path = "/mnt/user-data/uploads/cin_003_070_10650__2__EXR_00259.exr"
 
     # ── MOV -> EXR now writes the sidecar ──
-    def test_8bit_mode_tag_depends_on_output_choice(self):
-        """8-bit mode still skips Colour Management's zscale entirely,
-        but its tag (and whether it gamma-2.2-decodes at all) now
-        depends on want_linear -- i.e. the Output dropdown -- not an
+    def test_both_paths_tag_what_the_output_colour_says(self):
+        """8-bit mode still skips zscale entirely; both it and the
+        float path tag the folder from the Output colour key, not an
         unconditional scene-linear."""
         body = self._src(App._erun)
+        self.assertEqual(
+            body.count("self._adw_write_colorspace(out, *self._cs_sidecar(out_key))"),
+            2)
+        self.assertEqual(App._cs_sidecar("linear"), ("scene-linear", None))
+        self.assertEqual(App._cs_sidecar("rec709"), ("display", "rec709"))
+        self.assertEqual(App._cs_sidecar("pq"), ("display", "pq"))
+
+    def test_the_output_colour_decides_the_values(self):
+        """Same as input (or a display choice) keeps the video's own
+        code: no filter, no conversion. A linear choice linearises; a
+        different display choice re-encodes in the app."""
+        self.assertEqual(App._m2e_keys("Auto", App.CS_SAME),
+                         ("rec709", "rec709"))
+        self.assertEqual(App._m2e_plan("rec709", "rec709"), ("", "rec709"))
+        self.assertEqual(App._m2e_plan("rec709", "linear"),
+                         ("zscale=tin=709:t=linear:rangein=limited:range=full",
+                          "linear"))
+        self.assertEqual(App._m2e_plan("srgb", "aces"),
+                         ("zscale=tin=iec61966-2-1:t=linear:range=full",
+                          "linear"))
+        self.assertEqual(App._m2e_plan("rec709", "srgb"), ("", "rec709"))
+        self.assertEqual(App._m2e_plan("pq", "linear"), ("", "pq"))
+
+    def test_8bit_path_converts_in_the_app(self):
+        body = self._src(App._erun)
         i = body.index("8-bit mode: re-baking")
-        j = body.index(
-            'self._adw_write_colorspace(\n                    out, "scene-linear" if want_linear else "display",', i)
-        self.assertGreater(j, i)
-        self.assertLess(j - i, 4800)   # the ACES branch sits in between
+        seg = body[i:i + 3000]
+        self.assertIn("lin = self._cs_convert(img, in_key, out_key)", seg)
 
-    def test_the_32_16bit_path_tags_based_on_the_actual_filter(self):
+    def test_the_float_path_converts_whatever_ffmpeg_left(self):
         body = self._src(App._erun)
-        i = body.rindex('self._adw_write_colorspace(')
-        seg = body[max(0, i - 50):i + 100]
-        self.assertIn('"scene-linear" if vf else "display"', seg)
-
-    def test_want_linear_reflects_the_output_dropdown(self):
-        """Scene-linear is still the default when the widget is
-        missing (headless stubs) or reads the Scene-linear option;
-        either display-encoded choice flips it off."""
-        body = self._src(App._erun)
-        i = body.index("want_linear = (")
-        seg = body[i:i + 200]
-        self.assertIn('out_enc is None or', seg)
-        self.assertIn('startswith("Scene-linear")', seg)
-
-    def test_8bit_path_skips_gamma_when_output_is_display_encoded(self):
-        body = self._src(App._erun)
-        i = body.index("if want_linear:\n                        lin = _np8.power")
-        seg = body[i:i + 250]
-        self.assertIn("else:\n                        lin = img", seg)
-
-    def test_32_16bit_path_forces_empty_vf_when_output_is_display_encoded(self):
-        """Input Space must not linearise when Output asks to stay
-        display-encoded -- vf stays empty and Input Space is ignored
-        (logged, not silently dropped)."""
-        body = self._src(App._erun)
-        i = body.index('if not want_linear:\n                # Output stays display-encoded')
-        seg = body[i:i + 900]
-        self.assertIn('vf = ""', seg)
-        self.assertIn("Input Space ignored", seg)
+        self.assertIn("if code == 0 and mid_key != out_key:", body)
+        self.assertIn("self._cs_convert(self._ff_read_frame(_p),", body)
+        self.assertIn("tag=out_key)", body)
 
     def test_output_dropdown_widget_exists_with_expected_options(self):
         body = self._src(App._tab_exr)
         i = body.index('self.exr_out_var = self._combo(')
         seg = body[i:i + 500]
-        self.assertIn("Scene-linear", seg)
-        self.assertIn("sRGB", seg)
-        self.assertIn("Rec.709", seg)
+        self.assertIn("CS_OUT_CHOICES", seg)
+        self.assertIn('default=self.CS_NAMES["linear"]', seg)
 
     # ── the shared _pv_frame consults it, but ONLY when present ──
     def test_pv_frame_checks_the_sidecar_before_the_ffmpeg_fallback(self):
@@ -18580,7 +18711,10 @@ class TestUpscaleStudioInputColour(unittest.TestCase):
         for n in ("_ups_shoulder", "_ups_gain_from_base", "_ups_read16",
                   "_organic_linear_to_display", "_srgb_to_linear",
                   "_linear_to_srgb", "_hdr_pq_decode", "_hdr_pq_encode",
-                  "_hdr_eotf_1886", "_squeeze_from", "_desqueeze"):
+                  "_hdr_eotf_1886", "_squeeze_from", "_desqueeze",
+                  "_scene_from_raw", "_cs_to_lin709", "_cs_from_lin709",
+                  "_aces_to_lin709", "_acescg_to_lin709", "_bt2020_to_709",
+                  "_lin709_to_aces", "_lin709_to_acescg"):
             setattr(st, n, getattr(App, n))
         st._ups_in_mode, st._ups_src_hdr = mode, hdr
         return st
@@ -18604,9 +18738,13 @@ class TestUpscaleStudioInputColour(unittest.TestCase):
         return p
 
     def test_choices(self):
-        self.assertEqual(App.UPS_IN_CHOICES,
-                         ("Auto", "sRGB / display", "Linear", "ACES2065-1",
-                          "HDR PQ"))
+        """One list for every module: the shared colourspace names."""
+        self.assertIs(App.UPS_IN_CHOICES, App.CS_IN_CHOICES)
+        self.assertEqual(App.CS_IN_CHOICES[0], "Auto")
+        for want in ("Scene-linear Rec.709", "Display sRGB", "Display Rec.709",
+                     "Display PQ / Rec.2020", "Working ACEScg (AP1)",
+                     "Archive ACES2065-1 (AP0)"):
+            self.assertIn(want, App.CS_IN_CHOICES)
 
     def test_shoulder_is_identity_below_the_knee_and_never_clips(self):
         k = App.UPS_HDR_KNEE
@@ -18640,7 +18778,7 @@ class TestUpscaleStudioInputColour(unittest.TestCase):
     def test_pq_round_trips_to_exr_and_back_to_pq(self):
         import tempfile
         lin = self._hdr_frame()
-        code = App._hdr_pq_encode(lin * App.HDR_SDR_WHITE)
+        code = App._cs_from_lin709(lin, "pq")     # PQ, Rec.2020 primaries
         p = os.path.join(tempfile.mkdtemp(), "pq.png")
         App._ups_write16(p, code)
         st = self._stub("pq", True)
@@ -18703,9 +18841,11 @@ class TestUpscaleStudioInputColour(unittest.TestCase):
                       self._src(App._ups_load_movie))
         self.assertIn("self._hdr_tags()", self._src(App._ups_encode_movie))
 
-    def test_exr_output_is_tagged_scene_linear(self):
+    def test_exr_output_is_tagged_with_what_it_holds(self):
         body = self._src(App._ups_run)
-        self.assertIn('"scene-linear" if spec["ext"] == ".exr"', body)
+        self.assertIn("self._cs_sidecar(out_key)", body)
+        self.assertIn("out=out_key", body)
+        self.assertIn("tag=out_key", body)
 
     def test_hdr_into_an_sdr_movie_is_called_out(self):
         self.assertIn("values above white are clipped",
@@ -18796,23 +18936,29 @@ class TestACES2065(unittest.TestCase):
 
     # ── Expansion Studio ──
     def test_expansion_writes_aces_by_default(self):
-        self.assertEqual(App.USC_EXR_SPACES[0], "ACES2065-1")
+        self.assertEqual(App.USC_EXR_SPACES[0], "Archive ACES2065-1 (AP0)")
 
         class V:
             def __init__(s, v): s.v = v
             def get(s): return s.v
 
-        class S:
-            USC_EXR_SPACES = App.USC_EXR_SPACES
-            usc_exr_cs_var = None
-            _usc_exr_aces = App._usc_exr_aces
-        st = S()
+        st = App.__new__(App)
+        st._usc_in_mode = "srgb"
+        st._usc_hdr_on = lambda: True
         self.assertTrue(st._usc_exr_aces())
-        st.usc_exr_cs_var = V("Linear Rec.709")
+        st.usc_cs_out_var = V("Scene-linear Rec.709")
         self.assertFalse(st._usc_exr_aces())
+        self.assertEqual(st._usc_cs_out_key(exr=True), "linear")
+        # Same as input on an expanding run: linear EXR, PQ movie
+        st.usc_cs_out_var = V(App.CS_SAME)
+        self.assertEqual(st._usc_cs_out_key(exr=True), "linear")
+        self.assertEqual(st._usc_cs_out_key(exr=False), "pq")
+        # a movie cannot hold ACES: PQ when expanding
+        st.usc_cs_out_var = V("Archive ACES2065-1 (AP0)")
+        self.assertEqual(st._usc_cs_out_key(exr=False), "pq")
         body = self._src(App._usc_run)
-        self.assertEqual(body.count("aces=_aces"), 2)   # single + layers
-        self.assertIn("primaries=self.ACES_NAME if _aces else None", body)
+        self.assertEqual(body.count("tag=_out_key"), 2)   # single + layers
+        self.assertIn("self._cs_sidecar(_out_key)", body)
 
     def test_the_tooltip_no_longer_claims_bt2020_for_exr(self):
         body = self._src(App._usc_fmt_text)
@@ -18821,15 +18967,16 @@ class TestACES2065(unittest.TestCase):
 
     # ── Upscale Studio ──
     def test_upscale_reads_aces_and_writes_it_back(self):
-        self.assertEqual(App.UPS_IN_NAMES["aces"], "ACES2065-1")
+        self.assertEqual(App.UPS_IN_NAMES["aces"], "Archive ACES2065-1 (AP0)")
         self.assertIn("self._seq_is_aces(folder, first)",
                       self._src(App._resolve_input_colour))
         self.assertIn("self._resolve_input_colour(",
                       self._src(App._ups_resolve_input))
-        self.assertIn("self._aces_to_lin709(a)", self._src(App._ups_scene))
+        self.assertIn("cls._aces_to_lin709(a)", self._src(App._scene_from_raw))
+        # Same as input: ACES in, ACES out
+        self.assertEqual(App._cs_out_key(App.CS_SAME, "aces"), "aces")
         run = self._src(App._ups_run)
-        self.assertIn('self._ups_in_mode == "aces"', run)
-        self.assertEqual(run.count("aces=aces"), 2)
+        self.assertEqual(run.count("tag=out_key"), 2)
 
     def test_upscale_scene_values_are_rec709(self):
         self._need_exr()
@@ -18843,6 +18990,9 @@ class TestACES2065(unittest.TestCase):
             HDR_SDR_WHITE = App.HDR_SDR_WHITE
             _ups_in_mode = "aces"
             _aces_to_lin709 = App._aces_to_lin709
+            _acescg_to_lin709 = App._acescg_to_lin709
+            _scene_from_raw = App._scene_from_raw
+            _cs_to_lin709 = App._cs_to_lin709
         st = S()
         for n in ("_ups_scene", "_ups_raw_float", "_ff_read_frame"):
             setattr(st, n, getattr(App, n).__get__(st))
@@ -18852,7 +19002,7 @@ class TestACES2065(unittest.TestCase):
     def test_organic_offers_and_detects_aces(self):
         self.assertIn("values=list(self.LENS_IN_CHOICES)",
                       self._src(App._tab_organic))
-        self.assertIn("ACES2065-1", App.LENS_IN_CHOICES)
+        self.assertIn("Archive ACES2065-1 (AP0)", App.LENS_IN_CHOICES)
         body = self._src(App._organic_load_linear)
         self.assertIn("self._seq_is_aces(os.path.dirname(path), path)", body)
         self.assertIn("self._aces_to_lin709(arr)", body)
@@ -18881,10 +19031,16 @@ class TestACES2065(unittest.TestCase):
 
     def test_organic_render_snapshots_and_writes_back_aces(self):
         body = self._src(App._organic_run_worker)
-        self.assertIn("aces=_aces)", body)
-        self.assertIn("aces=_aces_out)", body)
-        self.assertIn("primaries=self.ACES_NAME if _aces_out else None",
-                      body)
+        self.assertIn("aces=_aces, cs=_cs_in)", body)
+        self.assertIn("cs=_out_key)", body)
+        self.assertIn("self._cs_sidecar(_out_key)", body)
+        # ACES in, Same as input out: ACES back
+        st = App.__new__(App)
+        st._organic_source_encoded = False
+        st._organic_source_aces = True
+        st._organic_source_pq = False
+        self.assertEqual(st._organic_cs_out_key("EXR 16-bit half"), "aces")
+        self.assertEqual(st._organic_cs_out_key("PNG 8-bit"), "rec709")
 
 
 class TestUpscaleModelOutputLimit(unittest.TestCase):
@@ -19039,7 +19195,7 @@ class TestExpansionStudioInputColour(unittest.TestCase):
         lin = np.full((4, 4, 3), 0.5, np.float32)
         lin[0, 0] = (5.0, 4.0, 3.0)
         p = os.path.join(d, "a.png")
-        App._ups_write16(p, App._hdr_pq_encode(lin * App.HDR_SDR_WHITE))
+        App._ups_write16(p, App._cs_from_lin709(lin, "pq"))
         st = self._stub(d, "pq")
         fl, _pk = st._usc_read_float(p)
         self.assertLess(float((np.abs(fl - lin) / lin).max()), 0.01)
@@ -19152,8 +19308,16 @@ class TestLensAndPaintStudio(unittest.TestCase):
             _smudge_resolve_input = App._smudge_resolve_input
             _smudge_needs_float_read = App._smudge_needs_float_read
             _smudge_aces_out = App._smudge_aces_out
+            _smudge_cs_out_key = App._smudge_cs_out_key
+            _smudge_natural_out = App._smudge_natural_out
+            _cs_key = App._cs_key
+            _cs_to_lin709 = App._cs_to_lin709
+            _cs_from_lin709 = App._cs_from_lin709
             _lin709_to_aces = App._lin709_to_aces
             _exr_write_planes = App._exr_write_planes
+            CS_KEYS = App.CS_KEYS
+            CS_SAME = App.CS_SAME
+            sm_cs_out_var = None
         st = S()
         st.sm_folder, st.sm_frames = "/x", [first]
         st.sm_in_var = V(choice)
@@ -19269,8 +19433,9 @@ class TestHotkeysSurviveADropdown(unittest.TestCase):
 
 
 class TestMovToExrACES(unittest.TestCase):
-    """MOV -> EXR can write ACES2065-1: linearised like Scene-linear,
-    then Rec.709 -> AP0, tagged in the file and on the folder."""
+    """MOV -> EXR can write ACES2065-1 (and ACEScg, PQ, a display
+    space): linearised like Scene-linear, then the primaries moved,
+    tagged in the file and on the folder."""
 
     @staticmethod
     def _src(fn):
@@ -19280,40 +19445,50 @@ class TestMovToExrACES(unittest.TestCase):
     def test_it_is_an_output_choice(self):
         body = self._src(App._tab_exr)
         i = body.index('self.exr_out_var = self._combo(')
-        self.assertIn('"ACES2065-1 (linear, AP0)"', body[i:i + 300])
+        self.assertIn('list(self.CS_OUT_CHOICES)', body[i:i + 300])
+        self.assertIn("Archive ACES2065-1 (AP0)", App.CS_OUT_CHOICES)
+        self.assertIn("Working ACEScg (AP1)", App.CS_OUT_CHOICES)
 
     def test_aces_implies_linear(self):
-        body = self._src(App._erun)
-        self.assertIn('out_enc.get().startswith("ACES2065-1")', body)
-        self.assertIn("want_linear = (out_enc is None or want_aces or", body)
+        for out in ("Archive ACES2065-1 (AP0)", "ACES2065-1 (linear, AP0)"):
+            vf, lin, aces = App._m2e_filter("Rec.709", out)
+            self.assertTrue(lin and aces, out)
+            self.assertIn("t=linear", vf)
 
-    def test_passthrough_input_is_linearised_as_rec709_and_says_so(self):
-        body = self._src(App._erun)
-        self.assertIn('"Rec.709" in csp or (want_aces and "sRGB" not in csp)',
-                      body)
-        self.assertIn("ACES2065-1 needs linear light", body)
+    def test_passthrough_input_is_linearised_as_rec709(self):
+        """A passthrough has nothing to say about the curve, and a
+        movie is Rec.709 far more often than anything else."""
+        self.assertEqual(App._m2e_keys("None \u2014 passthrough",
+                                       "Archive ACES2065-1 (AP0)"),
+                         ("rec709", "aces"))
+        self.assertEqual(App._m2e_keys("Auto", "Scene-linear Rec.709",
+                                       transfer="smpte2084"),
+                         ("pq", "linear"))
 
     def test_both_paths_convert_and_tag(self):
         body = self._src(App._erun)
-        self.assertEqual(body.count("self._lin709_to_aces("), 2)
-        self.assertEqual(body.count("aces=True"), 2)
+        self.assertEqual(body.count("tag=out_key)"), 2)
         self.assertEqual(
-            body.count("primaries=self.ACES_NAME if want_aces else None"), 2)
+            body.count("self._adw_write_colorspace(out, *self._cs_sidecar(out_key))"),
+            2)
+        a = np.random.default_rng(1).random((2, 3, 3)).astype(np.float32)
+        self.assertTrue(np.allclose(App._cs_convert(a, "linear", "aces"),
+                                    App._lin709_to_aces(a)))
 
     def test_a_failed_conversion_is_not_reported_as_done(self):
         body = self._src(App._erun)
-        i = body.index("ACES2065-1 conversion failed")
+        i = body.index("Conversion failed")
         self.assertIn("code = 1", body[i:i + 120])
 
     def test_other_outputs_are_untouched(self):
         body = self._src(App._erun)
         self.assertIn("ef_out = _OE8.OutputFile(out_path, hdr8)", body)
-        self.assertIn('if code == 0 and want_aces:', body)
+        self.assertIn("if code == 0 and mid_key != out_key:", body)
 
 
 class TestMovToExrDropdownNames(unittest.TestCase):
-    """The Output names were cut off in the box, and the Input names
-    ("Rec.709 → Linear") read as if the input box did the converting."""
+    """One set of names for every module; the old MOV -> EXR names in
+    saved projects still mean the same thing."""
 
     @staticmethod
     def _src(fn):
@@ -19322,12 +19497,9 @@ class TestMovToExrDropdownNames(unittest.TestCase):
 
     def test_input_names_say_what_the_video_is(self):
         body = self._src(App._tab_exr)
-        self.assertIn('["None — passthrough", "Rec.709", "sRGB"]', body)
-        self.assertNotIn('"Rec.709 → Linear",', body)   # not an option
-        # the conversion still keys off the same words
-        run = self._src(App._erun)
-        self.assertIn('"Rec.709" in csp', run)
-        self.assertIn('"sRGB" in csp', run)
+        self.assertIn('self._combo(cc, "Input colour",', body)
+        self.assertIn("list(self.CS_IN_CHOICES), tip=self.CS_IN_TIP", body)
+        self.assertNotIn('"Rec.709 \u2192 Linear",', body)   # not an option
 
     def test_output_names_fit_and_the_box_gets_its_own_line(self):
         body = self._src(App._tab_exr)
@@ -19335,20 +19507,23 @@ class TestMovToExrDropdownNames(unittest.TestCase):
         j = body.index('self.exr_depth_var', i)
         seg = body[i:j]
         self.assertIn("wide=True", seg)
-        opts = ["Scene-linear (EXR convention)", "ACES2065-1 (linear, AP0)",
-                "Display-encoded — sRGB", "Display-encoded — Rec.709"]
-        for o in opts:
+        for o in App.CS_OUT_CHOICES:
             with self.subTest(option=o):
-                self.assertIn(f'"{o}"', seg)
                 self.assertLessEqual(len(o), 30)
-        self.assertNotIn("(for video models)\"", seg)
 
     def test_old_saved_names_still_mean_the_same_thing(self):
-        """A project saved with the long names restores them verbatim;
-        the run only looks for the words."""
-        run = self._src(App._erun)
-        self.assertIn('out_enc.get().startswith("Scene-linear")', run)
-        self.assertIn('"sRGB" in out_enc.get()', run)
+        for old, key in (("Scene-linear (EXR convention)", "linear"),
+                         ("ACES2065-1 (linear, AP0)", "aces"),
+                         ("Display-encoded \u2014 sRGB", "srgb"),
+                         ("Display-encoded \u2014 Rec.709", "rec709"),
+                         ("Rec.709", "rec709"), ("sRGB", "srgb"),
+                         ("sRGB / display", "srgb"), ("Linear", "linear"),
+                         ("HDR PQ", "pq"), ("ACES2065-1", "aces")):
+            with self.subTest(old=old):
+                self.assertEqual(App._cs_key(old), key)
+        self.assertEqual(App._m2e_keys("None \u2014 passthrough",
+                                       "Display-encoded \u2014 Rec.709"),
+                         ("rec709", "rec709"))
 
 
 class TestCutMode(unittest.TestCase):
@@ -19797,14 +19972,16 @@ class TestMovExrTabLayoutAndAnalysis(unittest.TestCase):
 
     def test_preview_uses_the_same_conversion_as_the_run(self):
         run = self._src(App._erun)
+        pv = self._src(App._m2e_frame_values)
+        for fn in (run, pv):
+            self.assertIn("self._m2e_keys(", fn)
+            self.assertIn("self._m2e_plan(in_key, out_key)", fn)
         for csp in ("None \u2014 passthrough", "Rec.709", "sRGB"):
             for out in ("Scene-linear (EXR convention)",
                         "ACES2065-1 (linear, AP0)",
                         "Display-encoded \u2014 sRGB"):
                 vf, lin, aces = App._m2e_filter(csp, out)
                 with self.subTest(csp=csp, out=out):
-                    if vf:
-                        self.assertIn(f'vf = "{vf}"', run)
                     self.assertEqual(aces, out.startswith("ACES"))
                     self.assertEqual(lin, not out.startswith("Display"))
         self.assertEqual(App._m2e_filter("None \u2014 passthrough",
@@ -20295,10 +20472,8 @@ class TestLensStudioInputColour(unittest.TestCase):
 
     def test_one_choice_per_expansion_output(self):
         c = App.LENS_IN_CHOICES
+        self.assertIs(c, App.CS_IN_CHOICES)
         self.assertEqual(c[0], "Auto")
-        for want in ("Linear Rec.709", "ACES2065-1", "HDR PQ / Rec.2020"):
-            self.assertIn(want, c)
-        self.assertTrue(any(x.startswith("Display-encoded") for x in c))
         # ...and Expansion's own EXR names are among them
         for name in App.USC_EXR_SPACES:
             self.assertIn(name, c)
@@ -20314,6 +20489,11 @@ class TestLensStudioInputColour(unittest.TestCase):
             _organic_source_aces = "x"
             _organic_source_pq = "x"
             _organic_cs_reason = ""
+            _cs_key = App._cs_key
+            _cs_tagged_key = App._cs_tagged_key
+            CS_KEYS = App.CS_KEYS
+            CS_NAMES = App.CS_NAMES
+            organic_folder = None
         st = S()
         st.organic_cs_var = V(choice)
         st._organic_src_transfer = transfer
@@ -20322,6 +20502,17 @@ class TestLensStudioInputColour(unittest.TestCase):
                 st._organic_source_pq)
 
     def test_each_choice_sets_how_frames_are_read(self):
+        self.assertEqual(self._stub("Display sRGB"), (True, False, False))
+        self.assertEqual(self._stub("Display Rec.709"), (True, False, False))
+        self.assertEqual(self._stub("Scene-linear Rec.709"),
+                         (False, False, False))
+        self.assertEqual(self._stub("Archive ACES2065-1 (AP0)"),
+                         (False, True, False))
+        self.assertEqual(self._stub("Working ACEScg (AP1)"),
+                         (False, False, False))
+        self.assertEqual(self._stub("Display PQ / Rec.2020"),
+                         (False, False, True))
+        # the old names still mean the same
         self.assertEqual(self._stub("Display-encoded (sRGB / Rec.709)"),
                          (True, False, False))
         self.assertEqual(self._stub("Linear Rec.709"), (False, False, False))
@@ -20412,8 +20603,12 @@ class TestLensStudioCancelRender(unittest.TestCase):
             _organic_source_encoded = True
             _organic_source_pq = False
             _organic_source_aces = False
+            _organic_source_cs = None
             ACES_NAME = App.ACES_NAME
             organic_log_txt = None
+            _organic_cs_out_key = lambda s, fmt=None: "linear"
+            _cs_sidecar = App._cs_sidecar
+            _cs_name = App._cs_name
         st = S()
         st.out = tempfile.mkdtemp()
         st.organic_run_btn = Btn()
@@ -20434,7 +20629,7 @@ class TestLensStudioCancelRender(unittest.TestCase):
         st._organic_apply_stack = lambda lin, params, seed=0: lin
         st._organic_frame_seed = lambda i: i
 
-        def write(stem, rgb, fmt, aces=False):
+        def write(stem, rgb, fmt, aces=False, cs=None):
             st.wrote.append(stem)
             if cancel_after is not None and len(st.wrote) == cancel_after:
                 st._organic_cancel = True

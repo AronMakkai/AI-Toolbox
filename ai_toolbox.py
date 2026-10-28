@@ -6537,7 +6537,7 @@ class App(tk.Tk):
         if self._exr_use_m2e():
             m = self._m2e
             vals = m["vals"]
-            if m["display"]:
+            if m["display"] and m.get("key") != "pq":
                 disp = (np.clip(vals, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
             else:
                 lin = m["lin709"]
@@ -6689,6 +6689,8 @@ class App(tk.Tk):
                 cls._ff_filters_cache = set()
         return name in cls._ff_filters_cache
 
+    _m2e_src_transfer = ""
+
     @classmethod
     def _m2e_linearise(cls, code, vf):
         """The linearisation the zscale chain `vf` would do, in numpy:
@@ -6705,30 +6707,55 @@ class App(tk.Tk):
             return cls._srgb_to_linear(np.clip(a, 0.0, 1.0)).astype(np.float32)
         return cls._hdr_eotf_1886(np.clip(a, 0.0, 1.0)).astype(np.float32)
 
-    @staticmethod
-    def _m2e_filter(csp, out_choice):
+    @classmethod
+    def _m2e_keys(cls, csp, out_choice, transfer=""):
+        """(in_key, out_key) for a MOV -> EXR conversion. Auto input is
+        the movie's own transfer tag (PQ) else Rec.709; the legacy
+        "None -- passthrough" is Rec.709 too (what a movie nearly always
+        is). Output defaults to scene-linear, the EXR convention."""
+        low = str(csp or "").lower()
+        in_key = cls._cs_key(csp)
+        if in_key not in cls.CS_KEYS:
+            in_key = "pq" if transfer == "smpte2084" else "rec709"
+        if low.startswith("none"):
+            in_key = "rec709"
+        out_key = cls._cs_out_key(out_choice or cls.CS_NAMES["linear"],
+                                  in_key)
+        return in_key, out_key
+
+    @classmethod
+    def _m2e_plan(cls, in_key, out_key):
+        """(vf, mid_key): the zscale filter ffmpeg can do for us -- a
+        display Rec.709 / sRGB source to linear light -- and the key the
+        decoded values are in afterwards. Everything from mid_key to
+        out_key is done in the app with _cs_convert (PQ, ACES, a
+        display encode). No filter when nothing has to change."""
+        if in_key == out_key:
+            return "", in_key
+        if in_key == "rec709" and cls._cs_is_linear(out_key):
+            return "zscale=tin=709:t=linear:rangein=limited:range=full", \
+                "linear"
+        if in_key == "srgb" and cls._cs_is_linear(out_key):
+            return "zscale=tin=iec61966-2-1:t=linear:range=full", "linear"
+        return "", in_key
+
+    @classmethod
+    def _m2e_filter(cls, csp, out_choice, transfer=""):
         """(vf, want_linear, want_aces) for a MOV -> EXR conversion --
         the same decision _erun makes, so the preview shows the values
         the run will write."""
-        out_choice = out_choice or "Scene-linear"
-        want_aces = out_choice.startswith("ACES2065-1")
-        want_linear = want_aces or out_choice.startswith("Scene-linear")
-        if not want_linear:
-            vf = ""
-        elif "Rec.709" in csp or (want_aces and "sRGB" not in csp):
-            vf = "zscale=tin=709:t=linear:rangein=limited:range=full"
-        elif "sRGB" in csp:
-            vf = "zscale=tin=iec61966-2-1:t=linear:range=full"
-        else:
-            vf = ""
-        return vf, want_linear, want_aces
+        in_key, out_key = cls._m2e_keys(csp, out_choice, transfer)
+        vf, _mid = cls._m2e_plan(in_key, out_key)
+        return vf, cls._cs_is_linear(out_key), out_key == "aces"
 
     def _m2e_frame_values(self, path, csp, out_choice, depth, at=None):
         """One frame of `path` as the conversion would write it: float
         RGB, values untouched (above 1.0 and below 0 included)."""
         import numpy as np
         import tempfile, shutil as _sh
-        vf, want_linear, want_aces = self._m2e_filter(csp, out_choice)
+        in_key, out_key = self._m2e_keys(
+            csp, out_choice, getattr(self, "_m2e_src_transfer", ""))
+        vf, mid_key = self._m2e_plan(in_key, out_key)
         tmp = tempfile.mkdtemp(prefix="m2e_pv_")
         try:
             if at is None:
@@ -6751,8 +6778,8 @@ class App(tk.Tk):
                 from PIL import Image
                 img = np.asarray(Image.open(png).convert("RGB"),
                                  np.float32) / 255.0
-                lin = (np.power(np.maximum(img, 0), 2.2).astype(np.float32)
-                       if want_linear else img)
+                mid_key = in_key
+                lin = img
             else:
                 exr = os.path.join(tmp, "f.exr")
                 cmd = ["ffmpeg", "-y", "-v", "error"] + seek + ["-i", path]
@@ -6775,16 +6802,17 @@ class App(tk.Tk):
                         or "ffmpeg wrote no frame")
                 lin = np.asarray(self._ff_read_frame(exr), np.float32)
                 if in_app:
-                    lin = self._m2e_linearise(lin, vf)
-                want_linear = bool(vf)
+                    mid_key = in_key
         finally:
             _sh.rmtree(tmp, ignore_errors=True)
-        vals = self._lin709_to_aces(lin) if want_aces else lin
-        desc = ("ACES2065-1" if want_aces else
-                "scene-linear" if want_linear else "display-encoded")
-        return {"vals": vals, "lin709": lin, "display": not want_linear,
-                "aces": want_aces,
-                "desc": f"frame at {at:.1f}s as written ({desc})"}
+        # from what ffmpeg left to what is written, in the app
+        vals = self._cs_convert(lin, mid_key, out_key)
+        lin709 = self._cs_to_lin709(vals, out_key)
+        return {"vals": vals, "lin709": lin709,
+                "display": self._cs_is_display(out_key),
+                "aces": out_key == "aces", "key": out_key,
+                "desc": f"frame at {at:.1f}s as written "
+                        f"({self._cs_name(out_key)})"}
 
     def _m2e_refresh_preview(self):
         """(Re)make the MOV -> EXR preview frame, off the UI thread.
@@ -6986,38 +7014,14 @@ class App(tk.Tk):
         self._batch_row(c, "exr")
 
         cc = self._card(self.exr_f_to_exr, "Colour Management")
-        self.exr_csp_var = self._combo(cc, "Input space",
-            # What the video IS. What it becomes is the Output choice
-            # below -- the old "Rec.709 → Linear" names read as if this
-            # box did the converting.
-            ["None — passthrough", "Rec.709", "sRGB"],
-            tip="What the video is encoded as. The Output choice\n"
-                "below decides what it becomes.\n\n"
-                "Rec.709 \u2014 ordinary camera or graded video.\n"
-                "sRGB \u2014 screen recordings, renders, sRGB-tagged\n"
-                "footage.\n"
-                "None \u2014 passthrough: do not interpret it; the values\n"
-                "are written as they are (AI-generated footage).\n\n"
-                "Only used when Output is Scene-linear or ACES2065-1.\n"
-                "A Display-encoded output keeps the video's own values,\n"
-                "so this is ignored.",
-            wide=True)
-        self.exr_out_var = self._combo(cc, "Output",
-            ["Scene-linear (EXR convention)",
-             "ACES2065-1 (linear, AP0)",
-             # short enough to read in the box; the tooltip has the
-             # long version ("for video models")
-             "Display-encoded — sRGB",
-             "Display-encoded — Rec.709"],
-            tip="Scene-linear \u2014 linear light, Rec.709 primaries.\n\n"
-                "ACES2065-1 \u2014 linear light, ACES AP0 primaries:\n"
-                "the ACES interchange space, tagged in each file and\n"
-                "on the folder. The video is taken to be Rec.709\n"
-                "primaries; with Input space on passthrough it is\n"
-                "linearised as Rec.709, since ACES has to be linear.\n\n"
-                "Display-encoded \u2014 the video's own values, not\n"
-                "linearised, for video models.",
-            wide=True)
+        self.exr_csp_var = self._combo(cc, "Input colour",
+            # What the video IS. What it becomes is the Output colour
+            # below. Auto: the movie's own transfer tag (PQ), else
+            # Rec.709, which a movie is far more often than anything.
+            list(self.CS_IN_CHOICES), tip=self.CS_IN_TIP, wide=True)
+        self.exr_out_var = self._combo(cc, "Output colour",
+            list(self.CS_OUT_CHOICES), default=self.CS_NAMES["linear"],
+            tip=self.CS_OUT_TIP, wide=True)
         self.exr_depth_var = self._combo(cc, "Bit depth",
             ["32-bit float", "16-bit half-float", "8-bit"], wide=True)
 
@@ -8602,6 +8606,327 @@ class App(tk.Tk):
         return (np.asarray(a, np.float32) @ m.T.astype(np.float32)).astype(
             np.float32)
 
+    # ══ Colourspaces: one list, one set of conversions, every module ══
+    # Every Input colour / Output colour dropdown in the app offers the
+    # same names, resolved to the same short keys, and every module
+    # decodes and encodes through _cs_to_lin709 / _cs_from_lin709 --
+    # the hub is scene-linear Rec.709 with 1.0 = diffuse (display)
+    # white, which is what the models, the viewer and the EXR writers
+    # already work in. "Display" spaces carry a transfer curve and clip
+    # at 1.0; "Scene-linear", "Working" and "Archive" are linear light
+    # and keep highlights above it.
+    CS_KEYS = ("linear", "srgb", "rec709", "pq", "acescg", "aces")
+    CS_NAMES = {
+        "linear": "Scene-linear Rec.709",
+        "srgb":   "Display sRGB",
+        "rec709": "Display Rec.709",
+        "pq":     "Display PQ / Rec.2020",
+        "acescg": "Working ACEScg (AP1)",
+        "aces":   "Archive ACES2065-1 (AP0)",
+    }
+    CS_AUTO = "Auto"
+    CS_SAME = "Same as input"
+    CS_IN_CHOICES = (CS_AUTO, "Scene-linear Rec.709", "Display sRGB",
+                     "Display Rec.709", "Display PQ / Rec.2020",
+                     "Working ACEScg (AP1)", "Archive ACES2065-1 (AP0)")
+    CS_OUT_CHOICES = (CS_SAME,) + CS_IN_CHOICES[1:]
+    # Names earlier versions wrote into saved projects, still accepted.
+    CS_LEGACY = {
+        "srgb / display": "srgb", "display-encoded (srgb / rec.709)": "srgb",
+        "display-encoded": "srgb", "srgb": "srgb", "rec.709": "rec709",
+        "linear": "linear", "linear rec.709": "linear",
+        "scene-linear": "linear", "scene-linear (rec.709)": "linear",
+        "aces2065-1": "aces", "aces": "aces", "acescg": "acescg",
+        "hdr pq": "pq", "hdr pq / rec.2020": "pq", "pq": "pq",
+        "pq / rec.2020": "pq", "display pq": "pq",
+        "display-encoded \u2014 srgb": "srgb",
+        "display-encoded \u2014 rec.709": "rec709",
+        "scene-linear (exr convention)": "linear",
+        "aces2065-1 (linear, ap0)": "aces",
+    }
+    CS_DISPLAY = ("srgb", "rec709", "pq")       # carry a transfer curve
+    CS_IN_TIP = (
+        "What the source frames hold. Auto reads the folder's\n"
+        "colourspace tag, the file type, a movie's transfer tag\n"
+        "and whether an EXR holds values above 1.0.\n\n"
+        "Scene-linear Rec.709 — linear light, Rec.709 / sRGB\n"
+        "primaries, 1.0 = diffuse white, highlights above it.\n"
+        "Renders from Nuke, Houdini, Maya; this app's own EXRs.\n\n"
+        "Display sRGB — gamma-encoded for a computer monitor\n"
+        "(web, macOS, PNG, most AI-video output). Nothing above 1.0.\n\n"
+        "Display Rec.709 — broadcast SDR video, shown through\n"
+        "BT.1886 (gamma 2.4) on a TV or in a grading suite.\n"
+        "Same primaries as sRGB; the curve differs in the shadows.\n\n"
+        "Display PQ / Rec.2020 — HDR10: ST.2084 curve, wide\n"
+        "Rec.2020 primaries, absolute nits (1.0 code = 10,000).\n"
+        "HDR movies and Expansion Studio's MOV output.\n\n"
+        "Working ACEScg (AP1) — linear, AP1 primaries, D60. The\n"
+        "space comp and CG are rendered in under ACES.\n\n"
+        "Archive ACES2065-1 (AP0) — linear, AP0 primaries, D60.\n"
+        "The ACES interchange / archival master; what an ACES\n"
+        "pipeline hands between vendors.")
+    CS_OUT_TIP = (
+        "What the render is written as. Same as input keeps the\n"
+        "space the source came in — the safe default.\n\n"
+        "Scene-linear Rec.709 — linear EXR for comp (Nuke reads\n"
+        "it as-is; Resolve needs Input Color Space = Linear).\n\n"
+        "Display sRGB — a review copy for laptops and the web;\n"
+        "highlights above white are clipped.\n\n"
+        "Display Rec.709 — SDR video for TV / a Rec.709 2.4\n"
+        "timeline; highlights clipped.\n\n"
+        "Display PQ / Rec.2020 — HDR10 delivery: keeps the\n"
+        "highlights as absolute nits (1.0 linear = 100 nits).\n\n"
+        "Working ACEScg (AP1) — linear EXR for an ACES comp.\n\n"
+        "Archive ACES2065-1 (AP0) — linear EXR for an ACES\n"
+        "archive or hand-off.\n\n"
+        "A movie can only hold a Display space; an EXR can hold any\n"
+        "(a Display space in an EXR is tagged so the next module\n"
+        "reads it right).")
+
+    # Linear Rec.709 (D65) <-> ACEScg (AP1, ~D60), Bradford-adapted:
+    # the published sRGB -> ACEScg matrix, inverse computed at run time.
+    _M_709_TO_AP1 = ((0.6130973, 0.3395229, 0.0473798),
+                     (0.0701942, 0.9163559, 0.0134499),
+                     (0.0206156, 0.1095698, 0.8698146))
+    _m_ap1_to_709 = None
+
+    @classmethod
+    def _cs_key(cls, choice, default="auto"):
+        """A dropdown's text (new or legacy) as a short key: one of
+        CS_KEYS, "auto" (Input) or "same" (Output)."""
+        c = str(choice or "").strip()
+        if not c or c == cls.CS_AUTO:
+            return default if default != "auto" else "auto"
+        if c == cls.CS_SAME:
+            return "same"
+        for k, n in cls.CS_NAMES.items():
+            if c == n:
+                return k
+        low = c.lower()
+        if low in cls.CS_LEGACY:
+            return cls.CS_LEGACY[low]
+        for k in cls.CS_KEYS:
+            if low.startswith(k):
+                return k
+        for old, k in cls.CS_LEGACY.items():
+            if low.startswith(old.split(" ")[0]):
+                return k
+        return default
+
+    @classmethod
+    def _cs_name(cls, key):
+        return cls.CS_NAMES.get(key, str(key))
+
+    @classmethod
+    def _cs_is_display(cls, key):
+        return key in cls.CS_DISPLAY
+
+    @classmethod
+    def _cs_is_linear(cls, key):
+        return key in ("linear", "acescg", "aces")
+
+    @classmethod
+    def _lin709_to_acescg(cls, a):
+        import numpy as np
+        m = np.array(cls._M_709_TO_AP1, np.float32)
+        return (np.asarray(a, np.float32) @ m.T).astype(np.float32)
+
+    @classmethod
+    def _acescg_to_lin709(cls, a):
+        import numpy as np
+        if cls._m_ap1_to_709 is None:
+            cls._m_ap1_to_709 = np.linalg.inv(
+                np.array(cls._M_709_TO_AP1, np.float64)).astype(np.float32)
+        return (np.asarray(a, np.float32) @ cls._m_ap1_to_709.T).astype(
+            np.float32)
+
+    @classmethod
+    def _cs_to_lin709(cls, a, key):
+        """A frame's stored values in colourspace `key` as scene-linear
+        Rec.709 float, 1.0 = diffuse white. Display spaces decode their
+        curve (PQ: nits / HDR_SDR_WHITE, then Rec.2020 -> 709); the
+        linear spaces are a matrix or nothing."""
+        import numpy as np
+        a = np.asarray(a, np.float32)
+        if key == "srgb":
+            return cls._srgb_to_linear(a)
+        if key == "rec709":
+            return cls._hdr_eotf_1886(a)
+        if key == "pq":
+            nits = cls._hdr_pq_decode(np.clip(a, 0.0, 1.0))
+            return np.maximum(cls._bt2020_to_709(
+                nits / float(cls.HDR_SDR_WHITE)), 0.0).astype(np.float32)
+        if key == "aces":
+            return cls._aces_to_lin709(a)
+        if key == "acescg":
+            return cls._acescg_to_lin709(a)
+        return a
+
+    @classmethod
+    def _cs_from_lin709(cls, lin, key):
+        """Scene-linear Rec.709 (1.0 = diffuse white) as the values to
+        store in colourspace `key`. Display spaces clip at white (PQ
+        keeps everything up to 10,000 nits)."""
+        import numpy as np
+        lin = np.asarray(lin, np.float32)
+        if key == "srgb":
+            return cls._linear_to_srgb(np.clip(lin, 0.0, 1.0))
+        if key == "rec709":
+            return np.power(np.clip(lin, 0.0, 1.0), 1.0 / 2.4).astype(
+                np.float32)
+        if key == "pq":
+            n = np.maximum(lin @ np.array(cls._M_709_TO_2020, np.float32).T,
+                           0.0)
+            return cls._hdr_pq_encode(n * float(cls.HDR_SDR_WHITE))
+        if key == "aces":
+            return cls._lin709_to_aces(lin)
+        if key == "acescg":
+            return cls._lin709_to_acescg(lin)
+        return lin
+
+    @classmethod
+    def _cs_convert(cls, a, src, dst):
+        if src == dst:
+            import numpy as np
+            return np.asarray(a, np.float32)
+        return cls._cs_from_lin709(cls._cs_to_lin709(a, src), dst)
+
+    @classmethod
+    def _cs_out_key(cls, out_choice, in_key, movie=False):
+        """The space a render is written in: the Output choice, or the
+        input's space for Same as input. A movie can only hold a
+        display space, so a linear choice for a movie becomes Display
+        Rec.709 (PQ stays PQ)."""
+        k = cls._cs_key(out_choice, default="same")
+        if k in ("same", "auto"):
+            k = in_key if in_key in cls.CS_KEYS else "linear"
+        if movie and not cls._cs_is_display(k):
+            k = "rec709"
+        return k
+
+    @classmethod
+    def _cs_sidecar(cls, key):
+        """(colorspace, primaries) for _adw_write_colorspace, so the
+        next module's Auto reads the folder right."""
+        if key == "aces":
+            return "scene-linear", cls.ACES_NAME
+        if key == "acescg":
+            return "scene-linear", "acescg"
+        if key == "pq":
+            return "display", "pq"
+        if key in ("srgb", "rec709"):
+            return "display", key
+        return "scene-linear", None
+
+    @classmethod
+    def _cs_tagged_key(cls, folder):
+        """The colourspace key a folder's sidecar says, or None."""
+        try:
+            import json
+            with open(os.path.join(folder, cls.ADW_CS_SIDECAR),
+                      encoding="utf-8") as fh:
+                d = json.load(fh)
+        except Exception:
+            return None
+        prim = d.get("primaries")
+        cs = d.get("colorspace")
+        if prim == cls.ACES_NAME:
+            return "aces"
+        if prim in ("acescg", "pq", "srgb", "rec709"):
+            return prim
+        if cs == "scene-linear":
+            return "linear"
+        if cs == "display":
+            return "srgb"
+        return None
+
+    # The same conversions as plain numpy source, for the scripts this
+    # app writes and runs in the ~/RifeApp venvs (SAM's EXR merge).
+    # Kept next to the methods above so the two cannot drift apart
+    # unnoticed: TestColourspaceToolkit runs this text against them.
+    CS_NUMPY_SRC = """
+import numpy as _np
+_CS_709_AP0 = _np.array(((0.4397010, 0.3829780, 0.1773350),
+                         (0.0897923, 0.8134230, 0.0967616),
+                         (0.0175440, 0.1115440, 0.8707040)), _np.float32)
+_CS_709_AP1 = _np.array(((0.6130973, 0.3395229, 0.0473798),
+                         (0.0701942, 0.9163559, 0.0134499),
+                         (0.0206156, 0.1095698, 0.8698146)), _np.float32)
+_CS_709_2020 = _np.array(((0.6274, 0.3293, 0.0433),
+                          (0.0691, 0.9195, 0.0114),
+                          (0.0164, 0.0880, 0.8956)), _np.float32)
+_CS_SDR_WHITE = 100.0
+
+def _cs_pq_decode(code):
+    c = _np.clip(_np.asarray(code, _np.float32), 0.0, 1.0)
+    m1 = 2610.0 / 16384.0; m2 = 2523.0 / 4096.0 * 128.0
+    c1 = 3424.0 / 4096.0; c2 = 2413.0 / 4096.0 * 32.0; c3 = 2392.0 / 4096.0 * 32.0
+    num = _np.clip(_np.power(c, 1.0 / m2) - c1, 0.0, None)
+    den = c2 - c3 * _np.power(c, 1.0 / m2)
+    y = _np.power(_np.clip(num / _np.maximum(den, 1e-8), 0.0, None), 1.0 / m1)
+    return (y * 10000.0).astype(_np.float32)
+
+def _cs_pq_encode(nits):
+    y = _np.clip(_np.asarray(nits, _np.float32), 0.0, 10000.0) / 10000.0
+    m1 = 2610.0 / 16384.0; m2 = 2523.0 / 4096.0 * 128.0
+    c1 = 3424.0 / 4096.0; c2 = 2413.0 / 4096.0 * 32.0; c3 = 2392.0 / 4096.0 * 32.0
+    ym = _np.power(y, m1)
+    return _np.power((c1 + c2 * ym) / (1.0 + c3 * ym), m2).astype(_np.float32)
+
+def _cs_mat(a, m):
+    return (_np.asarray(a, _np.float32) @ m.T).astype(_np.float32)
+
+def _cs_inv(m):
+    return _np.linalg.inv(m.astype(_np.float64)).astype(_np.float32)
+
+def cs_to_lin709(a, key):
+    a = _np.asarray(a, _np.float32)
+    if key == "srgb":
+        c = _np.clip(a, 0.0, 1.0)
+        return _np.where(c <= 0.04045, c / 12.92,
+                         _np.power((c + 0.055) / 1.055, 2.4)).astype(_np.float32)
+    if key == "rec709":
+        return _np.power(_np.clip(a, 0.0, 1.0), 2.4).astype(_np.float32)
+    if key == "pq":
+        n = _cs_pq_decode(a) / _CS_SDR_WHITE
+        return _np.maximum(_cs_mat(n, _cs_inv(_CS_709_2020)), 0.0)
+    if key == "aces":
+        return _cs_mat(a, _cs_inv(_CS_709_AP0))
+    if key == "acescg":
+        return _cs_mat(a, _cs_inv(_CS_709_AP1))
+    return a
+
+def cs_from_lin709(lin, key):
+    lin = _np.asarray(lin, _np.float32)
+    if key == "srgb":
+        c = _np.clip(lin, 0.0, 1.0)
+        return _np.where(c <= 0.0031308, c * 12.92,
+                         1.055 * _np.power(c, 1.0 / 2.4) - 0.055).astype(_np.float32)
+    if key == "rec709":
+        return _np.power(_np.clip(lin, 0.0, 1.0), 1.0 / 2.4).astype(_np.float32)
+    if key == "pq":
+        return _cs_pq_encode(_np.maximum(_cs_mat(lin, _CS_709_2020), 0.0)
+                             * _CS_SDR_WHITE)
+    if key == "aces":
+        return _cs_mat(lin, _CS_709_AP0)
+    if key == "acescg":
+        return _cs_mat(lin, _CS_709_AP1)
+    return lin
+
+def cs_convert(a, src, dst):
+    if src == dst:
+        return _np.asarray(a, _np.float32)
+    return cs_from_lin709(cs_to_lin709(a, src), dst)
+"""
+
+    def _cs_combo(self, parent, label, var_default, tip, out=False):
+        """An Input colour / Output colour dropdown with its ⓘ -- the
+        same two everywhere in the app."""
+        choices = list(self.CS_OUT_CHOICES if out else self.CS_IN_CHOICES)
+        return self._combo(parent, label, choices,
+                           default=var_default if var_default in choices
+                           else choices[0], tip=tip, width=17)
+
     @classmethod
     def _exr_is_aces(cls, path):
         """Does this EXR say it is ACES2065-1? Read off its own header:
@@ -8683,9 +9008,12 @@ class App(tk.Tk):
         return (lin * (1.0 + m * (scale - 1.0))[:, :, None]).astype(
             np.float32)
 
+    ACES_AP1_CHROMA = (0.713, 0.293, 0.165, 0.830, 0.128, 0.044,
+                       0.32168, 0.33767)
+
     @classmethod
     def _exr_write_planes(cls, path, planes, half=True, aces=False,
-                          pixel_aspect=None):
+                          pixel_aspect=None, tag=None):
         """Named float planes ({"R": 2-D array, "topaz.R": ...}) to one
         EXR. With aces=True the file is tagged ACES2065-1 (chromaticities
         + container flag) where the OpenEXR binding can write that; the
@@ -8697,13 +9025,18 @@ class App(tk.Tk):
         cast = np.float16 if half else np.float32
         first = next(iter(planes.values()))
         h, w = first.shape[:2]
-        if aces and hasattr(OpenEXR, "File"):
+        if tag == "aces":
+            aces = True
+        chroma = (cls.ACES_AP0_CHROMA if aces
+                  else cls.ACES_AP1_CHROMA if tag == "acescg" else None)
+        if chroma is not None and hasattr(OpenEXR, "File"):
             # The legacy Header API of the 3.x binding writes the
             # chromaticities attribute as zeros; this one writes it right.
             hdr = {"compression": OpenEXR.ZIP_COMPRESSION,
                    "type": OpenEXR.scanlineimage,
-                   "chromaticities": cls.ACES_AP0_CHROMA,
-                   "acesImageContainerFlag": 1}
+                   "chromaticities": chroma}
+            if aces:
+                hdr["acesImageContainerFlag"] = 1
             if pixel_aspect and pixel_aspect > 1.0:
                 hdr["pixelAspectRatio"] = float(pixel_aspect)
             with OpenEXR.File(hdr, {
@@ -9988,6 +10321,10 @@ class App(tk.Tk):
         self._tc_result = None
         self._tc_frames = []
         try:
+            self._m2e_src_transfer = self._ups_probe_transfer(p)
+        except Exception:
+            self._m2e_src_transfer = ""
+        try:
             info = self._x264_probe(p)
             fps = self._ff_probe_fps(p) or 24.0
             dur = float(info.get("duration") or 0)
@@ -10031,6 +10368,14 @@ class App(tk.Tk):
             csp   = self.exr_csp_var.get()
             depth = self.exr_depth_var.get()
             out_enc = getattr(self, "exr_out_var", None)
+            in_key, out_key = self._m2e_keys(
+                csp, out_enc.get() if out_enc is not None else None,
+                getattr(self, "_m2e_src_transfer", ""))
+            vf, mid_key = self._m2e_plan(in_key, out_key)
+            self.log(self.elog, "Colour: " + self._cs_name(in_key)
+                     + " \u2192 " + self._cs_name(out_key)
+                     + (" (no conversion)" if in_key == out_key else ""),
+                     "dim")
             # "Scene-linear" is the historical/default behaviour (the
             # EXR format's own convention): decode/linearise per the
             # Input Space dropdown. Either "Display-encoded" choice is
@@ -10051,10 +10396,6 @@ class App(tk.Tk):
             # ACES2065-1 is linear by definition, so it linearises the
             # same way Scene-linear does and then moves the primaries
             # from Rec.709 to AP0.
-            want_aces = (out_enc is not None
-                         and out_enc.get().startswith("ACES2065-1"))
-            want_linear = (out_enc is None or want_aces or
-                           out_enc.get().startswith("Scene-linear"))
 
             if "8-bit" in depth:
                 # Deliberately simple, fully re-baked path: decode to
@@ -10092,35 +10433,22 @@ class App(tk.Tk):
                 pngs = sorted(f for f in os.listdir(tmp_png_dir) if f.endswith(".png"))
                 self.log(self.elog,
                     "Converting " + str(len(pngs)) + " PNG frames to EXR…", "hi")
-                if want_aces:
-                    self.log(self.elog,
-                        "Output: ACES2065-1 (gamma 2.2 decode, Rec.709 "
-                        "\u2192 AP0)", "dim")
-                elif want_linear:
-                    self.log(self.elog,
-                        "Output: scene-linear (gamma 2.2 decode)", "dim")
-                else:
-                    self.log(self.elog,
-                        "Output: display-encoded — keeping gamma, no "
-                        "linearisation (Input Space ignored)", "dim")
+                self.log(self.elog, "Output: " + self._cs_name(out_key),
+                         "dim")
                 _FP8 = _Im8.PixelType(_Im8.PixelType.FLOAT)
                 for i, fn in enumerate(pngs):
                     img = _np8.array(_PI8.open(os.path.join(tmp_png_dir, fn))
                         .convert("RGB"), dtype=_np8.float32) / 255.0
-                    if want_linear:
-                        lin = _np8.power(_np8.maximum(img, 0), 2.2).astype(_np8.float32)
-                    else:
-                        lin = img
+                    lin = self._cs_convert(img, in_key, out_key)
                     h, w = lin.shape[:2]
                     hdr8 = _OE8.Header(w, h)
                     hdr8['channels'] = {c: _Im8.Channel(_FP8) for c in "RGB"}
                     out_path = os.path.join(out, base + "_EXR." + f"{i+1:05d}" + ".exr")
-                    if want_aces:
-                        _a8 = self._lin709_to_aces(lin)
+                    if out_key in ("aces", "acescg"):
                         self._exr_write_planes(
-                            out_path, {c: _a8[:, :, ci]
+                            out_path, {c: lin[:, :, ci]
                                        for ci, c in enumerate("RGB")},
-                            half=False, aces=True)
+                            half=False, tag=out_key)
                     else:
                         ef_out = _OE8.OutputFile(out_path, hdr8)
                         ef_out.writePixels({c: lin[:,:,ci].tobytes() for ci, c in enumerate("RGB")})
@@ -10141,9 +10469,7 @@ class App(tk.Tk):
                 # tag their own output, so every other tab that reads
                 # this sidecar (or is updated to) knows what it is
                 # holding without anyone needing to say so by hand.
-                self._adw_write_colorspace(
-                    out, "scene-linear" if want_linear else "display",
-                    primaries=self.ACES_NAME if want_aces else None)
+                self._adw_write_colorspace(out, *self._cs_sidecar(out_key))
                 n = len([f for f in os.listdir(out) if f.endswith(".exr")])
                 self.log(self.elog, "Done - " + str(n) + " EXR frames in " + out, "ok")
                 self.after(0, lambda: self.progress(1.0, "EXR done — " + str(n) + " frames"))
@@ -10158,36 +10484,9 @@ class App(tk.Tk):
 
             pix_fmt = "gbrpf32le" if "32" in depth else "gbrpf16le"
             # Move format out of -vf to avoid auto_scale conflict on yuv420p HEVC
-            if not want_linear:
-                # Output stays display-encoded: do NOT linearise, no
-                # matter what Input Space says -- there is nothing to
-                # decode a curve out of when the point is to keep the
-                # curve. Input Space is ignored here (logged, not
-                # silently dropped) since this app only OWNS the
-                # linearising math, not a re-encode into a different
-                # display curve.
-                vf = ""
-                enc_label = "sRGB" if "sRGB" in out_enc.get() else "Rec.709"
-                self.log(self.elog,
-                    "Colour: output display-encoded (" + enc_label +
-                    ") — no linearisation; Input Space ignored", "dim")
-            elif "Rec.709" in csp or (want_aces and "sRGB" not in csp):
-                vf = "zscale=tin=709:t=linear:rangein=limited:range=full"
-                if want_aces and "Rec.709" not in csp:
-                    # ACES must be linear; a passthrough has nothing to
-                    # say about the curve, and a movie is Rec.709 far
-                    # more often than anything else.
-                    self.log(self.elog,
-                        "ACES2065-1 needs linear light: Input space is "
-                        "passthrough, so the video is linearised as "
-                        "Rec.709.", "hi")
-                self.log(self.elog, "Colour: Rec.709 → Linear", "dim")
-            elif "sRGB" in csp:
-                vf = "zscale=tin=iec61966-2-1:t=linear:range=full"
-                self.log(self.elog, "Colour: sRGB → Linear", "dim")
-            else:
-                vf = ""
-                self.log(self.elog, "Colour: passthrough (no conversion)", "dim")
+            if vf:
+                self.log(self.elog, "Colour: " + self._cs_name(in_key)
+                         + " \u2192 Linear (zscale)", "dim")
             self.log(self.elog, "Bit depth: " + depth, "dim")
 
             cmd = ["ffmpeg", "-y", "-i", p]
@@ -10196,6 +10495,7 @@ class App(tk.Tk):
                 self.log(self.elog, "This ffmpeg has no zscale filter: "
                          "the frames are decoded as they are and "
                          "linearised in the app with the same curve.", "hi")
+                mid_key = in_key
             elif vf:
                 cmd += ["-vf", vf]
             cmd += ["-pix_fmt", pix_fmt,
@@ -10210,57 +10510,38 @@ class App(tk.Tk):
                 self.log(self.elog, "zscale refused this clip \u2014 decoding "
                          "as is and linearising in the app instead.", "hi")
                 lin_in_app = True
+                mid_key = in_key
                 cmd = ["ffmpeg", "-y", "-i", p, "-pix_fmt", pix_fmt,
                        "-compression_level", "0", "-pred", "mixed", pat]
                 code = self.runcmd(cmd, self.elog)
             self.after(0, lambda: self.eb_bar.pulse(False))
-            if code == 0 and lin_in_app:
+            if code == 0 and mid_key != out_key:
+                # Whatever ffmpeg could not do -- the curve when zscale
+                # is missing, PQ, ACES, a display encode -- each frame
+                # is converted in the app and re-written, tagged.
                 try:
                     _fs = sorted(f for f in os.listdir(out)
                                  if f.startswith(base + "_EXR.")
                                  and f.endswith(".exr"))
-                    self.log(self.elog, "Linearising " + str(len(_fs))
-                             + " frames\u2026", "hi")
+                    _what = (self._cs_name(mid_key) + " \u2192 "
+                             + self._cs_name(out_key))
+                    self.log(self.elog, "Converting " + str(len(_fs))
+                             + " frames: " + _what + "\u2026", "hi")
                     for _k, _f in enumerate(_fs):
                         _p = os.path.join(out, _f)
-                        _l = self._m2e_linearise(self._ff_read_frame(_p), vf)
+                        _l = self._cs_convert(self._ff_read_frame(_p),
+                                              mid_key, out_key)
                         self._exr_write_planes(
                             _p, {c: _l[:, :, ci]
                                  for ci, c in enumerate("RGB")},
-                            half=("16" in depth))
+                            half=("16" in depth), tag=out_key)
                         if _k % 10 == 0:
                             self.after(0, lambda fr=_k, tot=max(1, len(_fs)):
-                                (self.progress(fr / tot, "Linearising\u2026"),
-                                 self.eb_bar.set(fr / tot, "Linearising\u2026")))
+                                (self.progress(fr / tot, "Converting\u2026"),
+                                 self.eb_bar.set(fr / tot, "Converting\u2026")))
                 except Exception as _ex:
                     self.log(self.elog,
-                             f"Linearising failed: {_ex}", "err")
-                    code = 1
-            if code == 0 and want_aces:
-                # ffmpeg wrote linear Rec.709; each frame is re-written
-                # as ACES2065-1 (ffmpeg has no AP0 primaries, and cannot
-                # tag an EXR as ACES).
-                try:
-                    _fs = sorted(f for f in os.listdir(out)
-                                 if f.startswith(base + "_EXR.")
-                                 and f.endswith(".exr"))
-                    self.log(self.elog, "Converting " + str(len(_fs))
-                             + " frames to ACES2065-1\u2026", "hi")
-                    for _k, _f in enumerate(_fs):
-                        _p = os.path.join(out, _f)
-                        _a = self._lin709_to_aces(self._ff_read_frame(_p))
-                        self._exr_write_planes(
-                            _p, {c: _a[:, :, ci]
-                                 for ci, c in enumerate("RGB")},
-                            half=("16" in depth), aces=True)
-                        if _k % 10 == 0:
-                            self.after(0, lambda fr=_k, tot=max(1, len(_fs)):
-                                (self.progress(fr / tot, "To ACES2065-1\u2026"),
-                                 self.eb_bar.set(fr / tot,
-                                                 "To ACES2065-1\u2026")))
-                except Exception as _ex:
-                    self.log(self.elog,
-                             f"ACES2065-1 conversion failed: {_ex}", "err")
+                             f"Conversion failed: {_ex}", "err")
                     code = 1
             if code == 0:
                 # A real linearising filter was applied (Rec.709 or
@@ -10268,9 +10549,7 @@ class App(tk.Tk):
                 # means the output is still display-encoded, exactly
                 # as the source was. Tagged either way, so every tab
                 # that reads this sidecar knows without being told.
-                self._adw_write_colorspace(
-                    out, "scene-linear" if vf else "display",
-                    primaries=self.ACES_NAME if want_aces else None)
+                self._adw_write_colorspace(out, *self._cs_sidecar(out_key))
                 n = len([f for f in os.listdir(out) if f.endswith(".exr")])
                 self.log(self.elog, "Done - " + str(n) + " EXR frames in " + out, "ok")
                 self.after(0, lambda: self.progress(1.0, "EXR done — " + str(n) + " frames"))
@@ -11728,6 +12007,7 @@ class App(tk.Tk):
         pf.bind("<Button-1>", self._rpick)
         self.ri = tk.Label(c, text="", font=FSM, bg=S, fg=G, anchor="w")
         self.ri.pack(anchor="w", pady=(3, 0))
+        self._adw_cs_row(c)
 
         # 2 — Settings
         c2 = self._card(lf, "Settings")
@@ -11895,6 +12175,9 @@ class App(tk.Tk):
         def _src_pick(v):
             self.adw_source_encoded_var.set(v == "encoded")
             _refresh_src_btns()
+        # ...and the other way: the Input colour dropdown sets the var
+        self.adw_source_encoded_var.trace_add(
+            "write", lambda *_: _refresh_src_btns())
         _src_tip = (
             "Controls how this footage's EXR values are interpreted "
             "before processing.\n\n"
@@ -17011,7 +17294,7 @@ class App(tk.Tk):
             self.log(self.rlog, "Wipe draw error: " + str(ex), "err")
 
     def _combo(self, parent, label, options, default=None, tip=None,
-               wide=False):
+               wide=False, width=20):
         """`default` picks a starting option other than the first --
         needed wherever the sensible default is not the top of the list.
         `tip` adds the same hover icon the sliders use.
@@ -17032,7 +17315,7 @@ class App(tk.Tk):
             cb.pack(fill="x", expand=True)
         else:
             cb = ttk.Combobox(row, textvariable=v, values=options,
-                              state="readonly", font=FSM, width=20)
+                              state="readonly", font=FSM, width=width)
             cb.pack(side="left", padx=4)
         if tip:
             i = tk.Label(row, text="\u24d8", font=FSM, bg=S, fg="#555555",
@@ -18697,6 +18980,114 @@ class App(tk.Tk):
         v = getattr(self, "adw_source_encoded_var", None)
         return bool(v.get()) if v is not None else True
 
+    # ── Input / Output colour for the ADW modules (Blur, Interpolate,
+    # CurveLock, AreaLock) ──
+    # These four share one read path (_adw_gamma_encode / decode) and
+    # the app-wide "AI-Generated / Scene-Linear" toggle, so they share
+    # one pair of dropdowns too: the same row is built into each tab,
+    # bound to the same two variables. Input colour drives the toggle
+    # (a Display space is "encoded", a linear one is not) and, for
+    # ACES or PQ, converts to Rec.709 linear on the way in; Output
+    # colour converts the written EXRs after the render.
+    adw_cs_in_var = None
+    adw_cs_out_var = None
+
+    def _adw_cs_row(self, parent):
+        if self.adw_cs_in_var is None:
+            self.adw_cs_in_var = tk.StringVar(value=self.CS_AUTO)
+            self.adw_cs_out_var = tk.StringVar(value=self.CS_SAME)
+            self.adw_cs_in_var.trace_add("write",
+                                         lambda *_: self._adw_cs_in_changed())
+        for label, var, choices, tip in (
+                ("Input colour", self.adw_cs_in_var, self.CS_IN_CHOICES,
+                 self.CS_IN_TIP + "\n\nShared by ADW-Blur, ADW-Interpolate, "
+                 "CurveLock and AreaLock,\nand tied to the AI-Generated / "
+                 "Scene-Linear buttons."),
+                ("Output colour", self.adw_cs_out_var, self.CS_OUT_CHOICES,
+                 self.CS_OUT_TIP)):
+            row = tk.Frame(parent, bg=S); row.pack(fill="x", pady=2)
+            tk.Label(row, text=label, font=FSM, bg=S, fg=G, width=12,
+                     anchor="w").pack(side="left")
+            ttk.Combobox(row, textvariable=var, values=list(choices),
+                         state="readonly", font=FSM, width=22).pack(
+                             side="left", padx=4)
+            i = tk.Label(row, text="\u24d8", font=FSM, bg=S, fg="#555555",
+                         cursor="hand2")
+            i.pack(side="left", padx=(4, 0))
+            self._tooltip(tip)(i)
+
+    def _adw_cs_in_key(self):
+        v = self.__dict__.get("adw_cs_in_var")
+        if v is None:
+            return None
+        try:
+            k = self._cs_key(v.get())
+        except Exception:
+            return None
+        return k if k in self.CS_KEYS else None
+
+    def _adw_cs_in_changed(self):
+        k = self._adw_cs_in_key()
+        v = self.__dict__.get("adw_source_encoded_var")
+        if k is None or v is None:
+            return
+        try:
+            v.set(k in ("srgb", "rec709"))
+        except Exception:
+            pass
+
+    def _adw_cs_out_key(self):
+        v = self.__dict__.get("adw_cs_out_var")
+        if v is None:
+            return None
+        k = self._cs_key(v.get(), default="same")
+        return k if k in self.CS_KEYS else None
+
+    def _adw_cs_natural(self):
+        """What these modules write with no Output choice: the display
+        code as it came (encoded source) or linear Rec.709."""
+        k = self._adw_cs_in_key()
+        if k in ("srgb", "rec709"):
+            return k
+        if k in ("linear", "aces", "acescg", "pq"):
+            return "linear"
+        return "srgb" if self._adw_source_is_encoded() else "linear"
+
+    def _adw_cs_finish(self, out_dir, log_w=None):
+        """After a render: every EXR in out_dir converted to the Output
+        colour when that is not what was written, and the folder
+        tagged either way."""
+        out = self._adw_cs_out_key()
+        nat = self._adw_cs_natural()
+        if out is None:
+            out = nat
+        try:
+            self._adw_write_colorspace(out_dir, *self._cs_sidecar(out))
+        except Exception:
+            pass
+        if out == nat:
+            return 0
+        n = 0
+        try:
+            names = sorted(f for f in os.listdir(out_dir)
+                           if f.lower().endswith(".exr"))
+            for f in names:
+                pth = os.path.join(out_dir, f)
+                a = self._cs_convert(self._ff_read_frame(pth), nat, out)
+                self._exr_write_planes(
+                    pth, {c: a[:, :, i] for i, c in enumerate("RGB")},
+                    half=True, tag=out)
+                n += 1
+            if log_w is not None and n:
+                self.log(log_w, f"Output colour: {n} EXR(s) converted "
+                         f"{self._cs_name(nat)} \u2192 {self._cs_name(out)}.",
+                         "hi")
+        except Exception as ex:
+            if log_w is not None:
+                self.log(log_w, f"Output colour conversion failed: {ex}",
+                         "err")
+        return n
+
     def _adw_gamma_encode(self, arr, scale=1.0, is_encoded=None):
         """The single, shared first conversion of a raw source EXR's
         float values toward a display-ready [0,1] array, ready to be
@@ -18737,6 +19128,11 @@ class App(tk.Tk):
         import numpy as np
         enc = is_encoded if is_encoded is not None \
             else self._adw_source_is_encoded()
+        k = self._adw_cs_in_key()
+        if k in ("aces", "acescg", "pq"):
+            # a float source in another space: to Rec.709 linear first
+            arr = self._cs_to_lin709(arr, k)
+            enc = False
         if enc:
             return np.clip(arr/max(scale, 1e-6), 0, 1)
         return np.power(np.clip(arr/max(scale, 1e-6), 0, 1), 1/2.2)
@@ -19045,6 +19441,7 @@ class App(tk.Tk):
                 f"switch tabs anytime to continue there.", "hi")
 
     def _rife_after_run_sendto(self, out_dir):
+        self._adw_cs_finish(out_dir, self.rlog)
         self._adw_propagate_output(out_dir, "rife", self.rlog)
 
     # ── TAB: SAM 3 ──────────────────────────────────────────────────
@@ -19225,6 +19622,7 @@ class App(tk.Tk):
         self.ip_folder_btn.pack(side="left", fill="x", expand=True)
         self.ip_lbl = tk.Label(c1, text="no folder", font=FSM, bg=S, fg=G,
                                anchor="w"); self.ip_lbl.pack(fill="x", pady=(4,0))
+        self._adw_cs_row(c1)
         nav = tk.Frame(c1, bg=S); nav.pack(fill="x", pady=(4, 0))
         for txt, d in (("\u25c0", -1), ("\u25b6", +1)):
             b = self._mkbtn(nav, txt, lambda dd=d: self._interp_step(dd),
@@ -23483,6 +23881,7 @@ class App(tk.Tk):
         for s in self.ip_segments:
             if s["name"] in done_names:
                 s["applied"] = True
+        self._adw_cs_finish(out_dir, self.ip_log_txt)
         self.ip_result_dir = out_dir
         self._ip_result_dir_cached = None      # rebuild the index map
         # the wipe's cached "out" side was source-vs-source until now
@@ -24816,25 +25215,17 @@ class App(tk.Tk):
                         cursor="hand2")
         _ini.pack(side="left", padx=(6, 0))
         self._tooltip(
-            "What the source frames hold.\n\n"
-            "sRGB / display \u2014 ordinary video, PNG, or an\n"
-            "EXR holding display-ready values.\n\n"
-            "Linear \u2014 scene-linear EXR (Rec.709 primaries).\n\n"
-            "ACES2065-1 \u2014 linear, ACES AP0 primaries. Painted\n"
-            "frames are written back as ACES2065-1.\n\n"
-            "HDR PQ \u2014 HDR10 (ST.2084), decoded to linear\n"
-            "light; written out as linear EXR.\n\n"
-            "Auto reads the folder's colourspace tag, the file\n"
-            "type, and whether an EXR holds values above 1.0;\n"
-            "otherwise the Setup default decides.\n\n"
-            "You paint on a display picture either way. Changing\n"
-            "this reloads the sequence, which drops unsaved paint.")(_ini)
+            self.CS_IN_TIP + "\n\nYou paint on a display picture either "
+            "way. Changing\nthis reloads the sequence, which drops "
+            "unsaved paint.")(_ini)
         self.sm_in_lbl = tk.Label(c1, text="", font=FSM, bg=S,
                                   fg="#555555", anchor="w",
                                   wraplength=260, justify="left")
         self.sm_in_lbl.pack(fill="x", pady=(2, 0))
         self.sm_in_var.trace_add("write",
                                  lambda *_: self._smudge_in_changed())
+        self.sm_cs_out_var = self._cs_combo(c1, "Output colour", self.CS_SAME,
+                                            self.CS_OUT_TIP, out=True)
         nav = tk.Frame(c1, bg=S); nav.pack(fill="x", pady=(4, 0))
         for txt, d in (("◀", -1), ("▶", +1)):
             b = self._mkbtn(nav, txt, lambda dd=d: self._smudge_step(dd),
@@ -25738,9 +26129,9 @@ class App(tk.Tk):
         mode, why, hdr = self._resolve_input_colour(choice, folder, names)
         self.sm_in_mode = mode
         ext = os.path.splitext(names[0])[1].lower()
-        if (choice != "Auto" or mode in ("aces", "pq")
+        if (choice != "Auto" or mode in ("aces", "acescg", "pq")
                 or ext in self.FF_LINEAR_EXTS):
-            self.sm_source_encoded = (mode == "srgb")
+            self.sm_source_encoded = mode in ("srgb", "rec709")
         txt = self.UPS_IN_NAMES[mode]
         if hdr:
             txt += "  \u00b7  HDR: shown exposed down to fit"
@@ -25777,18 +26168,51 @@ class App(tk.Tk):
         """EXR always; anything else when its numbers are not display
         code (a 16-bit PQ or linear PNG/TIFF)."""
         return (str(path).lower().endswith(".exr")
-                or self.sm_in_mode in ("linear", "aces", "pq"))
+                or self.sm_in_mode in ("linear", "aces", "acescg", "pq"))
 
-    def _smudge_aces_out(self, lin, dst):
-        """For an ACES2065-1 source: rewrite the frame just written as
-        tagged ACES2065-1 (the decode gives Rec.709 linear). No-op, and
-        False, for every other source."""
-        if self.sm_in_mode != "aces":
+    sm_cs_out_var = None
+
+    def _smudge_natural_out(self):
+        """What a painted frame holds with no Output colour choice: the
+        decode's own result -- ACES stays ACES, PQ and linear become
+        linear, a display source stays display code."""
+        mode = self.sm_in_mode
+        if mode == "aces":
+            return "aces"
+        if mode in ("linear", "pq", "acescg"):
+            return "linear"
+        enc = getattr(self, "sm_source_encoded", None)
+        if enc is False:
+            return "linear"
+        return mode if mode in ("srgb", "rec709") else "srgb"
+
+    def _smudge_cs_out_key(self):
+        v = self.__dict__.get("sm_cs_out_var")
+        choice = v.get() if v is not None else self.CS_SAME
+        k = self._cs_key(choice, default="same")
+        return k if k in self.CS_KEYS else self._smudge_natural_out()
+
+    def _smudge_aces_out(self, lin, dst, g=None):
+        """Rewrite the frame just written (ffmpeg wrote `lin` as is) in
+        the Output colour, tagged, when that is not what `lin` already
+        is: an ACES2065-1 source goes back as ACES2065-1, a chosen
+        space is converted to. `g` is the display picture the frame was
+        decoded from, needed when the source is display code. False
+        when the file is right as written."""
+        out = self._smudge_cs_out_key()
+        natural = self._smudge_natural_out()
+        if out == natural and out != "aces":
             return False
-        a = self._lin709_to_aces(lin)
+        import numpy as np
+        if natural in ("srgb", "rec709"):
+            src = lin if g is None else np.asarray(g, np.float32)
+            lin709 = self._cs_to_lin709(src, natural)
+        else:
+            lin709 = lin
+        a = self._cs_from_lin709(lin709, out)
         self._exr_write_planes(dst, {c: a[:, :, i]
                                      for i, c in enumerate("RGB")},
-                               half=False, aces=True)
+                               half=False, tag=out)
         return True
 
     def _smudge_pick_folder(self):
@@ -25940,7 +26364,7 @@ class App(tk.Tk):
         import numpy as np
         from PIL import Image
         def _apply_gamma(arr):
-            if self.sm_in_mode in ("aces", "pq"):
+            if self.sm_in_mode in ("aces", "acescg", "pq"):
                 # to scene-linear Rec.709 first; the write side converts
                 # an ACES source back
                 arr = self._scene_from_raw(arr, self.sm_in_mode)
@@ -28784,9 +29208,9 @@ class App(tk.Tk):
                 "-frames:v", "1", out_p], input=raw, capture_output=True)
             if r.returncode != 0 or not os.path.exists(out_p):
                 raise RuntimeError(r.stderr.decode("utf-8", "replace")[-300:])
-            if self._smudge_aces_out(lin, out_p):
-                self._adw_write_colorspace(out_dir, "scene-linear",
-                                           primaries=self.ACES_NAME)
+            self._smudge_aces_out(lin, out_p, g=g)
+            self._adw_write_colorspace(
+                out_dir, *self._cs_sidecar(self._smudge_cs_out_key()))
             self.log(self.sm_log_txt,
                 f"Saved \u2192 {os.path.relpath(out_p, self.sm_folder)}",
                 "ok")
@@ -28844,13 +29268,12 @@ class App(tk.Tk):
         # Each Run writes a fresh version so renders never overwrite one
         # another: ADW-Paint_v01, then v02, v03 ...
         out_dir = self._adw_versioned_output_dir(self.sm_folder, "ADW-Paint")
-        if self.sm_in_mode in ("aces", "pq"):
-            # Say what the EXRs hold, so the next module reads them the
-            # way they were written (ACES stays ACES; PQ becomes linear).
-            self._adw_write_colorspace(
-                out_dir, "scene-linear",
-                primaries=self.ACES_NAME if self.sm_in_mode == "aces"
-                else None)
+        # Say what the EXRs hold, so the next module reads them the way
+        # they were written. An Output colour other than the source's
+        # own means every frame is re-encoded, not copied.
+        _out_key = self._smudge_cs_out_key()
+        _reencode = _out_key != self._smudge_natural_out()
+        self._adw_write_colorspace(out_dir, *self._cs_sidecar(_out_key))
         self._sm_save_dir = out_dir   # subsequent Save Frames join it
         do_mov = bool(self.sm_out_mov_var.get())
         total = len(self.sm_frames)
@@ -28915,9 +29338,9 @@ class App(tk.Tk):
                             if r.returncode != 0 or not os.path.exists(dst_path):
                                 raise RuntimeError(_encode_err(
                                     f"Frame {i+1} encode failed", r))
-                            self._smudge_aces_out(lin, dst_path)
+                            self._smudge_aces_out(lin, dst_path, g=g)
                             n_converted += 1
-                        elif _ext.lower() == ".exr":
+                        elif _ext.lower() == ".exr" and not _reencode:
                             _sh5.copy(src_path, dst_path)
                             n_copied += 1
                         else:
@@ -28948,7 +29371,7 @@ class App(tk.Tk):
                             if r.returncode != 0 or not os.path.exists(dst_path):
                                 raise RuntimeError(_encode_err(
                                     f"Frame {i+1} copy failed", r))
-                            self._smudge_aces_out(lin, dst_path)
+                            self._smudge_aces_out(lin, dst_path, g=g)
                             n_converted += 1
                         if mov_stage is not None:
                             _render_pil(i).save(
@@ -31609,10 +32032,24 @@ class App(tk.Tk):
             "passes.")(_fmti)
         # Say what the render is written as -- the question "what
         # colourspace is this writing?" should not need the manual.
+        _csrow = tk.Frame(_obottom, bg=BG)
+        _csrow.pack(fill="x", padx=16, pady=(4, 0))
+        tk.Label(_csrow, text="Output colour", font=FSM, bg=BG, fg=G,
+                 width=12, anchor="w").pack(side="left")
+        self.organic_cs_out_var = tk.StringVar(value=self.CS_SAME)
+        ttk.Combobox(_csrow, textvariable=self.organic_cs_out_var,
+                     values=list(self.CS_OUT_CHOICES), state="readonly",
+                     font=FSM, width=24).pack(side="left", padx=(4, 0))
+        _csi = tk.Label(_csrow, text="\u24d8", font=FSM, bg=BG,
+                        fg="#555555", cursor="hand2")
+        _csi.pack(side="left", padx=(6, 0))
+        self._tooltip(self.CS_OUT_TIP)(_csi)
         self.organic_out_lbl = tk.Label(_obottom, text="", font=FSM, bg=BG,
                                         fg="#777777", anchor="w")
         self.organic_out_lbl.pack(fill="x", padx=16, pady=(2, 0))
         self.organic_fmt_var.trace_add(
+            "write", lambda *_: self._organic_out_refresh_label())
+        self.organic_cs_out_var.trace_add(
             "write", lambda *_: self._organic_out_refresh_label())
         self._organic_out_refresh_label()
 
@@ -32211,8 +32648,9 @@ class App(tk.Tk):
     _organic_out_base = None      # where renders go for a movie source
     organic_cs_lbl = None
     # One choice per colourspace Expansion Studio can write, plus display.
-    LENS_IN_CHOICES = ("Auto", "Display-encoded (sRGB / Rec.709)",
-                       "Linear Rec.709", "ACES2065-1", "HDR PQ / Rec.2020")
+    LENS_IN_CHOICES = CS_IN_CHOICES
+    _organic_source_cs = None     # the chosen / tagged key when it is
+                                  # more specific than the flags below
 
     def _organic_apply_in_choice(self):
         """Set how the sequence is read from the Input colour choice.
@@ -32224,23 +32662,47 @@ class App(tk.Tk):
         except Exception:
             c = "Auto"
         self._organic_source_pq = False
-        if c.startswith("Display"):
+        self._organic_source_cs = None
+        key = self._cs_key(c)
+        if key in ("srgb", "rec709"):
             self._organic_source_encoded, self._organic_source_aces = \
                 True, False
-        elif c.startswith("Linear") or c.startswith("Scene"):
-            # ("Scene-linear" is the old name, still in saved projects)
+            self._organic_source_cs = key
+        elif key == "linear":
             self._organic_source_encoded, self._organic_source_aces = \
                 False, False
-        elif c.startswith("ACES"):
+        elif key == "aces":
             self._organic_source_encoded, self._organic_source_aces = \
                 False, True
-        elif c.startswith("HDR PQ"):
+        elif key == "acescg":
+            self._organic_source_encoded, self._organic_source_aces = \
+                False, False
+            self._organic_source_cs = "acescg"
+        elif key == "pq":
             self._organic_source_encoded, self._organic_source_aces = \
                 False, False
             self._organic_source_pq = True
         else:
             self._organic_source_encoded = None
             self._organic_source_aces = None
+            tagged = None
+            try:
+                if self.organic_folder:
+                    tagged = self._cs_tagged_key(self.organic_folder)
+            except Exception:
+                tagged = None
+            if tagged in ("acescg", "rec709"):
+                self._organic_source_encoded = tagged == "rec709"
+                self._organic_source_aces = False
+                self._organic_source_cs = tagged
+                self._organic_cs_reason = "tagged " + self.CS_NAMES[tagged]
+                return
+            if tagged == "pq":
+                self._organic_source_encoded = False
+                self._organic_source_aces = False
+                self._organic_source_pq = True
+                self._organic_cs_reason = "tagged " + self.CS_NAMES["pq"]
+                return
             if self._organic_src_transfer == "smpte2084":
                 self._organic_source_encoded = False
                 self._organic_source_aces = False
@@ -32257,15 +32719,10 @@ class App(tk.Tk):
         if lbl is None:
             return
         try:
-            if self._organic_source_pq:
-                name = "HDR PQ / Rec.2020"
-            elif self._organic_source_aces:
-                name = "ACES2065-1"
-            elif self._organic_source_encoded:
-                name = "Display-encoded"
-            elif self._organic_source_encoded is False:
-                name = "Linear Rec.709"
-            else:
+            name = self.CS_NAMES.get(self._organic_in_key() or "", "")
+            if self._organic_source_encoded is None and not (
+                    self._organic_source_pq or self._organic_source_aces
+                    or self._organic_source_cs):
                 name = ""
             fr = getattr(self, "organic_frames", None) or []
             if not name and fr and not str(fr[0]).lower().endswith(".exr"):
@@ -32282,6 +32739,35 @@ class App(tk.Tk):
         self._organic_out_refresh_label()
 
     organic_out_lbl = None
+    organic_cs_out_var = None
+
+    def _organic_in_key(self):
+        """The source's colourspace as a CS key, from the flags (None
+        while Auto has not decided)."""
+        if getattr(self, "_organic_source_pq", False):
+            return "pq"
+        if getattr(self, "_organic_source_aces", False):
+            return "aces"
+        cs = getattr(self, "_organic_source_cs", None)
+        if cs:
+            return cs
+        enc = self._organic_source_encoded
+        if enc is None:
+            return None
+        return "srgb" if enc else "linear"
+
+    def _organic_cs_out_key(self, fmt=None):
+        if fmt is None:
+            v = self.__dict__.get("organic_fmt_var")
+            fmt = v.get() if v is not None else self.ORGANIC_FORMATS[0]
+        v = self.__dict__.get("organic_cs_out_var")
+        choice = v.get() if v is not None else self.CS_SAME
+        in_key = self._organic_in_key() or "linear"
+        if in_key == "pq" and self._cs_key(choice, default="same") == "same" \
+                and str(fmt).startswith("EXR"):
+            in_key = "linear"      # what an EXR from a PQ source held before
+        return self._cs_out_key(choice, in_key,
+                                movie=not str(fmt).startswith("EXR"))
 
     def _organic_out_space(self, fmt=None):
         """What a render is WRITTEN as, from the Write format and how
@@ -32292,15 +32778,9 @@ class App(tk.Tk):
         if fmt is None:
             v = self.__dict__.get("organic_fmt_var")
             fmt = v.get() if v is not None else self.ORGANIC_FORMATS[0]
-        if not str(fmt).startswith("EXR"):
-            return "Display-encoded sRGB (PNG)"
-        enc = self._organic_source_encoded
-        pq = bool(getattr(self, "_organic_source_pq", False))
-        aces = (bool(getattr(self, "_organic_source_aces", False))
-                and not enc and not pq)
-        if aces:
-            return "Scene-linear, ACES2065-1 (AP0) primaries"
-        return "Scene-linear, Rec.709 primaries"
+        k = self._organic_cs_out_key(fmt)
+        return self._cs_name(k) + ("" if str(fmt).startswith("EXR")
+                                   else " (PNG)")
 
     def _organic_out_refresh_label(self):
         lbl = self.__dict__.get("organic_out_lbl")
@@ -32506,7 +32986,8 @@ class App(tk.Tk):
     # Output folder (ADW/Lens_Studio_vNN) and movie name. Was ADW_Optics.
     LENS_OUT_NAME = "Lens_Studio"
 
-    def _organic_load_linear(self, path, encoded=None, aces=None, pq=None):
+    def _organic_load_linear(self, path, encoded=None, aces=None, pq=None,
+                             cs=None):
         """Reads a frame as scene-linear float RGB -- the space every
         effect in this module operates in.
 
@@ -32530,6 +33011,8 @@ class App(tk.Tk):
         read raw, ending up with values to 9.9 where the source could
         not exceed 1.0."""
         import numpy as np
+        if cs is None:
+            cs = getattr(self, "_organic_source_cs", None)
         if (bool(pq) if pq is not None
                 else bool(getattr(self, "_organic_source_pq", False))):
             # HDR10: PQ code -> nits -> scene (1.0 = SDR white), then
@@ -32617,9 +33100,10 @@ class App(tk.Tk):
                     # display-referred values in an EXR container:
                     # linearise so the effects (and the final encode)
                     # operate on genuinely linear light
-                    a = np.clip(arr, 0.0, 1.0)
-                    arr = np.where(a <= 0.04045, a / 12.92,
-                                   ((a + 0.055) / 1.055) ** 2.4).astype(np.float32)
+                    arr = self._cs_to_lin709(
+                        arr, "rec709" if cs == "rec709" else "srgb")
+                elif cs == "acescg":
+                    arr = np.maximum(self._acescg_to_lin709(arr), 0.0)
                 elif (bool(aces) if aces is not None
                       else bool(self._organic_source_aces)):
                     # AP0 -> Rec.709 primaries, in linear light. Colours
@@ -32633,9 +33117,8 @@ class App(tk.Tk):
                     f"EXR read failed ({ex}); falling back to 8-bit.", "err")
         img = self._pv_frame(path).convert("RGB")
         arr = np.asarray(img, dtype=np.float32) / 255.0
-        # undo sRGB -> linear
-        return np.where(arr <= 0.04045, arr / 12.92,
-                        ((arr + 0.055) / 1.055) ** 2.4).astype(np.float32)
+        # undo the display curve -> linear
+        return self._cs_to_lin709(arr, "rec709" if cs == "rec709" else "srgb")
 
     # A sidecar beside a written sequence, recording what the values
     # actually are. The EXR header would be the right home for this, but
@@ -33380,7 +33863,7 @@ class App(tk.Tk):
 
     @staticmethod
     def _organic_write_exr(path, rgb, half=True, aces=False,
-                           pixel_aspect=None):
+                           pixel_aspect=None, tag=None):
         """Scene-linear float out, the way the rest of the app writes
         EXRs -- OpenEXR rather than cv2.imwrite, whose EXR codec is
         compiled out of the pip wheels.
@@ -33394,6 +33877,13 @@ class App(tk.Tk):
             App._exr_write_planes(
                 path, {c: a[:, :, i] for i, c in enumerate("RGB")},
                 half=half, aces=True, pixel_aspect=pixel_aspect)
+            return
+        if tag in ("aces", "acescg"):
+            # `rgb` is ALREADY in that space; only the header says so.
+            a = np.asarray(rgb, np.float32)
+            App._exr_write_planes(
+                path, {c: a[:, :, i] for i, c in enumerate("RGB")},
+                half=half, pixel_aspect=pixel_aspect, tag=tag)
             return
         a = np.ascontiguousarray(np.asarray(rgb, np.float32))
         h, w = a.shape[:2]
@@ -33412,32 +33902,37 @@ class App(tk.Tk):
                        for i, c in enumerate("RGB")})
         f.close()
 
-    def _organic_write_frame(self, path_stem, rgb_lin, fmt, aces=False):
-        """One rendered frame in the chosen format.
-
-        EXR keeps the linear values the whole stack was computed in.
-        PNG is a display encode and is the lossy option here -- every
-        effect above it runs in linear float, and writing 8 bits throws
-        that away at the last step."""
+    def _organic_write_frame(self, path_stem, rgb_lin, fmt, aces=False,
+                             cs=None):
+        """One rendered frame in the chosen format. `rgb_lin` is linear
+        Rec.709; `cs` (a CS key) is the colourspace written -- EXR holds
+        any, PNG a display one. Without `cs`: EXR keeps the linear
+        values the whole stack was computed in (ACES2065-1 with
+        aces=True), PNG is sRGB."""
         import numpy as np
         if fmt.startswith("EXR"):
             dst = path_stem + ".exr"
+            if cs is not None and not aces:
+                self._organic_write_exr(
+                    dst, self._cs_from_lin709(rgb_lin, cs),
+                    half=("16-bit" in fmt), tag=cs)
+                return dst
             self._organic_write_exr(dst, rgb_lin,
                                     half=("16-bit" in fmt), aces=aces)
             return dst
         from PIL import Image
         dst = path_stem + ".png"
+        if cs is None or not self._cs_is_display(cs):
+            cs = "srgb"
+        code = np.clip(self._cs_from_lin709(np.asarray(rgb_lin, np.float32),
+                                            cs), 0.0, 1.0)
         if "16-bit" in fmt:
             import cv2
-            a = np.clip(np.asarray(rgb_lin, np.float32), 0.0, 1.0)
-            srgb = np.where(a <= 0.0031308, a * 12.92,
-                            1.055 * np.power(np.maximum(a, 1e-8),
-                                             1.0 / 2.4) - 0.055)
             cv2.imwrite(dst, cv2.cvtColor(
-                (np.clip(srgb, 0, 1) * 65535.0 + 0.5).astype(np.uint16),
+                (code * 65535.0 + 0.5).astype(np.uint16),
                 cv2.COLOR_RGB2BGR))
         else:
-            Image.fromarray(self._organic_linear_to_display(rgb_lin),
+            Image.fromarray((code * 255.0 + 0.5).astype(np.uint8),
                             "RGB").save(dst)
         return dst
 
@@ -33453,8 +33948,9 @@ class App(tk.Tk):
         if _enc is None:
             _enc = self._adw_source_is_encoded()
         _pq = bool(self._organic_source_pq)
+        _cs_in = getattr(self, "_organic_source_cs", None)
         _aces = bool(self._organic_source_aces) and not _enc and not _pq
-        _aces_out = _aces and _fmt.startswith("EXR")
+        _out_key = self._organic_cs_out_key(_fmt)
         # ...and the Expansion adjustment, for the same reason.
         _exp_gain = self._organic_exp_gain()
         if abs(_exp_gain - 1.0) > 1e-6:
@@ -33464,25 +33960,23 @@ class App(tk.Tk):
                 "(where a frame has a BlowMask channel).", "dim"))
         # Say what these values are, so the next module does not have to
         # guess -- the same mark Upscale & Expand writes.
-        self._adw_write_colorspace(
-            out_dir, "scene-linear" if _fmt.startswith("EXR") else "display",
-            primaries=self.ACES_NAME if _aces_out else None)
-        self.after(0, lambda f=_fmt: self.log(
+        self._adw_write_colorspace(out_dir, *self._cs_sidecar(_out_key))
+        self.after(0, lambda f=_fmt, k=_out_key: self.log(
             self.organic_log_txt,
-            f"Writing {f} \u2014 {self._organic_out_space(f)}.", "hi"))
+            f"Writing {f} \u2014 {self._cs_name(k)}.", "hi"))
         try:
             for n, i in enumerate(range(v0, v1)):
                 if self._organic_cancel:
                     break
                 src = os.path.join(self.organic_folder, self.organic_frames[i])
                 lin = self._organic_load_linear(src, encoded=_enc, pq=_pq,
-                                                aces=_aces)
+                                                aces=_aces, cs=_cs_in)
                 lin = self._organic_exp_apply(lin, src, gain=_exp_gain)
                 out = self._organic_apply_stack(lin, params,
                     seed=self._organic_frame_seed(i))
                 stem = self._organic_out_stem(self.organic_frames, i)
                 dst = self._organic_write_frame(
-                    os.path.join(out_dir, stem), out, _fmt, aces=_aces_out)
+                    os.path.join(out_dir, stem), out, _fmt, cs=_out_key)
                 written.append(os.path.basename(dst))
                 frac = (n + 1) / total
                 self.after(0, lambda p=frac, k=n+1:
@@ -33651,20 +34145,18 @@ class App(tk.Tk):
         # Same control ADW-Organic has, for the same reason: an EXR
         # cannot tell you which of the two it is holding, and getting it
         # wrong looks exactly like a bad grade.
-        _rowcs = tk.Frame(c_in, bg=S); _rowcs.pack(fill="x", pady=(6, 0))
-        tk.Label(_rowcs, text="EXR is", font=FSM, bg=S, fg=G).pack(side="left")
-        self.ff_cs_var = tk.StringVar(
-            value="Display-encoded" if self._adw_source_is_encoded()
-            else "Scene-linear")
-        ttk.Combobox(_rowcs, textvariable=self.ff_cs_var, font=FSM,
-            state="readonly", width=17,
-            values=["Display-encoded", "Scene-linear"]).pack(
-                side="left", padx=(6, 0))
+        self.ff_cs_var = self._cs_combo(c_in, "Input colour", self.CS_AUTO,
+                                        self.CS_IN_TIP)
         self.ff_cs_var.trace_add("write", lambda *_: self._ff_show_frame(
             getattr(self, "_ff_idx", 0)))
+        self.ff_cs_out_var = self._cs_combo(c_in, "Output colour",
+                                            self.CS_SAME, self.CS_OUT_TIP,
+                                            out=True)
         tk.Label(c_in, text="If the preview looks washed-out or milky, "
-            "this is the control \u2014 an EXR holding display-ready "
-            "values must not be gamma-ed again.",
+            "Input colour is the control \u2014 an EXR holding "
+            "display-ready values must not be gamma-ed again. Auto reads "
+            "the folder's tag (Display-encoded / Scene-linear) and the "
+            "Setup default.",
             font=FSM, bg=S, fg=G, wraplength=320, justify="left",
             anchor="w").pack(fill="x", pady=(4, 0))
 
@@ -34496,15 +34988,46 @@ class App(tk.Tk):
               else os.path.splitext(names[idx])[1].lower())
         if ext != ".exr":
             return ext, False
-        marked = self._adw_read_colorspace(folder)
+        out = self._ff_cs_out_key()
+        if out is not None:
+            return ext, out
+        marked = self._cs_tagged_key(folder) if folder else None
         if marked:
-            return ext, marked != "display"
+            return ext, marked
         if ref:
             try:
-                return ext, self._exr_is_over_range(self._ff_read_frame(ref))
+                if self._exr_is_over_range(self._ff_read_frame(ref)):
+                    return ext, "linear"
             except Exception:
                 pass
-        return ext, self.ff_cs_var.get() == "Scene-linear"
+        return ext, "srgb" if self._ff_source_encoded() else "linear"
+
+    ff_cs_out_var = None
+
+    def _ff_in_key(self):
+        """The Input colour as a CS key, or None on Auto."""
+        v = self.__dict__.get("ff_cs_var")
+        if v is None:
+            return None
+        try:
+            k = self._cs_key(v.get())
+        except Exception:
+            return None
+        if k == "auto":
+            return None
+        if k in ("srgb", "rec709") or k in self.CS_KEYS:
+            return k
+        # legacy project values
+        return "srgb" if str(v.get()).startswith("Display") else "linear"
+
+    def _ff_cs_out_key(self):
+        """The Output colour as a CS key; None for Same as input, which
+        _ff_target_convention then settles from the sequence itself."""
+        v = self.__dict__.get("ff_cs_out_var")
+        if v is None:
+            return None
+        k = self._cs_key(v.get(), default="same")
+        return k if k in self.CS_KEYS else None
 
     def _ff_write_repaired_frame(self, src_png, dst_path, is_linear):
         """One repaired frame from VACE, written into whatever format
@@ -34538,8 +35061,16 @@ class App(tk.Tk):
             return
         code = np.asarray(Image.open(src_png).convert("RGB"),
                           np.float32) / 255.0
-        px = self._srgb_to_linear(code) if is_linear else code
-        self._organic_write_exr(dst_path, px, half=True)
+        # `is_linear` is a CS key (or the old bool): the display
+        # picture VACE made, taken to that space.
+        key = (is_linear if isinstance(is_linear, str)
+               else ("linear" if is_linear else "srgb"))
+        if key == "srgb":
+            px = code
+        else:
+            px = self._cs_from_lin709(self._srgb_to_linear(code), key)
+        self._organic_write_exr(dst_path, px, half=True,
+                                tag=key if key in ("aces", "acescg") else None)
 
     def _ff_fix_worker(self):
         try:
@@ -34563,12 +35094,33 @@ class App(tk.Tk):
             # a complete, usable sequence rather than a folder of holes.
             _log("Copying source\u2026")
             missing = getattr(self, "ff_missing", set())
+            # An Output colour other than the source's own: every EXR
+            # is converted on the way across, not copied, and the
+            # folder is tagged with what it holds.
+            _out = self._ff_cs_out_key()
+            _in = self._ff_in_key() or self._cs_tagged_key(src) or (
+                "srgb" if self._ff_source_encoded() else "linear")
+            _convert = bool(_out) and _out != _in
+            if _convert:
+                _log(f"Converting {self._cs_name(_in)} \u2192 "
+                     f"{self._cs_name(_out)} on the way.")
             for i, nm in enumerate(names):
                 if i in missing:
                     continue        # nothing to copy; the repair creates it
                 dst = os.path.join(out_dir, nm)
-                if not os.path.exists(dst):
+                if os.path.exists(dst):
+                    continue
+                if _convert and nm.lower().endswith(".exr"):
+                    _a = self._cs_convert(
+                        self._ff_read_frame(os.path.join(src, nm)), _in, _out)
+                    self._exr_write_planes(
+                        dst, {c: _a[:, :, ci] for ci, c in enumerate("RGB")},
+                        half=True, tag=_out)
+                else:
                     shutil.copy2(os.path.join(src, nm), dst)
+            if _out or self._cs_tagged_key(src):
+                self._adw_write_colorspace(
+                    out_dir, *self._cs_sidecar(_out or _in))
 
             work = self._ff_work_dir()
             fps = float(getattr(self, "ff_fps", 24.0))
@@ -35130,14 +35682,26 @@ class App(tk.Tk):
     def _ff_source_encoded(self):
         """This tab's own setting, falling back to the app-wide default
         the other modules use."""
-        v = getattr(self, "ff_cs_var", None)
-        if v is not None:
-            return v.get() == "Display-encoded"
+        k = self._ff_in_key()
+        if k is not None:
+            return self._cs_is_display(k) and k != "pq"
+        folder = (self.__dict__.get("ff_scan_folder")
+                  or self.__dict__.get("ff_input"))
+        try:
+            tagged = self._cs_tagged_key(folder) if folder else None
+        except Exception:
+            tagged = None
+        if tagged:
+            return self._cs_is_display(tagged) and tagged != "pq"
         return self._adw_source_is_encoded()
 
     def _ff_to_display(self, arr, name):
         """Frame to uint8 for the viewer."""
         import numpy as np
+        k = self._ff_in_key()
+        if k in ("aces", "acescg", "pq") and os.path.splitext(
+                str(name))[1].lower() in self.FF_LINEAR_EXTS:
+            return self._organic_linear_to_display(self._scene_from_raw(arr, k))
         if self._ff_is_linear(name, self._ff_source_encoded()):
             return self._organic_linear_to_display(arr)
         return (np.clip(arr, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
@@ -35248,14 +35812,14 @@ class App(tk.Tk):
         # viewer, the preview and the full run all go through it; before
         # this, every EXR was tonemapped by ffmpeg whatever it held.
         self.sam_in_var = self._combo(c, "Input colour", list(self.UPS_IN_CHOICES),
-            tip="How the frames are read for display and for SAM.\n\n"
-                "Auto \u2014 the sidecar or EXR header, else the pixels.\n"
-                "sRGB / display \u2014 values used as they are.\n"
-                "Linear \u2014 scene-linear Rec.709, display-encoded for SAM.\n"
-                "ACES2065-1 \u2014 AP0 to Rec.709, then display-encoded.\n"
-                "HDR PQ \u2014 PQ decoded, 100 nits = white.")
+            tip=self.CS_IN_TIP + "\n\nSAM sees the display picture "
+                "either way.")
         self.sam_in_lbl = tk.Label(c, text="", font=FSM, bg=S, fg=G, anchor="w",
                                    wraplength=300, justify="left")
+        self.sam_cs_out_var = self._cs_combo(
+            c, "Output colour", self.CS_SAME,
+            self.CS_OUT_TIP + "\n\nHere: the RGB of the SAM_EXR files "
+            "(the mattes\nare data and never converted).", out=True)
         self.sam_in_lbl.pack(anchor="w", pady=(2, 0))
         self.sam_in_var.trace_add("write", lambda *_: self._sam_in_changed())
 
@@ -37337,7 +37901,7 @@ class App(tk.Tk):
                 raw = None
             if raw is not None:
                 mode = getattr(self, "_sam_in_mode", "srgb")
-                if mode == "srgb":
+                if mode in ("srgb", "rec709"):
                     return (np.clip(raw, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
                 lin = self._scene_from_raw(raw, mode)
                 return self._organic_linear_to_display(lin)
@@ -37648,13 +38212,20 @@ def _patch_mps_if_needed():
         log(f'MPS patch skipped: {ex}')
 
 
-COLOUR = 'srgb'            # set from --colour: srgb / linear / aces / pq
+COLOUR = 'srgb'            # set from --colour: srgb / rec709 / linear / aces / acescg / pq
 HDR_SDR_WHITE = 100.0      # nits that SDR code 1.0 represents
-# Linear Rec.709 -> ACES2065-1 (AP0), Bradford-adapted; inverted at
-# run time so the pair matches the app's own matrix exactly.
+# Linear Rec.709 -> ACES2065-1 (AP0) and -> ACEScg (AP1), Bradford-
+# adapted; inverted at run time so each pair matches the app's own
+# matrix exactly.
 M_709_TO_AP0 = ((0.4397010, 0.3829780, 0.1773350),
                 (0.0897923, 0.8134230, 0.0967616),
                 (0.0175440, 0.1115440, 0.8707040))
+M_709_TO_AP1 = ((0.6130973, 0.3395229, 0.0473798),
+                (0.0701942, 0.9163559, 0.0134499),
+                (0.0206156, 0.1095698, 0.8698146))
+M_709_TO_2020 = ((0.6274, 0.3293, 0.0433),
+                 (0.0691, 0.9195, 0.0114),
+                 (0.0164, 0.0880, 0.8956))
 
 
 def pq_decode(code):
@@ -37672,14 +38243,17 @@ def float_rgb_to_display_u8(raw, colour):
     uint8 RGB, read the way the Input colour choice says -- the same
     maths as the app's viewer, so SAM sees what the user saw."""
     a = np.asarray(raw, np.float32)
-    if colour == 'srgb':
+    if colour in ('srgb', 'rec709'):
         return (np.clip(a, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
-    if colour == 'aces':
-        m = np.linalg.inv(np.array(M_709_TO_AP0, np.float64)).T.astype(np.float32)
-        a = (a @ m).astype(np.float32)
+    if colour in ('aces', 'acescg'):
+        m = np.linalg.inv(np.array(M_709_TO_AP0 if colour == 'aces'
+                                   else M_709_TO_AP1, np.float64)).T
+        a = (a @ m.astype(np.float32)).astype(np.float32)
     a = np.maximum(a, 0.0)
     if colour == 'pq':
         a = pq_decode(np.clip(a, 0.0, 1.0)) / HDR_SDR_WHITE
+        m = np.linalg.inv(np.array(M_709_TO_2020, np.float64)).T
+        a = np.maximum((a @ m.astype(np.float32)), 0.0).astype(np.float32)
     a = np.clip(a, 0.0, 1.0)
     srgb = np.where(a <= 0.0031308, a * 12.92, 1.055 * (a ** (1.0 / 2.4)) - 0.055)
     return (np.clip(srgb, 0, 1) * 255.0 + 0.5).astype(np.uint8)
@@ -38987,10 +39561,19 @@ if __name__ == '__main__':
             return False
 
         writer_script = os.path.expanduser("~/RifeApp/_exr_merge.py")
+        # The RGB goes across in the Output colour; the source's own
+        # space is what the Input colour resolved to.
+        _cs_in = getattr(self, "_sam_in_mode", "srgb") or "srgb"
+        _v = self.__dict__.get("sam_cs_out_var")
+        _cs_out = self._cs_out_key(_v.get() if _v is not None else self.CS_SAME,
+                                   _cs_in)
+        if _cs_out != _cs_in:
+            self.log(self.sam_log_txt, f"RGB written as {self._cs_name(_cs_out)} "
+                     f"(source {self._cs_name(_cs_in)}).", "dim")
         obj_names = [o["name"].replace(" ", "_").lower() for o in objects]
         obj_dirs  = [obj_mask_dirs.get(i, "") for i in range(len(objects))]
 
-        merger = f"""
+        merger = """
 import sys, os, json, numpy as np
 try:
     import OpenEXR, Imath
@@ -39007,6 +39590,9 @@ sam_dirs  = cfg["sam_dirs"]
 obj_names = cfg["obj_names"]
 exr_dir   = cfg["exr_dir"]
 do_multi  = cfg["do_multi"]
+cs_in     = cfg.get("cs_in", "")
+cs_out    = cfg.get("cs_out", "")
+""" + self.CS_NUMPY_SRC + f"""
 
 from PIL import Image
 
@@ -39064,6 +39650,8 @@ for fi, fname in enumerate(frames):
         continue
     if rgb is None or rgb.shape[:2] != (h, w):
         rgb = np.zeros((h, w, 3), np.float32)
+    elif cs_in and cs_out and cs_in != cs_out:
+        rgb = cs_convert(rgb, cs_in, cs_out)
 
     # Combined alpha = max across all objects
     combined_a = np.zeros((h, w), np.float32)
@@ -39112,7 +39700,11 @@ print("EXR write complete")
                 "obj_names": obj_names,
                 "exr_dir":   exr_dir,
                 "do_multi":  multi,
+                "cs_in":     _cs_in,
+                "cs_out":    _cs_out,
             }, _cf)
+        if _cs_out:
+            self._adw_write_colorspace(exr_dir, *self._cs_sidecar(_cs_out))
 
         self.log(self.sam_log_txt, f"Writing {len(frames)} EXR frames…", "dim")
         r = subprocess.run(
@@ -39320,12 +39912,17 @@ print("EXR write complete")
                  ), arrow="w"),
 
             dict(tab="upstudio", widget="ups_input",
-                 title="Input colour and Anamorphic",
+                 title="Input colour, Output colour, Anamorphic",
                  body=(
                      "Input colour: Auto reads the folder's tag, the file\n"
-                     "type and the pixels; or say sRGB / Linear / ACES /\n"
-                     "HDR PQ. Linear and HDR sources are encoded for the\n"
-                     "upscaler and decoded back, highlights kept.\n\n"
+                     "type and the pixels; or say what the frames are —\n"
+                     "Scene-linear, Display sRGB / Rec.709 / PQ, Working\n"
+                     "ACEScg, Archive ACES2065-1. Linear and HDR sources\n"
+                     "are encoded for the upscaler and decoded back,\n"
+                     "highlights kept. Output colour (under Write) picks\n"
+                     "what is written; Same as input keeps the source's\n"
+                     "space. Every module has the same two dropdowns and\n"
+                     "the same ⓘ explaining each space.\n\n"
                      "Anamorphic: the frames are desqueezed before any\n"
                      "model sees them and squeezed back on write, with\n"
                      "the pixel aspect in the EXR. An EXR that says its\n"
@@ -39883,6 +40480,7 @@ print("EXR write complete")
         self.curve_lbl.bind("<Button-1>", self._curve_pick)
         self.curve_info = tk.Label(c, text="", font=FSM, bg=S, fg=G, anchor="w")
         self.curve_info.pack(anchor="w", pady=(3, 0))
+        self._adw_cs_row(c)
 
         ccache = self._card(lf, "Analyse Motion")
         self.curve_cache_btn = self._mkbtn(ccache, "\u2295  Analyse Motion",
@@ -42917,6 +43515,7 @@ print("EXR write complete")
         threading.Thread(target=go, daemon=True).start()
 
     def _curve_after_run_sendto(self, out_dir):
+        self._adw_cs_finish(out_dir, self.curve_log_txt)
         self._adw_propagate_output(out_dir, "curve", self.curve_log_txt)
 
     def _curve_finish_run(self):
@@ -43142,6 +43741,7 @@ print("EXR write complete")
         self.area_lbl.bind("<Button-1>", self._area_pick)
         self.area_info = tk.Label(c, text="", font=FSM, bg=S, fg=G, anchor="w")
         self.area_info.pack(anchor="w", pady=(3, 0))
+        self._adw_cs_row(c)
 
         def _info_popup(tip):
             def _attach(widget):
@@ -46594,6 +47194,7 @@ print("EXR write complete")
         threading.Thread(target=go, daemon=True).start()
 
     def _area_after_run_sendto(self, out_dir):
+        self._adw_cs_finish(out_dir, self.area_log_txt)
         self._adw_propagate_output(out_dir, "area", self.area_log_txt)
 
     def _area_finish_run(self):
@@ -47186,17 +47787,17 @@ print("EXR write complete")
                 "lost if the run is cancelled part way.")
         # ACES2065-1 by default: the interchange space, so the EXR drops
         # into an ACES comp with no guess about what it holds.
-        self.usc_exr_cs_var = self._combo(c_of, "EXR colour",
-            list(self.USC_EXR_SPACES), default=self.USC_EXR_SPACES[0],
-            tip="The colourspace an EXR is written in.\n\n"
-                "ACES2065-1 \u2014 linear, AP0 primaries. The ACES\n"
-                "interchange space; tagged in the file and on the\n"
-                "folder. Read it in Nuke as ACES2065-1.\n\n"
-                "Linear Rec.709 \u2014 linear, Rec.709 / sRGB\n"
-                "primaries. What this tab wrote before.\n\n"
-                "Either way 1.0 is diffuse white and the expanded\n"
-                "highlights sit above it. A MOV is PQ / Rec.2020\n"
-                "and this does not apply.")
+        # Archive ACES2065-1 by default: the interchange space, so the
+        # EXR drops into an ACES comp with no guess about what it holds.
+        self.usc_cs_out_var = self._cs_combo(
+            c_of, "Output colour", self.CS_NAMES["aces"], self.CS_OUT_TIP,
+            out=True)
+        self.usc_cs_out_lbl = tk.Label(c_of, text="", font=FSM, bg=S,
+                                       fg="#777777", anchor="w",
+                                       wraplength=370, justify="left")
+        self.usc_cs_out_lbl.pack(fill="x", pady=(0, 2))
+        self.usc_cs_out_var.trace_add(
+            "write", lambda *_: self._usc_fmt_changed())
         _ofrow = tk.Frame(c_of, bg=S); _ofrow.pack(fill="x", pady=(2, 0))
         self.usc_fmt_note = tk.Label(_ofrow, text="\u24d8", font=FSM, bg=S,
                                      fg="#555555", cursor="hand2")
@@ -49925,8 +50526,11 @@ print("EXR write complete")
         if not frames or not folder:
             return "bt1886"
         if self._usc_in_mode:
-            # resolved: only a display source is ordinary video
-            return "bt1886" if self._usc_in_mode == "srgb" else "srgb"
+            # resolved: only a display source is ordinary video (chosen
+            # by hand as Display sRGB, it is the sRGB curve)
+            if self._usc_in_mode == "srgb":
+                return "srgb" if self._usc_in_explicit else "bt1886"
+            return "bt1886" if self._usc_in_mode == "rec709" else "srgb"
         path = os.path.join(folder, frames[0])
         return ("srgb"
                 if self._ff_is_linear(path, self._adw_source_is_encoded())
@@ -50272,7 +50876,8 @@ print("EXR write complete")
         mode, why, hdr = self._resolve_input_colour(
             choice, folder, names, self._usc_src_transfer)
         self._usc_in_mode, self._usc_src_hdr = mode, hdr
-        self._usc_in_explicit = choice != "Auto"
+        self._usc_in_explicit = self._cs_key(choice) in self.CS_KEYS
+        self._usc_cs_out_refresh()
         txt = self.UPS_IN_NAMES[mode]
         if hdr:
             # Expansion re-makes the range above white; what the source
@@ -50321,7 +50926,7 @@ print("EXR write complete")
         import numpy as np
         ext = os.path.splitext(path)[1].lower()
         mode = self._usc_mode_for(path)
-        if mode == "srgb":
+        if mode in ("srgb", "rec709"):
             if ext not in self.FF_LINEAR_EXTS:
                 return Image.open(path).convert("RGB")
             a = np.clip(self._ups_raw_float(path), 0.0, 1.0)
@@ -50455,6 +51060,7 @@ print("EXR write complete")
         except Exception:
             pass
         self._usc_multi_changed()
+        self._usc_cs_out_refresh()
 
     def _usc_fmt_text(self):
         """What the current combination actually produces. An expanded
@@ -50465,15 +51071,21 @@ print("EXR write complete")
             name, spec = self._usc_format()
             hdr = self._usc_hdr_on()
             if hdr and spec["ext"] == ".exr":
-                txt = (("ACES2065-1: linear, AP0 primaries. "
-                        if self._usc_exr_aces()
-                        else "Scene-linear, Rec.709 primaries. ")
-                       + "1.0 is diffuse white, highlights above it. "
-                       "The form to keep if this is going into comp or on "
-                       "to a log encode.")
+                _k = self._usc_cs_out_key(exr=True)
+                txt = (("ACES2065-1: linear, AP0 primaries. " if _k == "aces"
+                        else self._cs_name(_k) + ". ")
+                       + ("1.0 is diffuse white, highlights above it. "
+                          "The form to keep if this is going into comp or on "
+                          "to a log encode." if self._cs_is_linear(_k) else
+                          "A display encode: highlights above white are "
+                          "clipped." if _k != "pq" else
+                          "PQ code values in an EXR, tagged display."))
             elif hdr and spec["movie"]:
+                _k = self._usc_cs_out_key(exr=False)
                 txt = ("PQ / BT.2020, tagged on the movie. Display-ready "
-                       "HDR10.")
+                       "HDR10." if _k == "pq" else
+                       self._cs_name(_k) + ": an SDR movie, the expanded "
+                       "highlights clipped at white.")
             elif hdr:
                 txt = ("PQ code values in a 16-bit integer file. Displayable, "
                        "but no longer linear light \u2014 choose EXR if this "
@@ -50546,7 +51158,9 @@ print("EXR write complete")
     # Nuke's and Resolve's layer menus show.
     USC_LAYER_NAMES = {"tonemap": "tonemap", "topaz": "topaz",
                        "wan_vace": "wan_inpaint"}
-    USC_EXR_SPACES = ("ACES2065-1", "Linear Rec.709")
+    USC_EXR_SPACES = ("Archive ACES2065-1 (AP0)", "Scene-linear Rec.709")
+    usc_cs_out_var = None
+    usc_cs_out_lbl = None
     usc_exr_cs_var = None
     usc_masks_var = None
     usc_masks_chk = None
@@ -50596,12 +51210,56 @@ print("EXR write complete")
     def _usc_exr_aces(self):
         """Is an EXR from this tab written as ACES2065-1? (The default,
         also when the control has not been built.)"""
-        v = self.usc_exr_cs_var
+        return self._usc_cs_out_key(exr=True) == "aces"
+
+    def _usc_cs_out_key(self, exr=None):
+        """The colourspace Expansion Studio writes. Same as input on an
+        expanding run means scene-linear Rec.709 for an EXR and PQ for
+        a movie -- the expanded range has to go somewhere; on a plain
+        run it is the input's own space."""
+        v = self.__dict__.get("usc_cs_out_var")
+        choice = v.get() if v is not None else self.CS_NAMES["aces"]
+        if exr is None:
+            try:
+                exr = self._usc_format()[1]["ext"] == ".exr"
+            except Exception:
+                exr = True
+        k = self._cs_key(choice, default="same")
+        hdr = False
         try:
-            return (v.get() if v is not None
-                    else self.USC_EXR_SPACES[0]) == self.USC_EXR_SPACES[0]
+            hdr = bool(self._usc_hdr_on())
         except Exception:
-            return True
+            pass
+        if k in ("same", "auto"):
+            if hdr:
+                k = "linear" if exr else "pq"
+            else:
+                k = self._usc_in_mode if self._usc_in_mode in self.CS_KEYS \
+                    else "srgb"
+        if not exr and not self._cs_is_display(k):
+            k = "pq" if hdr else "rec709"
+        return k
+
+    def _usc_cs_out_refresh(self):
+        lbl = self.__dict__.get("usc_cs_out_lbl")
+        if lbl is None:
+            return
+        try:
+            exr = self._usc_format()[1]["ext"] == ".exr"
+            key = self._usc_cs_out_key(exr=exr)
+            txt = self._cs_name(key)
+            want = self._cs_key(self.usc_cs_out_var.get(), default="same")
+            if want in self.CS_KEYS and want != key:
+                txt += f"  \u2014  a movie cannot hold {self._cs_name(want)}"
+            elif want == "same":
+                txt += "  \u2014  same as input" if not self._usc_hdr_on() \
+                    else "  \u2014  the expanded range needs a linear or PQ space"
+            if self._usc_hdr_on() and self._cs_is_display(key) and key != "pq":
+                txt += "  \u2014  highlights above white will be CLIPPED"
+            lbl.configure(text="Writes \u2192 " + txt,
+                          fg=RB if "CLIPPED" in txt else "#777777")
+        except Exception:
+            pass
     # Built in the Output Format card; None until then (and a class
     # attribute never falls through to Tk's __getattr__).
     usc_multi_var = None
@@ -50671,7 +51329,7 @@ print("EXR write complete")
 
     @staticmethod
     def _usc_write_exr_layers(path, rgb, layers, half=True, aces=False,
-                              extra=None, pixel_aspect=None):
+                              extra=None, pixel_aspect=None, tag=None):
         """Main RGB plus one named layer per model, in one EXR:
         R, G, B, <layer>.R, <layer>.G, <layer>.B, ...
 
@@ -50700,9 +51358,10 @@ print("EXR write complete")
                 m = cv2.resize(m, (w, h), interpolation=cv2.INTER_LINEAR)
             planes[name] = m
         App._exr_write_planes(path, planes, half=half, aces=aces,
-                              pixel_aspect=pixel_aspect)
+                              pixel_aspect=pixel_aspect, tag=tag)
 
-    def _usc_write_frame(self, rgb, dst, spec, aces=False, pixel_aspect=None):
+    def _usc_write_frame(self, rgb, dst, spec, aces=False, pixel_aspect=None,
+                         tag=None):
         """One frame out, in the chosen container.
 
         EXR goes through OpenEXR rather than cv2.imwrite for the same
@@ -50714,7 +51373,8 @@ print("EXR write complete")
             # app writes an EXR.
             self._organic_write_exr(dst, rgb,
                                     half=not spec.get("full", False),
-                                    aces=aces, pixel_aspect=pixel_aspect)
+                                    aces=aces, pixel_aspect=pixel_aspect,
+                                    tag=tag)
             return
         import cv2
         v = np.clip(np.asarray(rgb, np.float32), 0.0, 1.0)
@@ -50919,7 +51579,7 @@ print("EXR write complete")
                 # have to guess. An expanded EXR is scene-linear with
                 # highlights above 1.0; a PNG or a straight upscale is
                 # display-referred.
-                _aces = (_fspec["ext"] == ".exr" and self._usc_exr_aces())
+                _out_key = self._usc_cs_out_key(exr=_fspec["ext"] == ".exr")
                 # Mask channels: levels read once, so a slider moved
                 # mid-run cannot cut half the shot at a different level.
                 _mask_lv = (self._usc_mask_levels()
@@ -50930,13 +51590,12 @@ print("EXR write complete")
                         self.usc_log,
                         f"Including masks: BlowMask (clip {lv[0]:.2f}), "
                         f"CrunchMask (shadows {lv[1]:.3f}).", "dim"))
-                self._adw_write_colorspace(
-                    out, "scene-linear"
-                    if (_hdr and _fspec["ext"] == ".exr") else "display",
-                    primaries=self.ACES_NAME if _aces else None)
-                if _aces:
-                    self.after(0, lambda: self.log(
-                        self.usc_log, "EXR colourspace: ACES2065-1.", "dim"))
+                _cs, _prim = self._cs_sidecar(_out_key)
+                self._adw_write_colorspace(out, _cs, primaries=_prim)
+                self.after(0, lambda: self.log(
+                    self.usc_log, "Writing " + self._cs_name(_out_key) + ".",
+                    "dim"))
+                _hdr_movie = _hdr and _out_key == "pq"
                 os.makedirs(out, exist_ok=True)
                 self.after(0, lambda: self.log(self.usc_log,
                     f"Output → {out}/", "ok"))
@@ -50999,31 +51658,37 @@ print("EXR write complete")
                                                     _gen_names, i, _eotf)
                         elif _hdr:
                             # The generation is folded in while still
-                            # scene-referred and the result taken to PQ
-                            # after -- merging past the PQ encode would
-                            # be blending two non-linear signals.
+                            # scene-referred and the result taken to the
+                            # output encode (PQ) after -- merging past
+                            # the PQ encode would be blending two
+                            # non-linear signals.
                             _lin = self._usc_scene_for(
                                 i, code, _topaz_scene, _peak, _knee, _eotf)
-                            _lin = self._usc_ai_apply(_lin, code, _gen_dir,
-                                                      _gen_names, i, _eotf)
-                            px = self._hdr_pq_encode(
-                                np.clip(_lin * self.HDR_SDR_WHITE, 0, None)
-                                @ np.array(self._M_709_TO_2020,
-                                           np.float32).T)
-                        elif _fspec["ext"] == ".exr":
+                            px = self._usc_ai_apply(_lin, code, _gen_dir,
+                                                    _gen_names, i, _eotf)
+                        elif _fspec["ext"] == ".exr" or _out_key != (
+                                self._usc_in_mode or "srgb"):
                             px = (self._srgb_to_linear(code)
                                   if _eotf == "srgb"
                                   else self._hdr_eotf_1886(code))
                         else:
-                            px = code
+                            px = None   # the display code, unchanged
+                        # px is linear Rec.709 here (or None for a
+                        # straight copy of the display code); the Output
+                        # colour decides the values written.
+                        _wr = code if px is None else self._cs_from_lin709(
+                            px, _out_key)
+                        if _layers is not None:
+                            _layers = {k: self._cs_from_lin709(v, _out_key)
+                                       for k, v in _layers.items()}
                         if _layers is not None or _extra:
                             self._usc_write_exr_layers(
-                                dst_path, px, _layers or {},
+                                dst_path, _wr, _layers or {},
                                 half=not _fspec.get("full", False),
-                                aces=_aces, extra=_extra)
+                                extra=_extra, tag=_out_key)
                         else:
-                            self._usc_write_frame(px, dst_path, _fspec,
-                                                  aces=_aces)
+                            self._usc_write_frame(_wr, dst_path, _fspec,
+                                                  tag=_out_key)
                         # Update wipe preview every 10 frames
                         if i % 10 == 0:
                             self._usc_orig_base = orig
@@ -51071,7 +51736,7 @@ print("EXR write complete")
                         self.progress(1.0, "Encoding movie\u2026")))
                     mv = self._usc_encode_movie(
                         out, _fspec["movie"],
-                        getattr(self, "_usc_src_fps", 24.0), _hdr)
+                        getattr(self, "_usc_src_fps", 24.0), _hdr_movie)
                     self.after(0, lambda m=mv: self.log(
                         self.usc_log, f"\u2713 {os.path.basename(m)}", "ok"))
                 self.after(0, lambda: (self.usc_bar.reset(),
@@ -51192,10 +51857,14 @@ print("EXR write complete")
     # The upscalers are 8-bit display models. What goes IN to them is
     # always an ordinary-looking picture (the "base"); what the source
     # held beyond that is carried around them and put back after.
-    UPS_IN_CHOICES = ("Auto", "sRGB / display", "Linear", "ACES2065-1",
-                      "HDR PQ")
-    UPS_IN_NAMES = {"srgb": "sRGB / display", "linear": "Linear",
-                    "aces": "ACES2065-1", "pq": "HDR PQ"}
+    UPS_IN_CHOICES = CS_IN_CHOICES
+    UPS_IN_NAMES = CS_NAMES
+    ups_cs_out_var = None
+    ups_cs_out_lbl = None
+    _ups_in_explicit = False
+    det_cs_out_var = None
+    det_cs_out_lbl = None
+    _det_in_explicit = False
     UPS_HDR_KNEE = 0.5          # linear; above this the base rolls off
     ups_in_var = None
     ups_in_lbl = None
@@ -51460,6 +52129,17 @@ print("EXR write complete")
                 "the same curve the frames were encoded with), ready to\n"
                 "comp or to expand. MOV is a display delivery,\n"
                 "encoded at the end from the frames on disk.")
+        self.ups_cs_out_var = self._cs_combo(c_of, "Output colour",
+                                             self.CS_SAME, self.CS_OUT_TIP,
+                                             out=True)
+        self.ups_cs_out_lbl = tk.Label(c_of, text="", font=FSM, bg=S,
+                                       fg="#777777", anchor="w",
+                                       wraplength=370, justify="left")
+        self.ups_cs_out_lbl.pack(fill="x", pady=(0, 2))
+        self.ups_cs_out_var.trace_add(
+            "write", lambda *_: self._ups_cs_out_refresh())
+        self.ups_fmt_var.trace_add(
+            "write", lambda *_: self._ups_cs_out_refresh())
         _mmrow = tk.Frame(c_of, bg=S); _mmrow.pack(fill="x", pady=(4, 0))
         self.ups_multi_var = tk.BooleanVar(value=False)
         self.ups_multi_chk = tk.Checkbutton(
@@ -51698,11 +52378,69 @@ print("EXR write complete")
         out = self._adw_peek_next_version_dir(base, "UPSCALE")
         self.ups_out_lbl.configure(text=out + "/", fg=W)
 
-    def _ups_eotf(self):
-        """The decode for a DISPLAY source going to EXR: ordinary video,
-        so BT.1886. Linear and PQ sources never come through here --
-        _ups_out_px inverts exactly the encode _ups_read_source applied."""
-        return "bt1886"
+    def _ups_cs_out_key(self):
+        """The colourspace Upscale Studio writes, from Output colour,
+        the resolved input and the container."""
+        v = self.__dict__.get("ups_cs_out_var")
+        spec = self.USC_FORMATS.get(self.ups_fmt_var.get(),
+                                    self.USC_FORMATS[self.USC_DEFAULT_FORMAT])
+        return self._cs_out_key(v.get() if v is not None else self.CS_SAME,
+                                self._ups_in_mode, movie=bool(spec["movie"]))
+
+    def _ups_cs_out_refresh(self):
+        lbl = self.__dict__.get("ups_cs_out_lbl")
+        if lbl is None:
+            return
+        try:
+            lbl.configure(text="Writes \u2192 " + self._cs_out_note(
+                self._ups_cs_out_key(), self.ups_cs_out_var.get(),
+                self.ups_fmt_var.get()))
+        except Exception:
+            pass
+
+    def _det_cs_out_key(self):
+        v = self.__dict__.get("det_cs_out_var")
+        spec = self.USC_FORMATS.get(self.det_fmt_var.get(),
+                                    self.USC_FORMATS[self.USC_DEFAULT_FORMAT])
+        return self._cs_out_key(v.get() if v is not None else self.CS_SAME,
+                                self._det_in_mode, movie=bool(spec["movie"]))
+
+    def _det_cs_out_refresh(self):
+        lbl = self.__dict__.get("det_cs_out_lbl")
+        if lbl is None:
+            return
+        try:
+            lbl.configure(text="Writes \u2192 " + self._cs_out_note(
+                self._det_cs_out_key(), self.det_cs_out_var.get(),
+                self.det_fmt_var.get()))
+        except Exception:
+            pass
+
+    @classmethod
+    def _cs_out_note(cls, key, choice, fmt=""):
+        """'Scene-linear Rec.709' plus why, for the label under Output
+        colour: a movie forced to a display space says so."""
+        txt = cls._cs_name(key)
+        want = cls._cs_key(choice, default="same")
+        if want in cls.CS_KEYS and want != key:
+            txt += f"  \u2014  a movie cannot hold {cls._cs_name(want)}"
+        elif want == "same":
+            txt += "  \u2014  same as input"
+        if cls._cs_is_display(key) and key != "pq" and str(fmt).startswith("EXR"):
+            txt += "  (display values in an EXR, tagged)"
+        return txt
+
+    def _ups_eotf(self, mode=None, explicit=None):
+        """The decode for a DISPLAY source going to EXR. Chosen by hand
+        as Display sRGB it is the sRGB curve; Display Rec.709, and
+        anything Auto decided, is BT.1886 (ordinary video). Linear and
+        PQ sources never come through here -- _ups_out_px inverts
+        exactly the encode _ups_read_source applied."""
+        if mode is None:
+            mode = self._ups_in_mode
+        if explicit is None:
+            explicit = self._ups_in_explicit
+        return "srgb" if (mode == "srgb" and explicit) else "bt1886"
 
     # -- input colour ------------------------------------------------------
     @staticmethod
@@ -51765,20 +52503,18 @@ print("EXR write complete")
         Upscale Studio and Expansion Studio."""
         mode, why = "srgb", ""
         first = os.path.join(folder, names[0]) if folder and names else None
-        if choice == "sRGB / display":
-            mode = "srgb"
-        elif choice == "Linear":
-            mode = "linear"
-        elif choice == "ACES2065-1":
-            mode = "aces"
-        elif choice == "HDR PQ":
-            mode = "pq"
+        key = self._cs_key(choice)
+        tagged = self._cs_tagged_key(folder) if folder else None
+        if key in self.CS_KEYS:
+            mode = key
         elif first:
             ext = os.path.splitext(first)[1].lower()
             if transfer == "smpte2084":
                 mode, why = "pq", "the movie is tagged PQ"
             elif self._seq_is_aces(folder, first):
                 mode, why = "aces", "tagged ACES2065-1"
+            elif tagged in ("acescg", "pq", "rec709"):
+                mode, why = tagged, "tagged " + self.CS_NAMES[tagged]
             elif ext in self.FF_LINEAR_EXTS:
                 marked = self._adw_read_colorspace(folder)
                 if marked == "scene-linear":
@@ -51801,7 +52537,7 @@ print("EXR write complete")
                     else:
                         mode, why = "srgb", "display-ready EXR"
         hdr = mode == "pq"
-        if mode in ("linear", "aces") and names:
+        if self._cs_is_linear(mode) and names:
             # a few frames across the shot: one decision for the whole
             # sequence, so the base never changes character mid-shot
             for k in sorted({0, len(names) // 2, len(names) - 1}):
@@ -51823,10 +52559,11 @@ print("EXR write complete")
         a = np.asarray(a, np.float32)
         if mode == "aces":
             a = cls._aces_to_lin709(a)
+        elif mode == "acescg":
+            a = cls._acescg_to_lin709(a)
         a = np.maximum(a, 0.0)
         if mode == "pq":
-            return cls._hdr_pq_decode(np.clip(a, 0.0, 1.0)) \
-                / float(cls.HDR_SDR_WHITE)
+            return cls._cs_to_lin709(a, "pq")
         return a
 
     def _ups_resolve_input(self):
@@ -51839,8 +52576,10 @@ print("EXR write complete")
         mode, why, hdr = self._resolve_input_colour(
             choice, folder, names, self._ups_src_transfer)
         self._ups_in_mode, self._ups_src_hdr = mode, hdr
+        self._ups_in_explicit = self._cs_key(choice) in self.CS_KEYS
+        self._ups_cs_out_refresh()
         txt = self.UPS_IN_NAMES[mode]
-        if mode in ("linear", "aces") and hdr:
+        if self._cs_is_linear(mode) and hdr:
             txt += "  ·  HDR, highlights kept"
         if choice == "Auto" and why:
             txt += f"  —  {why}"
@@ -51911,19 +52650,11 @@ print("EXR write complete")
         """Scene-linear float RGB (1.0 = display white) for a linear or
         PQ source. `mode` defaults to this studio's own; Detail Studio
         passes its own."""
-        import numpy as np
         if mode is None:
             mode = self._ups_in_mode
-        a = self._ups_raw_float(path)
-        if mode == "aces":
-            # to the Rec.709 primaries the upscalers were trained on;
-            # _ups_run converts the result back
-            a = self._aces_to_lin709(a)
-        a = np.maximum(a, 0.0)
-        if mode == "pq":
-            return self._hdr_pq_decode(np.clip(a, 0.0, 1.0)) \
-                / float(self.HDR_SDR_WHITE)
-        return a
+        # to the Rec.709 primaries the upscalers were trained on; the
+        # Output colour converts the result where it is written
+        return self._scene_from_raw(self._ups_raw_float(path), mode)
 
     def _ups_read_source(self, path, mode=None, hdr=None, squeeze=None):
         """(base, gain): the 8-bit display picture the upscalers and the
@@ -51951,7 +52682,7 @@ print("EXR write complete")
             hdr = self._ups_src_hdr
         if squeeze is None:
             squeeze = self._ups_squeeze()
-        if mode == "srgb":
+        if mode in ("srgb", "rec709"):
             if os.path.splitext(path)[1].lower() in self.FF_LINEAR_EXTS:
                 a = np.clip(self._ups_raw_float(path), 0.0, 1.0)
                 base = Image.fromarray(
@@ -52508,19 +53239,23 @@ print("EXR write complete")
         squeeze_var.trace_add("write", lambda *_: on_change())
         return row
 
-    def _ups_out_px(self, up_disp, gain, spec, eotf, mode=None):
-        """An upscaled display picture as the pixels to WRITE: linear
-        light for EXR, a display (or PQ) code for a movie."""
+    def _ups_out_px(self, up_disp, gain, spec, eotf, mode=None, out=None):
+        """An upscaled display picture as the pixels to WRITE. With
+        `out` (a CS key) the values are in that colourspace, whatever
+        the container: linear light, a display code, PQ, ACES. Without
+        it, the old rule: linear Rec.709 for EXR, the source's own
+        display (or PQ) code for a movie."""
         import numpy as np
         import cv2
         if mode is None:
             mode = self._ups_in_mode
         exr = spec["ext"] == ".exr"
-        if mode == "srgb":
-            if not exr:
+        if mode in ("srgb", "rec709"):
+            if not exr and (out is None or out == mode):
                 return up_disp
-            return (self._srgb_to_linear(up_disp) if eotf == "srgb"
-                    else self._hdr_eotf_1886(up_disp))
+            lin = (self._srgb_to_linear(up_disp) if eotf == "srgb"
+                   else self._hdr_eotf_1886(up_disp))
+            return lin if out is None else self._cs_from_lin709(lin, out)
         lin = self._srgb_to_linear(up_disp)
         if gain is not None:
             h, w = lin.shape[:2]
@@ -52537,10 +53272,12 @@ print("EXR write complete")
             # decides.
             g = np.minimum(g, self._ups_gain_from_base(lin.max(axis=2)))
             lin = lin * g[:, :, None]
+        if out is not None:
+            return self._cs_from_lin709(lin, out)
         if exr:
             return lin
         if mode == "pq":
-            return self._hdr_pq_encode(lin * float(self.HDR_SDR_WHITE))
+            return self._cs_from_lin709(lin, "pq")
         return self._linear_to_srgb(np.clip(lin, 0.0, 1.0))
 
     # -- model state -------------------------------------------------------
@@ -52574,7 +53311,7 @@ print("EXR write complete")
             base += f"|sq={sq:g}"
         # ...and how the source was read: a different base picture is a
         # different request.
-        if self._ups_in_mode != "srgb" or self._ups_src_hdr:
+        if self._ups_in_mode not in ("srgb", "rec709") or self._ups_src_hdr:
             base += f"|in={self._ups_in_mode}" + (
                 "+hdr" if self._ups_src_hdr else "")
         try:
@@ -54049,6 +54786,7 @@ print("EXR write complete")
         r0, r1 = self._ups_range()
         sel = frames[r0:r1 + 1]
         eotf = self._ups_eotf()
+        out_key = self._ups_cs_out_key()
         base_dir = (os.path.dirname(str(self._ups_src_movie))
                     if self._ups_is_movie else folder)
         main = self._ups_render_model()
@@ -54085,7 +54823,7 @@ print("EXR write complete")
                         self.ups_log, f"Anamorphic ×{sq:g}: upscaling "
                         "desqueezed, writing at storage width.", "dim"))
                 if (self._ups_src_hdr and spec["ext"] != ".exr"
-                        and self._ups_in_mode != "pq"):
+                        and out_key != "pq"):
                     self.after(0, lambda: self.log(
                         self.ups_log, "This source is HDR and the output "
                         "is an SDR movie: values above white are clipped. "
@@ -54124,18 +54862,16 @@ print("EXR write complete")
                 if self._ups_cancel:
                     raise RuntimeError("Cancelled.")
                 out = self._adw_versioned_output_dir(base_dir, "UPSCALE")
-                # An EXR from here always holds linear light; say so, so
-                # the next module (Expansion Studio, comp) reads it right.
-                # ACES in, ACES out: the EXR stays in the space it came in.
-                aces = (spec["ext"] == ".exr"
-                        and self._ups_in_mode == "aces")
-                self._adw_write_colorspace(
-                    out, "scene-linear" if spec["ext"] == ".exr"
-                    else "display",
-                    primaries=self.ACES_NAME if aces else None)
+                # Say what the values are, so the next module (Expansion
+                # Studio, comp) reads them right.
+                _cs, _prim = self._cs_sidecar(out_key)
+                self._adw_write_colorspace(out, _cs, primaries=_prim)
                 os.makedirs(out, exist_ok=True)
                 self.after(0, lambda: self.log(self.ups_log,
                                                f"Output → {out}/", "ok"))
+                self.after(0, lambda: self.log(
+                    self.ups_log, "Writing " + self._cs_name(out_key) + ".",
+                    "dim"))
                 total = len(sel)
                 for i, fname in enumerate(sel):
                     if self._ups_cancel:
@@ -54161,7 +54897,8 @@ print("EXR write complete")
                             # back to storage width LAST, after the
                             # linearise: a squeeze of linear light
                             return self._resqueeze(
-                                self._ups_out_px(c, gain, spec, eotf), sq)
+                                self._ups_out_px(c, gain, spec, eotf,
+                                                 out=out_key), sq)
                         px = to_px(by[main])
                         pa = sq if sq > 1.0 else None
                         if multi and spec["ext"] == ".exr":
@@ -54169,11 +54906,11 @@ print("EXR write complete")
                                 dst, px,
                                 {self.UPS_LAYER_NAMES[m]: to_px(by[m])
                                  for m in multi},
-                                half=not spec.get("full", False), aces=aces,
-                                pixel_aspect=pa)
+                                half=not spec.get("full", False),
+                                pixel_aspect=pa, tag=out_key)
                         else:
-                            self._usc_write_frame(px, dst, spec, aces=aces,
-                                                  pixel_aspect=pa)
+                            self._usc_write_frame(px, dst, spec,
+                                                  pixel_aspect=pa, tag=out_key)
                         if i % 10 == 0:
                             u = Image.fromarray((np.clip(by[main], 0, 1)
                                                  * 255 + .5).astype(np.uint8))
@@ -54192,7 +54929,7 @@ print("EXR write complete")
                     self.after(0, lambda: self.progress(1.0, "Encoding movie…"))
                     mv = self._ups_encode_movie(
                         out, spec["movie"], self._ups_src_fps or 24.0,
-                        hdr=self._ups_in_mode == "pq")
+                        hdr=out_key == "pq")
                     self.after(0, lambda m=mv: self.log(
                         self.ups_log, f"✓ {os.path.basename(m)}", "ok"))
                 if self._ups_cancel:
@@ -54364,11 +55101,7 @@ print("EXR write complete")
         self.det_picker_lbl.bind("<Button-1>", lambda e: self._det_pick())
         self.det_in_var = self._combo(
             c1, "Input colour", list(self.UPS_IN_CHOICES),
-            tip="What the source frames hold — the same choices and\n"
-                "the same Auto rule as Upscale Studio. The upscaler\n"
-                "sees a display picture; a linear, ACES or PQ source\n"
-                "is encoded for it and the result decoded back, so\n"
-                "an EXR goes out in the space it came in.")
+            tip=self.CS_IN_TIP)
         self.det_in_lbl = tk.Label(c1, text="", font=FSM, bg=S,
                                    fg="#555555", anchor="w",
                                    wraplength=370, justify="left")
@@ -54560,6 +55293,17 @@ print("EXR write complete")
             tip="EXR holds the result as linear light, decoded with\n"
                 "the same curve the frames were encoded with. MOV is\n"
                 "a display delivery, encoded from the frames on disk.")
+        self.det_cs_out_var = self._cs_combo(c_of, "Output colour",
+                                             self.CS_SAME, self.CS_OUT_TIP,
+                                             out=True)
+        self.det_cs_out_lbl = tk.Label(c_of, text="", font=FSM, bg=S,
+                                       fg="#777777", anchor="w",
+                                       wraplength=370, justify="left")
+        self.det_cs_out_lbl.pack(fill="x", pady=(0, 2))
+        self.det_cs_out_var.trace_add(
+            "write", lambda *_: self._det_cs_out_refresh())
+        self.det_fmt_var.trace_add(
+            "write", lambda *_: self._det_cs_out_refresh())
         _mmrow = tk.Frame(c_of, bg=S); _mmrow.pack(fill="x", pady=(4, 0))
         self.det_multi_var = tk.BooleanVar(value=False)
         self.det_multi_chk = tk.Checkbutton(
@@ -54786,6 +55530,8 @@ print("EXR write complete")
             return
         mode, why, hdr = self._resolve_input_colour(choice, folder, names)
         self._det_in_mode, self._det_src_hdr = mode, hdr
+        self._det_in_explicit = self._cs_key(choice) in self.CS_KEYS
+        self._det_cs_out_refresh()
         txt = self.UPS_IN_NAMES[mode]
         if choice == "Auto" and why:
             txt += f"  —  {why}"
@@ -55820,14 +56566,16 @@ print("EXR write complete")
         self._ip_vace_cancel = True
         self.log(self.det_log, "Cancelling…", "err")
 
-    def _det_encode_movie(self, folder, codec, fps):
+    def _det_encode_movie(self, folder, codec, fps, hdr=False):
         spec = self.X264_CODECS[codec]
         base = os.path.basename(str(self._det_src_movie or folder))
         out = os.path.join(os.path.dirname(str(self._det_src_movie)) or folder,
-                           os.path.splitext(base)[0] + "_DETAIL" + spec["ext"])
+                           os.path.splitext(base)[0] + "_DETAIL"
+                           + ("_HDR10" if hdr else "") + spec["ext"])
         cmd = (["ffmpeg", "-v", "error", "-y", "-framerate", f"{fps:g}",
                 "-i", os.path.join(folder, "%05d.png"), "-c:v", spec["enc"]]
-               + list(spec["opts"]) + ["-pix_fmt", spec["pix"]] + [out])
+               + list(spec["opts"]) + ["-pix_fmt", spec["pix"]]
+               + (self._hdr_tags() if hdr else []) + [out])
         r = subprocess.run(cmd, capture_output=True, text=True)
         if r.returncode != 0 or not os.path.exists(out):
             tail = (r.stderr or "").strip().splitlines()[-1:] or [""]
@@ -55852,6 +56600,7 @@ print("EXR write complete")
         k = self._det_k()
         s, pr, only = self._det_params()
         mode = self._det_in_mode
+        out_key = self._det_cs_out_key()
         base_dir = (os.path.dirname(str(self._det_src_movie))
                     if self._det_is_movie else folder)
         main = self._det_render_model()
@@ -55888,7 +56637,8 @@ print("EXR write complete")
                     self.after(0, lambda: self.log(
                         self.det_log, f"Anamorphic ×{sq:g}: working "
                         "desqueezed, writing at storage width.", "dim"))
-                if (self._det_src_hdr and spec["ext"] != ".exr" and mode != "pq"):
+                if (self._det_src_hdr and spec["ext"] != ".exr"
+                        and out_key != "pq"):
                     self.after(0, lambda: self.log(
                         self.det_log, "This source is HDR and the output "
                         "is an SDR movie: values above white are clipped. "
@@ -55924,15 +56674,16 @@ print("EXR write complete")
                 if self._det_cancel:
                     raise RuntimeError("Cancelled.")
                 out = self._adw_versioned_output_dir(base_dir, "DETAIL")
-                aces = spec["ext"] == ".exr" and mode == "aces"
-                self._adw_write_colorspace(
-                    out, "scene-linear" if spec["ext"] == ".exr" else "display",
-                    primaries=self.ACES_NAME if aces else None)
+                _cs, _prim = self._cs_sidecar(out_key)
+                self._adw_write_colorspace(out, _cs, primaries=_prim)
                 os.makedirs(out, exist_ok=True)
                 self.after(0, lambda: self.log(self.det_log,
                                                f"Output → {out}/", "ok"))
+                self.after(0, lambda: self.log(
+                    self.det_log, "Writing " + self._cs_name(out_key) + ".",
+                    "dim"))
                 total = len(sel)
-                eotf = self._ups_eotf()
+                eotf = self._ups_eotf(mode, self._det_in_explicit)
                 for i, fname in enumerate(sel):
                     if self._det_cancel:
                         break
@@ -55956,7 +56707,8 @@ print("EXR write complete")
 
                         def to_px(c, gain=gain):
                             return self._resqueeze(self._ups_out_px(
-                                c, gain, spec, eotf, mode=mode), sq)
+                                c, gain, spec, eotf, mode=mode, out=out_key),
+                                sq)
                         px = to_px(by[main])
                         pa = sq if sq > 1.0 else None
                         if multi and spec["ext"] == ".exr":
@@ -55964,11 +56716,11 @@ print("EXR write complete")
                                 dst, px,
                                 {self.UPS_LAYER_NAMES[m]: to_px(by[m])
                                  for m in multi},
-                                half=not spec.get("full", False), aces=aces,
-                                pixel_aspect=pa)
+                                half=not spec.get("full", False),
+                                pixel_aspect=pa, tag=out_key)
                         else:
-                            self._usc_write_frame(px, dst, spec, aces=aces,
-                                                  pixel_aspect=pa)
+                            self._usc_write_frame(px, dst, spec,
+                                                  pixel_aspect=pa, tag=out_key)
                         if i % 10 == 0:
                             u = Image.fromarray((by[main] * 255 + .5).astype(np.uint8))
                             self.after(0, lambda o=orig, u=u, kk=r0 + i: (
@@ -55986,7 +56738,8 @@ print("EXR write complete")
                 if spec["movie"] and not self._det_cancel and errors == 0:
                     self.after(0, lambda: self.progress(1.0, "Encoding movie…"))
                     mv = self._det_encode_movie(out, spec["movie"],
-                                                self._det_src_fps or 24.0)
+                                                self._det_src_fps or 24.0,
+                                                hdr=out_key == "pq")
                     self.after(0, lambda mv=mv: self.log(
                         self.det_log, f"✓ {os.path.basename(mv)}", "ok"))
                 if self._det_cancel:
