@@ -2359,6 +2359,45 @@ class TestRoiButtonIsAToggle(unittest.TestCase):
         self.assertEqual(app.organic_processed.size, (80, 60))
 
 
+class TestLensStudioSaysWhatItWrites(unittest.TestCase):
+    """A line under Write says the colourspace a render is written in,
+    and Render logs it: EXR is scene-linear (Rec.709, or ACES2065-1
+    when the source came in as ACES), PNG is display-encoded sRGB."""
+
+    def _app(self, enc=None, aces=None, pq=False):
+        app = App.__new__(App)
+        app._organic_source_encoded = enc
+        app._organic_source_aces = aces
+        app._organic_source_pq = pq
+        return app
+
+    def test_exr_is_scene_linear_709(self):
+        self.assertEqual(self._app()._organic_out_space("EXR 16-bit half"),
+                         "Scene-linear, Rec.709 primaries")
+
+    def test_aces_in_is_aces_out_for_exr_only(self):
+        app = self._app(enc=False, aces=True)
+        self.assertIn("ACES2065-1", app._organic_out_space("EXR 32-bit float"))
+        self.assertIn("sRGB", app._organic_out_space("PNG 16-bit"))
+
+    def test_png_is_display_srgb(self):
+        self.assertEqual(self._app()._organic_out_space("PNG 8-bit"),
+                         "Display-encoded sRGB (PNG)")
+
+    def test_the_label_and_the_log_exist(self):
+        import inspect
+        self.assertIn("self.organic_out_lbl = ", inspect.getsource(App._tab_organic))
+        self.assertIn("_organic_out_space(f)", inspect.getsource(App._organic_run_worker))
+        app = self._app()
+        class L:
+            def __init__(s): s.kw = {}
+            def configure(s, **kw): s.kw.update(kw)
+        app.organic_out_lbl = L()
+        app._organic_out_refresh_label()
+        self.assertEqual(app.organic_out_lbl.kw["text"],
+                         "Writes \u2192 Scene-linear, Rec.709 primaries")
+
+
 class TestHashNoise(unittest.TestCase):
     """Grain's field is addressed by absolute pixel position rather than
     drawn from a sequential stream, so any sub-rectangle renders exactly
@@ -20389,6 +20428,7 @@ class TestLensStudioCancelRender(unittest.TestCase):
         st._reveal = lambda d: None
         st._organic_exp_gain = lambda: 1.0
         st._adw_write_colorspace = lambda *a, **k: None
+        st._organic_out_space = lambda f=None: "Scene-linear, Rec.709 primaries"
         st._organic_load_linear = lambda p, **k: p
         st._organic_exp_apply = lambda lin, src, gain=1.0: lin
         st._organic_apply_stack = lambda lin, params, seed=0: lin

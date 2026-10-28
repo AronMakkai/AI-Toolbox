@@ -31607,6 +31607,14 @@ class App(tk.Tk):
             "Half is plenty for imagery; 32-bit float is\n"
             "twice the size and worth it only for data\n"
             "passes.")(_fmti)
+        # Say what the render is written as -- the question "what
+        # colourspace is this writing?" should not need the manual.
+        self.organic_out_lbl = tk.Label(_obottom, text="", font=FSM, bg=BG,
+                                        fg="#777777", anchor="w")
+        self.organic_out_lbl.pack(fill="x", padx=16, pady=(2, 0))
+        self.organic_fmt_var.trace_add(
+            "write", lambda *_: self._organic_out_refresh_label())
+        self._organic_out_refresh_label()
 
         self.organic_run_btn = self._mkbtn(_obottom, "▶  Render Sequence",
             self._organic_run, bg="#0A2A0A", fg="#66CC66")
@@ -32194,6 +32202,7 @@ class App(tk.Tk):
         self._organic_show_frame(0)
 
     _organic_source_aces = None   # None = not decided for this sequence
+    _organic_source_encoded = None
     _organic_source_pq = False    # HDR PQ / Rec.2020
     _organic_running = False      # a sequence render is in flight
     _organic_cancel = False       # ...and has been asked to stop
@@ -32268,6 +32277,37 @@ class App(tk.Tk):
             lbl.configure(text=("\u2192 " + name + (f"  \u2014  {why}"
                                                     if why else ""))
                           if name else "")
+        except Exception:
+            pass
+        self._organic_out_refresh_label()
+
+    organic_out_lbl = None
+
+    def _organic_out_space(self, fmt=None):
+        """What a render is WRITTEN as, from the Write format and how
+        the source is read: EXR holds scene-linear light (Rec.709
+        primaries, or ACES2065-1 when the source came in as ACES), PNG
+        is a display encode (sRGB). This is also what the output
+        folder's colourspace tag says."""
+        if fmt is None:
+            v = self.__dict__.get("organic_fmt_var")
+            fmt = v.get() if v is not None else self.ORGANIC_FORMATS[0]
+        if not str(fmt).startswith("EXR"):
+            return "Display-encoded sRGB (PNG)"
+        enc = self._organic_source_encoded
+        pq = bool(getattr(self, "_organic_source_pq", False))
+        aces = (bool(getattr(self, "_organic_source_aces", False))
+                and not enc and not pq)
+        if aces:
+            return "Scene-linear, ACES2065-1 (AP0) primaries"
+        return "Scene-linear, Rec.709 primaries"
+
+    def _organic_out_refresh_label(self):
+        lbl = self.__dict__.get("organic_out_lbl")
+        if lbl is None:
+            return
+        try:
+            lbl.configure(text="Writes \u2192 " + self._organic_out_space())
         except Exception:
             pass
 
@@ -33427,6 +33467,9 @@ class App(tk.Tk):
         self._adw_write_colorspace(
             out_dir, "scene-linear" if _fmt.startswith("EXR") else "display",
             primaries=self.ACES_NAME if _aces_out else None)
+        self.after(0, lambda f=_fmt: self.log(
+            self.organic_log_txt,
+            f"Writing {f} \u2014 {self._organic_out_space(f)}.", "hi"))
         try:
             for n, i in enumerate(range(v0, v1)):
                 if self._organic_cancel:
