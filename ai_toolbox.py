@@ -15445,7 +15445,7 @@ def cs_convert(a, src, dst):
         self.sm_save_btn.pack(fill="x", pady=(4, 0))
         # Output options row: .MOV toggle + fps (only used by Run)
         _movrow = tk.Frame(c4, bg=S); _movrow.pack(fill="x", pady=(4, 0))
-        tk.Checkbutton(_movrow, text="Output .MOV", variable=self.sm_out_mov_var,
+        tk.Checkbutton(_movrow, text="+ Rec.709 MOV", variable=self.sm_out_mov_var,
             bg=S, fg=W, activebackground=S, activeforeground=W,
             selectcolor=R, font=FM, highlightthickness=0, bd=0).pack(side="left")
         tk.Label(_movrow, text="fps", font=FSM, bg=S, fg=G).pack(side="left",
@@ -21482,7 +21482,7 @@ def cs_convert(a, src, dst):
             highlightthickness=0, bd=0,
             command=self._organic_auto_changed).pack(side="left")
         self.organic_out_mov_var = tk.BooleanVar(value=False)
-        tk.Checkbutton(_autorow, text="Out .MOV", bg=BG, fg=W,
+        tk.Checkbutton(_autorow, text="+ Rec.709 MOV", bg=BG, fg=W,
             variable=self.organic_out_mov_var, selectcolor="#2A2A14",
             activebackground=BG, activeforeground=W, font=FSM,
             highlightthickness=0, bd=0).pack(side="left", padx=(14, 0))
@@ -23503,7 +23503,9 @@ def cs_convert(a, src, dst):
             # module never sees a half-written movie in its input folder.
             if (getattr(self, "organic_out_mov_var", None)
                     and self.organic_out_mov_var.get()):
-                self._organic_encode_mov(out_dir, written)
+                self._adw_rec709_mov(out_dir, self.LENS_OUT_NAME,
+                                     log_w=self.organic_log_txt,
+                                     key=_out_key, frames=written)
             self.after(0, lambda: self._organic_after_run_sendto(out_dir))
             try:
                 self._reveal(out_dir)
@@ -23563,6 +23565,92 @@ def cs_convert(a, src, dst):
         still encode."""
         return ["-pattern_type", "glob", "-i",
                 os.path.join(folder, "*" + ext)]
+
+    def _mov709_row(self, parent, var):
+        """The '+ Rec.709 MOV' tick box: a display preview movie beside
+        the frames, whatever colourspace they are written in."""
+        row = tk.Frame(parent, bg=S); row.pack(fill="x", pady=(4, 0))
+        tk.Checkbutton(row, text="+ Rec.709 MOV", variable=var, bg=S, fg=W,
+                       selectcolor="#222222", activebackground=S,
+                       activeforeground=W, font=FSM, bd=0).pack(side="left")
+        i = tk.Label(row, text="\u24d8", font=FSM, bg=S, fg="#555555",
+                     cursor="hand2")
+        i.pack(side="left", padx=(6, 0))
+        self._tooltip(
+            "Also write a ProRes 422 HQ movie in Display Rec.709\n"
+            "next to the frames \u2014 ACEScg EXRs for comp AND a\n"
+            "movie that plays anywhere, in one run. The frames are\n"
+            "read back and converted, so it matches what they hold.\n"
+            "Ignored when Write is already a MOV.")(i)
+        return row
+
+    @staticmethod
+    def _mov709_on(var):
+        try:
+            return bool(var is not None and var.get())
+        except Exception:
+            return False
+
+    def _adw_rec709_mov(self, out_dir, name, fps=24.0, log_w=None, key=None,
+                        frames=None):
+        """A Rec.709 ProRes 422 HQ preview beside whatever a module
+        wrote -- ACEScg EXRs AND a movie you can play. Every frame is
+        read back, taken from the folder's colourspace (the sidecar,
+        or `key`) to Display Rec.709, and encoded with BT.709 tags.
+        Returns the movie path, or None."""
+        import numpy as np
+        import tempfile, shutil as _sh
+
+        def _say(m, tag="dim"):
+            if log_w is not None:
+                try:
+                    self.after(0, lambda: self.log(log_w, m, tag))
+                except Exception:
+                    pass
+        try:
+            from PIL import Image
+            if frames is None:
+                frames = sorted(f for f in os.listdir(out_dir)
+                                if os.path.splitext(f)[1].lower()
+                                in (".exr", ".png", ".tif", ".tiff"))
+            if not frames:
+                return None
+            src_key = key or self._cs_tagged_key(out_dir) or "srgb"
+            _say(f"Rec.709 MOV: encoding {len(frames)} frame(s) from "
+                 f"{self._cs_name(src_key)}\u2026")
+            stage = tempfile.mkdtemp(prefix="adw_mov_")
+            try:
+                for k, f in enumerate(frames):
+                    pth = os.path.join(out_dir, f)
+                    if pth.lower().endswith(".exr"):
+                        a = self._ff_read_frame(pth)
+                    else:
+                        a = np.asarray(Image.open(pth).convert("RGB"),
+                                       np.float32) / 255.0
+                    code = np.clip(self._cs_convert(a, src_key, "rec709"),
+                                   0.0, 1.0)
+                    Image.fromarray((code * 255.0 + 0.5).astype(np.uint8),
+                                    "RGB").save(
+                        os.path.join(stage, f"{k:05d}.png"))
+                spec = self.X264_CODECS["ProRes 422 HQ"]
+                mov = os.path.join(out_dir, f"{name}_Rec709.mov")
+                cmd = (["ffmpeg", "-v", "error", "-y", "-framerate",
+                        f"{float(fps or 24.0):g}", "-i",
+                        os.path.join(stage, "%05d.png"), "-c:v", spec["enc"]]
+                       + list(spec["opts"]) + ["-pix_fmt", spec["pix"],
+                       "-colorspace", "bt709", "-color_primaries", "bt709",
+                       "-color_trc", "bt709", mov])
+                r = subprocess.run(cmd, capture_output=True, text=True)
+            finally:
+                _sh.rmtree(stage, ignore_errors=True)
+            if r.returncode != 0 or not os.path.exists(mov):
+                raise RuntimeError((r.stderr or "").strip()[-200:]
+                                   or "encode failed")
+            _say(f"\u2713 {os.path.basename(mov)}", "ok")
+            return mov
+        except Exception as ex:
+            _say(f"Rec.709 MOV failed: {ex}", "err")
+            return None
 
     def _organic_after_run_sendto(self, out_dir):
         self._adw_propagate_output(out_dir, "organic", self.organic_log_txt)
@@ -30288,6 +30376,8 @@ print("EXR write complete")
         self.usc_cs_out_lbl.pack(fill="x", pady=(0, 2))
         self.usc_cs_out_var.trace_add(
             "write", lambda *_: self._usc_fmt_changed())
+        self.usc_mov709_var = tk.BooleanVar(value=False)
+        self._mov709_row(c_of, self.usc_mov709_var)
         _ofrow = tk.Frame(c_of, bg=S); _ofrow.pack(fill="x", pady=(2, 0))
         self.usc_fmt_note = tk.Label(_ofrow, text="\u24d8", font=FSM, bg=S,
                                      fg="#555555", cursor="hand2")
@@ -34229,6 +34319,11 @@ print("EXR write complete")
                         getattr(self, "_usc_src_fps", 24.0), _hdr_movie)
                     self.after(0, lambda m=mv: self.log(
                         self.usc_log, f"\u2713 {os.path.basename(m)}", "ok"))
+                elif (not self._usc_cancel and errors == 0
+                      and self._mov709_on(self.__dict__.get("usc_mov709_var"))):
+                    self._adw_rec709_mov(out, self.USC_OUT_NAME,
+                                         getattr(self, "_usc_src_fps", 24.0),
+                                         self.usc_log, key=_out_key)
                 self.after(0, lambda: (self.usc_bar.reset(),
                                        self.progress(-1)))
                 if errors == 0:
@@ -34630,6 +34725,8 @@ print("EXR write complete")
             "write", lambda *_: self._ups_cs_out_refresh())
         self.ups_fmt_var.trace_add(
             "write", lambda *_: self._ups_cs_out_refresh())
+        self.ups_mov709_var = tk.BooleanVar(value=False)
+        self._mov709_row(c_of, self.ups_mov709_var)
         _mmrow = tk.Frame(c_of, bg=S); _mmrow.pack(fill="x", pady=(4, 0))
         self.ups_multi_var = tk.BooleanVar(value=False)
         self.ups_multi_chk = tk.Checkbutton(
@@ -37423,6 +37520,11 @@ print("EXR write complete")
                         hdr=out_key == "pq")
                     self.after(0, lambda m=mv: self.log(
                         self.ups_log, f"✓ {os.path.basename(m)}", "ok"))
+                elif (not self._ups_cancel and errors == 0
+                      and self._mov709_on(self.__dict__.get("ups_mov709_var"))):
+                    self._adw_rec709_mov(out, self.UPS_OUT_NAME,
+                                         self._ups_src_fps or 24.0,
+                                         self.ups_log, key=out_key)
                 if self._ups_cancel:
                     self.after(0, lambda: (self.log(self.ups_log, "Cancelled.",
                                                     "err"),
@@ -37795,6 +37897,8 @@ print("EXR write complete")
             "write", lambda *_: self._det_cs_out_refresh())
         self.det_fmt_var.trace_add(
             "write", lambda *_: self._det_cs_out_refresh())
+        self.det_mov709_var = tk.BooleanVar(value=False)
+        self._mov709_row(c_of, self.det_mov709_var)
         _mmrow = tk.Frame(c_of, bg=S); _mmrow.pack(fill="x", pady=(4, 0))
         self.det_multi_var = tk.BooleanVar(value=False)
         self.det_multi_chk = tk.Checkbutton(
@@ -39234,6 +39338,11 @@ print("EXR write complete")
                                                 hdr=out_key == "pq")
                     self.after(0, lambda mv=mv: self.log(
                         self.det_log, f"✓ {os.path.basename(mv)}", "ok"))
+                elif (not self._det_cancel and errors == 0
+                      and self._mov709_on(self.__dict__.get("det_mov709_var"))):
+                    self._adw_rec709_mov(out, self.DET_OUT_NAME,
+                                         self._det_src_fps or 24.0,
+                                         self.det_log, key=out_key)
                 if self._det_cancel:
                     self.after(0, lambda: (self.log(self.det_log, "Cancelled.", "err"),
                                            self.setstatus("Cancelled", RB)))
