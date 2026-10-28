@@ -13136,6 +13136,136 @@ class TestFalFactorRefusal(unittest.TestCase):
         shutil.rmtree(d, ignore_errors=True)
 
 
+class TestMovToExrWithoutZscale(unittest.TestCase):
+    """Aron's ffmpeg has no zscale filter ("No such filter: 'zscale'"),
+    which the MOV -> EXR preview and run both leaned on to linearise.
+    Now the frames are decoded as they are and the curve is undone in
+    the app with its own maths whenever zscale is missing -- or present
+    but refusing the clip -- with the same result. And the timeline
+    shows the whole clip the moment a movie is picked, not only after
+    Analyse motion."""
+
+    @classmethod
+    def setUpClass(cls):
+        import subprocess
+        cls.dir = tempfile.mkdtemp()
+        cls.clip = os.path.join(cls.dir, "clip.mp4")
+        r = subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
+                            "testsrc2=size=160x90:rate=24:duration=1",
+                            "-pix_fmt", "yuv420p", "-c:v", "libx264", "-crf", "18",
+                            cls.clip], capture_output=True)
+        cls.have = r.returncode == 0 and os.path.exists(cls.clip)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.dir, ignore_errors=True)
+
+    def setUp(self):
+        self._saved = App._ff_filters_cache
+    def tearDown(self):
+        App._ff_filters_cache = self._saved
+
+    def test_the_filter_list_is_read_once_and_asked_by_name(self):
+        App._ff_filters_cache = None
+        with unittest.mock.patch("subprocess.run") as run:
+            run.return_value = type("R", (), {"stdout":
+                " Filters:\n  T.. = Timeline support\n"
+                " ... scale            V->V       Scale the input video size.\n"
+                " ... zscale           V->V       Apply resizing, colorspace..\n"})()
+            self.assertTrue(App._ff_has_filter("zscale"))
+            self.assertTrue(App._ff_has_filter("scale"))
+            self.assertFalse(App._ff_has_filter("libplacebo"))
+            self.assertEqual(run.call_count, 1)          # cached
+
+    def test_the_in_app_curves_are_the_apps_own(self):
+        c = np.array([[0.0, 0.5, 1.0]], np.float32)
+        r709 = App._m2e_linearise(c, "zscale=tin=709:t=linear:rangein=limited:range=full")
+        srgb = App._m2e_linearise(c, "zscale=tin=iec61966-2-1:t=linear:range=full")
+        self.assertAlmostEqual(float(r709[0, 1]), float(App._hdr_eotf_1886(np.float32(0.5))), places=5)
+        self.assertAlmostEqual(float(srgb[0, 1]), float(App._srgb_to_linear(np.float32(0.5))), places=5)
+        self.assertAlmostEqual(float(r709[0, 1]), 0.189, places=2)
+        self.assertAlmostEqual(float(srgb[0, 1]), 0.214, places=2)
+        self.assertTrue(np.array_equal(App._m2e_linearise(c, ""), c))   # passthrough
+
+    def test_the_preview_linearises_in_the_app_when_zscale_is_missing(self):
+        if not self.have:
+            self.skipTest("no ffmpeg / libx264 here")
+        app = App.__new__(App)
+        App._ff_filters_cache = set()                        # no zscale
+        m = app._m2e_frame_values(self.clip, "Rec.709", "Scene-linear", "16-bit half", at=0.5)
+        self.assertIn("scene-linear", m["desc"])
+        self.assertFalse(m["display"])
+        d = app._m2e_frame_values(self.clip, "None \u2014 passthrough", "Scene-linear",
+                                  "16-bit half", at=0.5)
+        self.assertTrue(d["display"])
+        # linearised mid-tones sit below their code values
+        mid = (d["vals"] > 0.3) & (d["vals"] < 0.7)
+        self.assertGreater(int(mid.sum()), 100)
+        self.assertLess(float(m["vals"][mid].mean()), float(d["vals"][mid].mean()))
+
+    def test_the_run_falls_back_the_same_way(self):
+        import inspect
+        body = inspect.getsource(App._erun)
+        self.assertIn('lin_in_app = bool(vf) and not self._ff_has_filter("zscale")', body)
+        self.assertIn("self._m2e_linearise(self._ff_read_frame(_p), vf)", body)
+        self.assertIn("zscale refused this clip", body)
+        pv = inspect.getsource(App._m2e_frame_values)
+        self.assertIn("in_app = True", pv)                 # the refused-clip retry
+        self.assertIn("nb_frames", inspect.getsource(App._x264_probe))
+
+    def test_picking_a_movie_fills_the_timeline_and_a_click_previews_that_frame(self):
+        if not self.have:
+            self.skipTest("no ffmpeg / libx264 here")
+        try:
+            app = App()
+        except Exception as ex:
+            self.skipTest(f"no display: {ex}")
+        errors = []
+        def step(fn):
+            try:
+                fn()
+            except Exception as ex:
+                errors.append(ex); app.quit()
+        def wait(cond, then, n):
+            if cond():
+                app.after(50, lambda: step(then))
+            elif n <= 0:
+                errors.append(AssertionError("timed out: " + app.elog.get("1.0", "end"))); app.quit()
+            else:
+                app.after(50, lambda: wait(cond, then, n - 1))
+        from tkinter import filedialog
+        real = filedialog.askopenfilename
+        def s1():
+            filedialog.askopenfilename = lambda **k: self.clip
+            app.show("exr")
+            app._epick()
+            self.assertEqual(app.exr_frame_cb.frame_count(), 24)
+            self.assertEqual(app.exr_tl_lbl.cget("text"), "Frames")
+            self.assertIn("24 frames", app.tc_hint_lbl.cget("text"))
+            wait(lambda: getattr(app, "_m2e", None) is not None, s2, 200)
+        def s2():
+            first = app._m2e
+            self.assertIn("0.5s", first["desc"])          # middle of a 1 s clip
+            app._exr_timeline_select(18)
+            self.assertAlmostEqual(app._m2e_at, 18 / 24.0, places=3)
+            wait(lambda: app._m2e is not first, s3, 200)
+        def s3():
+            self.assertIn("0.8s", app._m2e["desc"])
+            app.quit()
+        app.after(300, lambda: step(s1))
+        app.after(60000, lambda: (errors.append(AssertionError("hung")), app.quit()))
+        try:
+            app.mainloop()
+        finally:
+            filedialog.askopenfilename = real
+            try:
+                app.destroy()
+            except Exception:
+                pass
+        if errors:
+            raise errors[0]
+
+
 class TestSetupRifeLabel(unittest.TestCase):
     """The Setup & Install component row for the RIFE install was
     labelled "ADW-Blur", which stopped being accurate the moment Fix

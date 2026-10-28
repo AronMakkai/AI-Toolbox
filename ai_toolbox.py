@@ -6525,6 +6525,40 @@ class App(tk.Tk):
             pass
 
     # ── MOV -> EXR preview ──
+    _ff_filters_cache = None
+
+    @classmethod
+    def _ff_has_filter(cls, name):
+        """Does this ffmpeg build have the filter? Asked once per run.
+        Homebrew and static builds differ: zscale (libzimg) is the one
+        that matters here, and some builds ship without it."""
+        if cls._ff_filters_cache is None:
+            try:
+                r = subprocess.run(["ffmpeg", "-hide_banner", "-filters"],
+                                   capture_output=True, text=True, timeout=20)
+                cls._ff_filters_cache = set(
+                    ln.split()[1] for ln in r.stdout.splitlines()
+                    if len(ln.split()) > 2 and not ln.startswith(" Filters"))
+            except Exception:
+                cls._ff_filters_cache = set()
+        return name in cls._ff_filters_cache
+
+    @classmethod
+    def _m2e_linearise(cls, code, vf):
+        """The linearisation the zscale chain `vf` would do, in numpy:
+        for an ffmpeg without zscale, the frame is decoded to display
+        code as it is and the curve is undone here with the app's own
+        maths. ffmpeg's RGB output is full range already, so only the
+        transfer curve is left: BT.1886 for Rec.709, the sRGB curve
+        for sRGB. Empty vf: nothing to do."""
+        import numpy as np
+        a = np.asarray(code, np.float32)
+        if not vf:
+            return a
+        if "iec61966" in vf:
+            return cls._srgb_to_linear(np.clip(a, 0.0, 1.0)).astype(np.float32)
+        return cls._hdr_eotf_1886(np.clip(a, 0.0, 1.0)).astype(np.float32)
+
     @staticmethod
     def _m2e_filter(csp, out_choice):
         """(vf, want_linear, want_aces) for a MOV -> EXR conversion --
@@ -6576,15 +6610,26 @@ class App(tk.Tk):
             else:
                 exr = os.path.join(tmp, "f.exr")
                 cmd = ["ffmpeg", "-y", "-v", "error"] + seek + ["-i", path]
-                if vf:
-                    cmd += ["-vf", vf]
-                cmd += ["-frames:v", "1", "-pix_fmt", "gbrpf32le", exr]
-                r = subprocess.run(cmd, capture_output=True)
+                # no zscale in this build: decode the code values as
+                # they are and undo the curve in numpy below
+                in_app = bool(vf) and not self._ff_has_filter("zscale")
+                tail = ["-frames:v", "1", "-pix_fmt", "gbrpf32le", exr]
+                r = subprocess.run(
+                    cmd + (["-vf", vf] if vf and not in_app else []) + tail,
+                    capture_output=True)
+                if not os.path.exists(exr) and vf and not in_app:
+                    # zscale is there but refused this clip ("no path
+                    # between colorspaces", a library error): same
+                    # answer, decode as is and linearise here
+                    in_app = True
+                    r = subprocess.run(cmd + tail, capture_output=True)
                 if not os.path.exists(exr):
                     raise RuntimeError(
                         r.stderr.decode("utf-8", "replace")[-200:]
                         or "ffmpeg wrote no frame")
                 lin = np.asarray(self._ff_read_frame(exr), np.float32)
+                if in_app:
+                    lin = self._m2e_linearise(lin, vf)
                 want_linear = bool(vf)
         finally:
             _sh.rmtree(tmp, ignore_errors=True)
@@ -6608,9 +6653,11 @@ class App(tk.Tk):
         self._m2e_seq = getattr(self, "_m2e_seq", 0) + 1
         seq = self._m2e_seq
 
+        at = getattr(self, "_m2e_at", None)
+
         def go():
             try:
-                m = self._m2e_frame_values(path, csp, out_choice, depth)
+                m = self._m2e_frame_values(path, csp, out_choice, depth, at=at)
             except Exception as ex:
                 self.after(0, lambda e=str(ex): self.log(
                     self.elog, f"Preview failed: {e}", "err"))
@@ -7398,6 +7445,12 @@ class App(tk.Tk):
 
     def _tc_select_frame(self, i):
         self._tc_idx = i
+        # MOV -> EXR: the preview follows the timeline, analysed or not
+        if (getattr(self, "exr_mode", "to_exr") == "to_exr"
+                and getattr(self, "exr_file", None)):
+            fps = float(getattr(self, "_m2e_fps", 0) or 0) or 24.0
+            self._m2e_at = max(0.0, i / fps)
+            self._m2e_refresh_preview()
         f = self._tc_result and self._tc_result.get("score", {}).get(i)
         if f:
             self.log(self.elog,
@@ -9282,7 +9335,7 @@ class App(tk.Tk):
             r = subprocess.run(
                 ["ffprobe", "-v", "error", "-select_streams", "v:0",
                  "-show_entries",
-                 "stream=codec_name,width,height,r_frame_rate",
+                 "stream=codec_name,width,height,r_frame_rate,nb_frames",
                  "-show_entries", "format=duration",
                  "-of", "default=nw=1", str(path)],
                 capture_output=True, text=True)
@@ -9738,6 +9791,31 @@ class App(tk.Tk):
         self.log(self.elog, "Loaded: " + name, "ok")
         self.log(self.elog, "Output -> " + out + "/", "hi")
         self._exr_hist_data = None
+        # The whole clip on the timeline straight away -- one box per
+        # frame from the probe -- so any frame can be looked at before
+        # Analyse motion has run (which then colours the same boxes).
+        self._m2e_at = None
+        self._tc_result = None
+        self._tc_frames = []
+        try:
+            info = self._x264_probe(p)
+            fps = self._ff_probe_fps(p) or 24.0
+            dur = float(info.get("duration") or 0)
+            try:
+                n = int(info.get("nb_frames") or 0)
+            except ValueError:
+                n = 0
+            n = n or int(round(dur * fps))
+            self._m2e_fps = fps
+            if n > 0:
+                self._tc_frames = [f"frame {k + 1}" for k in range(n)]
+                self.exr_frame_cb.set_frames(self._tc_frames)
+                self.exr_tl_lbl.configure(text="Frames")
+                self.tc_hint_lbl.configure(
+                    text=f"{n} frames  \u00b7  click a frame to preview it  "
+                         "\u00b7  Analyse motion colours them")
+        except Exception:
+            pass
         # The frame as it WILL be written, through the same conversion --
         # picture, histogram, frequency graph and clipping all read it.
         # (This used to sample an 8-bit histogram only: no picture, and
@@ -9920,7 +9998,12 @@ class App(tk.Tk):
             self.log(self.elog, "Bit depth: " + depth, "dim")
 
             cmd = ["ffmpeg", "-y", "-i", p]
-            if vf:
+            lin_in_app = bool(vf) and not self._ff_has_filter("zscale")
+            if lin_in_app:
+                self.log(self.elog, "This ffmpeg has no zscale filter: "
+                         "the frames are decoded as they are and "
+                         "linearised in the app with the same curve.", "hi")
+            elif vf:
                 cmd += ["-vf", vf]
             cmd += ["-pix_fmt", pix_fmt,
                    "-compression_level", "0", "-pred", "mixed", pat]
@@ -9929,7 +10012,37 @@ class App(tk.Tk):
             self.after(0, lambda: (self.eb_bar.set(1.0, "Converting\u2026"),
                                    self.eb_bar.pulse(True)))
             code = self.runcmd(cmd, self.elog)
+            if code != 0 and vf and not lin_in_app:
+                # zscale refused the clip: decode as is, linearise here
+                self.log(self.elog, "zscale refused this clip \u2014 decoding "
+                         "as is and linearising in the app instead.", "hi")
+                lin_in_app = True
+                cmd = ["ffmpeg", "-y", "-i", p, "-pix_fmt", pix_fmt,
+                       "-compression_level", "0", "-pred", "mixed", pat]
+                code = self.runcmd(cmd, self.elog)
             self.after(0, lambda: self.eb_bar.pulse(False))
+            if code == 0 and lin_in_app:
+                try:
+                    _fs = sorted(f for f in os.listdir(out)
+                                 if f.startswith(base + "_EXR.")
+                                 and f.endswith(".exr"))
+                    self.log(self.elog, "Linearising " + str(len(_fs))
+                             + " frames\u2026", "hi")
+                    for _k, _f in enumerate(_fs):
+                        _p = os.path.join(out, _f)
+                        _l = self._m2e_linearise(self._ff_read_frame(_p), vf)
+                        self._exr_write_planes(
+                            _p, {c: _l[:, :, ci]
+                                 for ci, c in enumerate("RGB")},
+                            half=("16" in depth))
+                        if _k % 10 == 0:
+                            self.after(0, lambda fr=_k, tot=max(1, len(_fs)):
+                                (self.progress(fr / tot, "Linearising\u2026"),
+                                 self.eb_bar.set(fr / tot, "Linearising\u2026")))
+                except Exception as _ex:
+                    self.log(self.elog,
+                             f"Linearising failed: {_ex}", "err")
+                    code = 1
             if code == 0 and want_aces:
                 # ffmpeg wrote linear Rec.709; each frame is re-written
                 # as ACES2065-1 (ffmpeg has no AP0 primaries, and cannot
