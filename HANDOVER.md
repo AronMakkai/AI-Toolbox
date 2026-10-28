@@ -142,6 +142,10 @@ prefixes. Use this table before searching.
 - ADW modules (AI-Toolbox only): one shared row `_adw_cs_row` bound to `adw_cs_in_var` / `adw_cs_out_var`; Input drives `adw_source_encoded_var` and `_adw_gamma_encode` converts aces/acescg/pq to 709 linear first; `_adw_cs_finish(out_dir, log)` converts written EXRs after the render (called from the four `*_after_run_sendto` / `_vace_apply_done`).
 - Tests: `TestColourspaceToolkit`; the old name-based tests were rewritten.
 
+## Output names and the Rec.709 preview MOV (28 Oct 2026)
+- `_adw_out_stem(name, frames, i)` names every studio frame `<Module>.<plate frame>` (`UPS_OUT_NAME` Upscale_Studio, `DET_OUT_NAME` Detail_Studio, `USC_OUT_NAME` Expansion_Studio, Lens unchanged); movies encode via `_adw_glob_input(folder)` (ffmpeg glob) so numbering need not start at 1.
+- `_adw_rec709_mov(out_dir, name, fps, log_w, key, frames)` reads the written frames back, converts the folder's colourspace to Display Rec.709 and encodes `<name>_Rec709.mov` (ProRes 422 HQ, bt709 tags). `_mov709_row` is the "+ Rec.709 MOV" tick box in the three studios' Output cards (`ups_mov709_var` / `det_mov709_var` / `usc_mov709_var`, ignored when Write is a MOV); Lens's and Paint's "Out .MOV" boxes were relabelled and Lens now encodes through the same helper (its old `_organic_encode_mov` is unused). Tests: `TestStudioOutputNames`, `TestRec709PreviewMov`.
+
 ## Colour handling
 
 - Every studio has an "Input colour" choice: Auto, display-encoded

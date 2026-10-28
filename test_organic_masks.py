@@ -2598,6 +2598,59 @@ class TestStudioOutputNames(unittest.TestCase):
         self.assertEqual(App._adw_glob_input("/o")[:2], ["-pattern_type", "glob"])
 
 
+class TestRec709PreviewMov(unittest.TestCase):
+    """'+ Rec.709 MOV': a display preview movie beside the frames,
+    whatever they are written in -- ACEScg EXRs AND a movie that plays
+    anywhere, in one run."""
+
+    def test_every_studio_and_lens_and_paint_offer_it(self):
+        import inspect
+        for tab, var in (("_tab_upstudio", "ups_mov709_var"),
+                         ("_tab_detail", "det_mov709_var"),
+                         ("_tab_upscale", "usc_mov709_var")):
+            with self.subTest(tab=tab):
+                body = inspect.getsource(getattr(App, tab))
+                self.assertIn(f"self._mov709_row(c_of, self.{var})", body)
+        self.assertIn('text="+ Rec.709 MOV"', inspect.getsource(App._tab_organic))
+        self.assertIn('text="+ Rec.709 MOV"', inspect.getsource(App._tab_smudge))
+        for fn, name in ((App._ups_run, "UPS_OUT_NAME"),
+                         (App._det_run, "DET_OUT_NAME"),
+                         (App._usc_run, "USC_OUT_NAME")):
+            with self.subTest(fn=fn.__name__):
+                body = inspect.getsource(fn)
+                self.assertIn(f"self._adw_rec709_mov(out, self.{name}", body)
+
+    def test_the_movie_is_rec709_whatever_the_frames_hold(self):
+        import tempfile, subprocess, shutil
+        if not shutil.which("ffmpeg") or b"prores_ks" not in subprocess.run(
+                ["ffmpeg", "-hide_banner", "-encoders"],
+                capture_output=True).stdout:
+            self.skipTest("no ffmpeg / prores here")
+        d = tempfile.mkdtemp()
+        lin = np.full((16, 32, 3), 0.18, np.float32)
+        for k in range(3):
+            App._organic_write_exr(os.path.join(d, f"X.{k + 1:05d}.exr"),
+                                   App._cs_from_lin709(lin, "acescg"),
+                                   half=False, tag="acescg")
+        App._adw_write_colorspace(d, *App._cs_sidecar("acescg"))
+        app = App.__new__(App)
+        logs = []
+        app.log = lambda w, m, t=None: logs.append(m)
+        app.after = lambda ms, fn=None, *a: (fn() if fn else None)
+        mov = app._adw_rec709_mov(d, "X", 24.0, log_w="log")
+        self.assertIsNotNone(mov, logs)
+        self.assertTrue(mov.endswith("X_Rec709.mov"))
+        self.assertTrue(os.path.exists(mov))
+        # mid grey comes out at Rec.709 code ~0.5 (1886 gamma 2.4)
+        raw = subprocess.run(["ffmpeg", "-v", "error", "-i", mov, "-frames:v",
+                              "1", "-pix_fmt", "rgb24", "-f", "rawvideo", "-"],
+                             capture_output=True).stdout
+        px = np.frombuffer(raw, np.uint8)
+        self.assertGreater(float(px.mean()) / 255.0, 0.42)
+        self.assertLess(float(px.mean()) / 255.0, 0.56)
+        self.assertTrue(any("from Working ACEScg" in m for m in logs))
+
+
 class TestHashNoise(unittest.TestCase):
     """Grain's field is addressed by absolute pixel position rather than
     drawn from a sequential stream, so any sub-rectangle renders exactly
@@ -3099,18 +3152,18 @@ class TestRenderOutput(unittest.TestCase):
         src = self._src()
         self.assertIn("self.organic_out_mov_var = tk.BooleanVar(value=False)",
                       src)
-        self.assertIn('text="Out .MOV"', src)
+        self.assertIn('text="+ Rec.709 MOV"', src)
 
     def test_the_worker_honours_the_tickbox(self):
         body = ast.dump(self._fn("_organic_run_worker"))
         self.assertIn("organic_out_mov_var", body)
-        self.assertIn("_organic_encode_mov", body)
+        self.assertIn("_adw_rec709_mov", body)
 
     def test_mov_is_encoded_before_the_handoff(self):
         """A receiving module must not find a half-written movie sitting
         in the folder it just adopted as input."""
         body = ast.unparse(self._fn("_organic_run_worker"))
-        self.assertLess(body.index("_organic_encode_mov"),
+        self.assertLess(body.index("_adw_rec709_mov"),
                         body.index("_organic_after_run_sendto"))
 
     def test_it_propagates_and_reveals_like_the_others(self):
@@ -20669,6 +20722,7 @@ class TestLensStudioCancelRender(unittest.TestCase):
             _organic_source_aces = False
             _organic_source_cs = None
             ACES_NAME = App.ACES_NAME
+            LENS_OUT_NAME = App.LENS_OUT_NAME
             organic_log_txt = None
             _organic_cs_out_key = lambda s, fmt=None: "linear"
             _cs_sidecar = App._cs_sidecar
@@ -20699,7 +20753,7 @@ class TestLensStudioCancelRender(unittest.TestCase):
                 st._organic_cancel = True
             return stem + ".exr"
         st._organic_write_frame = write
-        st._organic_encode_mov = lambda d, fr: st.encoded.append(d)
+        st._adw_rec709_mov = lambda d, name, **k: st.encoded.append(d)
         st._organic_after_run_sendto = lambda d: st.sent.append(d)
         return st
 
