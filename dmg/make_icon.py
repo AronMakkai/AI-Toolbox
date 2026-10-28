@@ -4,7 +4,7 @@ S=1024; import os
 P=os.environ.get("ICON_OUT", os.path.dirname(os.path.abspath(__file__))+"/")
 RED=(204,68,68,255); DARK=(20,20,22,255); WHITE=(235,235,240,255)
 BAYER=((0,8,2,10),(12,4,14,6),(3,11,1,9),(15,7,13,5))
-FONT="/usr/share/fonts/truetype/google-fonts/Poppins-Medium.ttf"
+FONT="/usr/share/fonts/truetype/google-fonts/Poppins-Bold.ttf"
 def tile():
     img=Image.new("RGBA",(S,S),(0,0,0,0)); m=int(S*0.05); r=int(S*0.225)
     grad=Image.new("RGBA",(S,S),(0,0,0,0)); gd=ImageDraw.Draw(grad)
@@ -90,7 +90,7 @@ def render(w,h):
     fres=np.clip(1-np.clip((n*V).sum(-1),0,1),0,1)**2
     lum=0.14+0.95*diff+0.30*fres+5.0*spec+1.6*rim    # HDR: specular and rim well above 1
     # floor / backdrop: soft studio gradient with a contact shadow
-    bg=0.04+0.16*np.exp(-(((xx/w-0.72)**2)*4+((yy/h-0.25)**2)*5))
+    bg=0.012+0.06*np.exp(-(((xx/w-0.72)**2)*4+((yy/h-0.25)**2)*5))
     sh=np.exp(-(((xx/w-0.5)**2)*30+((yy/h-0.86)**2)*400))*0.6
     out=np.where(hit,lum,np.clip(bg-sh*bg,0,None))
     return out.astype(np.float32)
@@ -110,7 +110,7 @@ def build(name, pix=22, expo=1.5, wipe=0.50):
     sdr=np.clip(0.12+0.5*np.clip(lin,0,0.9)/0.9,0,1)
     small=Image.fromarray((sdr*255).astype(np.uint8),"L").resize((w//pix,h//pix),Image.BOX).resize((w,h),Image.NEAREST)
     g=np.asarray(small,np.float32)/255
-    before=np.stack([30+g*110, 20+g*58, 22+g*60],axis=-1).astype(np.uint8)   # desaturated dark red
+    before=np.stack([18+g*122, 10+g*66, 12+g*68],axis=-1).astype(np.uint8)   # desaturated dark red
     before=Image.fromarray(before,"RGB")
     mid_x=int(S*wipe); img=tile(); d=ImageDraw.Draw(img)
     d.rounded_rectangle((fx0-10,fy0-10,fx1+10,fy1+10),radius=22,fill=DARK)
@@ -121,9 +121,9 @@ def build(name, pix=22, expo=1.5, wipe=0.50):
     d.line((mid_x,fy0,mid_x,fy1),fill=WHITE,width=int(S*0.012))
     hw=int(S*0.045); cy=(fy0+fy1)//2; d.rounded_rectangle((mid_x-hw,cy-hw//2,mid_x+hw,cy+hw//2),radius=hw//3,fill=WHITE)
     d.line((mid_x-hw//2,cy,mid_x+hw//2,cy),fill=DARK,width=6)
-    font=ImageFont.truetype(FONT, int(S*0.062)); text="STUDIO TOOLBOX"; sp=int(S*0.012)
-    tw=sum(font.getlength(ch) for ch in text)+sp*(len(text)-1); x=(S-tw)/2; ty=int(S*0.095)
-    for ch in text: d.text((x,ty),ch,font=font,fill=(225,225,230,255)); x+=font.getlength(ch)+sp
+    font=ImageFont.truetype(FONT, int(S*0.068)); text="STUDIO TOOLBOX"; sp=int(S*0.009)
+    tw=sum(font.getlength(ch) for ch in text)+sp*(len(text)-1); x=(S-tw)/2; ty=int(S*0.088)
+    for ch in text: d.text((x,ty),ch,font=font,fill=(255,255,255,255)); x+=font.getlength(ch)+sp
     ry=ty+int(S*0.042); d.line((int(S*0.10),ry,(S-tw)/2-int(S*0.03),ry),fill=RED,width=4); d.line(((S+tw)/2+int(S*0.03),ry,int(S*0.90),ry),fill=RED,width=4)
     tx0,tx1=int(S*0.10),int(S*0.90); ty0=int(S*0.745); th=int(S*0.085)
     d.rounded_rectangle((tx0,ty0,tx1,ty0+th),radius=14,fill=(12,12,13,255))
