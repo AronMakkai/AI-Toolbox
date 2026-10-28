@@ -23010,6 +23010,10 @@ def cs_convert(a, src, dst):
             self._organic_roi_clear()
             return
         self._organic_roi_mode = True
+        # Armed: the next drag draws the box. Once a box exists the
+        # mouse goes back to the wipe and the pan; the box stays until
+        # the button is clicked again.
+        self._organic_roi_armed = True
         self.organic_roi_btn.configure(bg="#3A1414", fg="#FF6666")
         self.organic_canvas.configure(cursor="crosshair")
         self.log(self.organic_log_txt,
@@ -23026,6 +23030,7 @@ def cs_convert(a, src, dst):
         self._organic_roi = None
         self._organic_roi_drag = None
         self._organic_roi_mode = False
+        self._organic_roi_armed = False
         try:
             self.organic_roi_btn.configure(bg="#0D0D0D", fg=G)
             self.organic_canvas.configure(cursor="arrow")
@@ -23062,8 +23067,10 @@ def cs_convert(a, src, dst):
         y0, x0, y1, x1 = roi
         lbl.configure(text=f"ROI {x1 - x0}\u00d7{y1 - y0}")
 
+    _organic_roi_armed = False
+
     def _organic_canvas_click(self, e):
-        if self._organic_roi_mode:
+        if self._organic_roi_mode and self._organic_roi_armed:
             ix, iy = self._organic_canvas_to_img(e.x, e.y)
             self._organic_roi_drag = (ix, iy)
             return
@@ -23111,6 +23118,13 @@ def cs_convert(a, src, dst):
             if e is not None:
                 self._organic_roi_from_drag(e)
             self._organic_roi_drag = None
+            if self._organic_roi:
+                # drawn: hand the mouse back to the wipe / pan
+                self._organic_roi_armed = False
+                try:
+                    self.organic_canvas.configure(cursor="arrow")
+                except Exception:
+                    pass
             # A new box is a new request: the screen does not show the
             # effect in it yet, so Update goes red (and auto runs).
             try:
