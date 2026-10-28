@@ -2419,6 +2419,9 @@ class App(tk.Tk):
         it."""
         if self._slow_notice_heard:
             return False
+        bs = getattr(self, "_batch_state", None)
+        if bs and bs.get("i", 0) > 0:
+            return False      # once per batch, not once per shot
         win = self._slow_notice_win
         try:
             if win is not None and win.winfo_exists():
@@ -3930,6 +3933,29 @@ class App(tk.Tk):
            "automatically falls back to Lanczos + unsharp. Run the "
            "ESRGAN install in the Setup tab to enable the full AI "
            "upscaler.\n", "body_indent")
+        _end()
+
+        _end = _sec("Batch: all shots in this folder")
+        _w("The same tick box sits in Upscale Studio, Detail Studio, "
+           "Expansion Studio and MOV \u2192 EXR. Ticked, the folder you pick "
+           "is a parent: every subfolder holding an image sequence is a "
+           "shot (MOV \u2192 EXR: every movie in the folder), and Run applies "
+           "the settings on the tab, exactly as they are, to each shot in "
+           "turn through the module's own Run \u2014 log, progress bar, cache "
+           "and all. One level only; ADW output folders are skipped.\n\n",
+           "body_indent")
+        _w("Output\n", "param")
+        _w("One version folder for the batch with a subfolder per shot: "
+           "ADW/UPSCALE_v03/sh010, ADW/UPSCALE_v03/sh020 \u2026 That version "
+           "folder is itself a batch root, so tick Batch in the next "
+           "module and pick it to carry the whole batch on.\n\n",
+           "body_indent")
+        _w("Preview\n", "param")
+        _w("The Shot dropdown picks which shot Preview looks at; check the "
+           "settings on a hard shot before running them on all. Run asks "
+           "once, with the shot and frame count and the cloud models it "
+           "will pay for. CANCEL stops the queue after the current frame.\n",
+           "body_indent")
         _end()
 
         _end = _sec("Preview & Compare")
@@ -6409,6 +6435,7 @@ class App(tk.Tk):
         self.el.bind("<Button-1>", self._epick)
         self.ei = tk.Label(c, text="", font=FSM, bg=S, fg=G, anchor="w")
         self.ei.pack(anchor="w", pady=(3, 0))
+        self._batch_row(c, "exr")
 
         cc = self._card(self.exr_f_to_exr, "Colour Management")
         self.exr_csp_var = self._combo(cc, "Input space",
@@ -9388,6 +9415,11 @@ class App(tk.Tk):
         p = filedialog.askopenfilename(
             filetypes=[("Video", "*.mov *.mpg *.mpeg *.mp4 *.mxf"), ("All", "*.*")])
         if not p: return
+        self._e_accept(p)
+
+    def _e_accept(self, p):
+        if self._batch_wants("exr", p):
+            return
         self.exr_file = p
         name = os.path.basename(p)
         self.exr_path_lbl.configure(text=p, fg=G)
@@ -9433,8 +9465,11 @@ class App(tk.Tk):
         self._m2e_refresh_preview()
 
     def _erun(self):
+        if self._batch_wants_run("exr"):
+            return
         if not self.exr_file: return
         self.eb.configure(state="disabled")
+        self._e_running = True
         self.setstatus("Converting…", R)
         def go():
             p    = self.exr_file
@@ -9567,7 +9602,7 @@ class App(tk.Tk):
                 self.after(0, lambda: self.eb_bar.set(1.0, "Done"))
                 self.setstatus("Complete", GR)
                 self.after(0, lambda: self.exr_jump.configure(state="normal", bg="#0D0D0D", fg=W))
-                self._reveal(out)
+                self._batch_reveal(out)
                 self.after(0, lambda o=out: self._adw_propagate_output(
                     o, "exrconv", self.elog))
                 self.eb.configure(state="normal")
@@ -9694,7 +9729,7 @@ class App(tk.Tk):
                 self.after(0, lambda: self.eb_bar.set(1.0, "Done"))
                 self.setstatus("Complete", GR)
                 self.after(0, lambda: self.exr_jump.configure(state="normal", bg="#0D0D0D", fg=W))
-                self._reveal(out)
+                self._batch_reveal(out)
                 self.after(0, lambda o=out: self._adw_propagate_output(
                     o, "exrconv", self.elog))
             else:
@@ -9703,7 +9738,12 @@ class App(tk.Tk):
                 self.after(0, lambda: self.eb_bar.reset())
                 self.setstatus("Error", RB)
             self.eb.configure(state="normal")
-        threading.Thread(target=go, daemon=True).start()
+        def _go():
+            try:
+                go()
+            finally:
+                self._e_running = False
+        threading.Thread(target=_go, daemon=True).start()
 
     # ── AI Model target: the SDR a generative video model actually
     # expects, verified against each platform's real documentation
@@ -12002,6 +12042,9 @@ class App(tk.Tk):
         spawning a new one per frame.
         """
         import re
+        b = self._batch_output_dir(input_folder, module_name, create=True)
+        if b:
+            return b
         root = self._adw_output_root(input_folder)
         os.makedirs(root, exist_ok=True)
         pat = re.compile(r"^" + re.escape(module_name) + r"_v(\d+)$")
@@ -12036,6 +12079,9 @@ class App(tk.Tk):
         new empty version folder every time the UI repainted, so this
         mirrors its numbering with no filesystem write."""
         import re
+        b = self._batch_output_dir(input_folder, module_name, create=False)
+        if b:
+            return b
         root = self._adw_output_root(input_folder)
         pat = re.compile(r"^" + re.escape(module_name) + r"_v(\d+)$")
         existing = []
@@ -12086,6 +12132,11 @@ class App(tk.Tk):
         point loading a module's own output back into itself).
         Each target is wrapped individually so one module's load
         issue can't block the others from receiving the handoff."""
+        bs = self.__dict__.get("_batch_state")
+        if bs and bs.get("i", 0) < len(bs.get("shots", ())) - 1:
+            # Mid-batch: the next shot replaces this one in a moment;
+            # the hand-off is done once, for the last shot.
+            return
         targets = []
         attempts = [
             ("organic", "_organic_load_folder", "Lens Studio"),
@@ -21066,7 +21117,7 @@ class App(tk.Tk):
         # the zoom and the comparison toggles live.
         _bar = tk.Frame(rf, bg=BG); _bar.pack(fill="x", padx=16, pady=(10, 3))
         tk.Label(_bar, text="Scroll to zoom  |  ⌥drag to pan  |  "
-                 "ROI: drag a box, then only that region re-renders",
+                 "ROI on: drag a box, the effect renders inside it only",
                  font=FSM, bg=BG, fg=G).pack(side="left")
         for sym, fn in (("−", lambda: self._organic_zoom_step(-0.25)),
                         ("+", lambda: self._organic_zoom_step(+0.25)),
@@ -21092,8 +21143,6 @@ class App(tk.Tk):
             self._organic_toggle_roi, bg="#0D0D0D", fg=G)
         tk.Label.configure(self.organic_roi_btn._lbl, width=5, pady=2)
         self.organic_roi_btn.pack(side="right", padx=(2, 10))
-        self.organic_roi_btn._lbl.bind("<Double-Button-1>",
-                                       self._organic_roi_clear)
 
         self.organic_canvas = tk.Canvas(rf, bg="#0D0D0D", highlightthickness=0)
         self.organic_canvas.pack(fill="both", expand=True, padx=16)
@@ -21871,7 +21920,7 @@ class App(tk.Tk):
             self._organic_exp_refresh_label()
             return
         crop = None
-        roi = getattr(self, "_organic_roi", None)
+        roi = self._organic_roi_active()
         if (roi and self.organic_processed is not None and mask is not None
                 and mask.shape == raw.shape[:2]
                 and self.organic_lin.shape == raw.shape):
@@ -22254,10 +22303,10 @@ class App(tk.Tk):
             from PIL import Image
             p = self._organic_params()
             seed = self._organic_frame_seed(getattr(self, "_organic_idx", 0))
-            roi = getattr(self, "_organic_roi", None)
+            roi = self._organic_roi_active()
             note = ""
             inner = None
-            if roi and self.organic_processed is not None:
+            if roi:
                 inner, box = self._organic_apply_stack_roi(
                     self.organic_lin, p, roi, seed=seed, progress=_tick)
                 if inner is None:
@@ -22269,17 +22318,25 @@ class App(tk.Tk):
                 y0, x0, y1, x1 = box
                 patch = Image.fromarray(
                     self._organic_linear_to_display(inner), "RGB")
-                base = self.organic_processed.copy()
+                # Outside the box: the last render if there is one,
+                # else the untouched plate -- the effect shows inside
+                # the box only, which is what the box is for.
+                pl = getattr(self, "_organic_proc_lin", None)
+                if (self.organic_processed is None or pl is None
+                        or pl.shape[:2] != self.organic_lin.shape[:2]):
+                    pl = self.organic_lin.copy()
+                    base = Image.fromarray(
+                        self._organic_linear_to_display(pl), "RGB")
+                else:
+                    base = self.organic_processed.copy()
+                    pl = pl.copy()
                 base.paste(patch, (x0, y0))
                 self.organic_processed = base
                 # The float mirrors the paste, so exposure still works
                 # after a region update rather than showing the last
                 # full frame.
-                pl = getattr(self, "_organic_proc_lin", None)
-                if pl is not None and pl.shape[:2] == self.organic_lin.shape[:2]:
-                    pl = pl.copy()
-                    pl[y0:y1, x0:x1] = inner
-                    self._organic_proc_lin = pl
+                pl[y0:y1, x0:x1] = inner
+                self._organic_proc_lin = pl
                 note = f"  ROI {x1 - x0}\u00d7{y1 - y0}"
             else:
                 self._organic_exp_ensure_full()
@@ -22429,30 +22486,27 @@ class App(tk.Tk):
 
     # ── region of interest ──
     def _organic_toggle_roi(self):
-        self._organic_roi_mode = not self._organic_roi_mode
+        """The ROI button: one click turns it on (red) -- drag a box and
+        updates render the effect inside it only; the next click turns
+        it off, drops the box and goes back to the whole frame. The box
+        constrains nothing while the button is off."""
         if self._organic_roi_mode:
-            self.organic_roi_btn.configure(bg="#3A1414", fg="#FF6666")
-            self.organic_canvas.configure(cursor="crosshair")
-            self.log(self.organic_log_txt,
-                     "ROI: drag a box. Click once to clear it.", "hi")
-        else:
-            self.organic_roi_btn.configure(bg="#0D0D0D", fg=G)
-            self.organic_canvas.configure(cursor="arrow")
+            self._organic_roi_clear()
+            return
+        self._organic_roi_mode = True
+        self.organic_roi_btn.configure(bg="#3A1414", fg="#FF6666")
+        self.organic_canvas.configure(cursor="crosshair")
+        self.log(self.organic_log_txt,
+                 "ROI on: drag a box \u2014 updates render the effect inside "
+                 "it only. Click ROI again to go back to the whole "
+                 "frame.", "hi")
         self._organic_redraw()
 
     def _organic_roi_clear(self, _e=None):
-        """Double-click the ROI button: drop the box AND leave the mode.
-
-        A single click only toggles the mode, which leaves the red box
-        sitting there still constraining the next update -- so switching
-        ROI off and expecting the whole frame back gave a frame that was
-        only partly current. The two halves of "I'm done with this
-        region" now happen together.
-
-        Tk sends Button-1 twice before Double-Button-1, so the two
-        single-click toggles cancel out and this lands on whatever state
-        the mode started in; it sets the mode explicitly rather than
-        toggling for that reason."""
+        """ROI off: drop the box AND leave the mode, together -- a box
+        left behind would still constrain the next update, so switching
+        off and expecting the whole frame back gave a frame that was
+        only partly current."""
         self._organic_roi = None
         self._organic_roi_drag = None
         self._organic_roi_mode = False
@@ -22466,8 +22520,20 @@ class App(tk.Tk):
         # at newer settings, so it is genuinely out of date now.
         self._organic_mark_stale()
         self.log(self.organic_log_txt,
-                 "ROI cleared — updates cover the whole frame.", "dim")
+                 "ROI off — updates cover the whole frame.", "dim")
         self._organic_redraw()
+        try:
+            if self.__dict__.get("organic_auto_var") is not None \
+                    and self.organic_auto_var.get():
+                self._organic_auto_schedule()
+        except Exception:
+            pass
+
+    def _organic_roi_active(self):
+        """The box, when the button is on; None otherwise."""
+        if not getattr(self, "_organic_roi_mode", False):
+            return None
+        return getattr(self, "_organic_roi", None) or None
 
     def _organic_roi_status(self):
         roi = getattr(self, "_organic_roi", None)
@@ -22529,6 +22595,14 @@ class App(tk.Tk):
             if e is not None:
                 self._organic_roi_from_drag(e)
             self._organic_roi_drag = None
+            # A new box is a new request: the screen does not show the
+            # effect in it yet, so Update goes red (and auto runs).
+            try:
+                self._organic_mark_stale()
+                if self.organic_auto_var.get():
+                    self._organic_auto_schedule()
+            except Exception:
+                pass
         self._organic_wipe_drag = None
         self._organic_pan_ref = None
 
@@ -22669,7 +22743,7 @@ class App(tk.Tk):
             self.log(self.organic_log_txt, f"Redraw failed: {ex}", "err")
 
     def _organic_draw_roi(self, cv):
-        roi = getattr(self, "_organic_roi", None)
+        roi = self._organic_roi_active()
         if not roi:
             return
         y0, x0, y1, x1 = roi
@@ -28701,6 +28775,19 @@ print("EXR write complete")
                      "own aspect ticks the box itself."
                  ), arrow="w"),
 
+            dict(tab="upstudio", widget="ups_batch",
+                 title="Batch: all shots in this folder",
+                 body=(
+                     "Tick it and pick a parent folder: every subfolder\n"
+                     "with a sequence is a shot, and Run applies the\n"
+                     "settings on this tab to each one in turn. The Shot\n"
+                     "dropdown picks what Preview looks at.\n\n"
+                     "Output is one version folder with a subfolder per\n"
+                     "shot — ADW/UPSCALE_v03/sh010 … — which the next\n"
+                     "module can take as its own batch. The same box is\n"
+                     "in Detail Studio, Expansion Studio and MOV → EXR."
+                 ), arrow="w"),
+
             dict(tab="detail", widget="det_tiles",
                  title="Detail Studio",
                  body=(
@@ -29068,6 +29155,7 @@ print("EXR write complete")
             "ups_tiles":       tiles("_ups_tiles"),
             "ups_freq":        getattr(self, "ups_freq_canvas", None),
             "ups_input":       getattr(self, "ups_in_lbl", None),
+            "ups_batch":       (self._batch.get("upstudio") or {}).get("row"),
             "det_tiles":       tiles("_det_tiles"),
             "usc_peak":        getattr(self, "usc_ai_mask_btn", None),
             "organic_canvas":  getattr(self, "organic_canvas", None),
@@ -29218,6 +29306,7 @@ print("EXR write complete")
         self.usc_in_lbl.pack(fill="x", pady=(2, 0))
         self.usc_in_var.trace_add("write",
                                   lambda *_: self._usc_in_changed())
+        self._batch_row(c1, "upscale")
 
         # ── 2 (no Settings card) ───────────────────────────────────────
         # Mode / Output Res / Factor used to live here, when this tab
@@ -32822,6 +32911,8 @@ print("EXR write complete")
             return ""
 
     def _usc_accept(self, path):
+        if self._batch_wants("upscale", path):
+            return
         """Folder, movie, or any one frame of a sequence."""
         if os.path.isdir(path):
             self._usc_is_movie = False
@@ -33124,6 +33215,8 @@ print("EXR write complete")
         self._usc_show_frame(0)
 
     def _usc_run(self):
+        if self._batch_wants_run("upscale"):
+            return
         if not self._usc_folder or not self._usc_frames: return
         self._slow_model_notice()
         _folder = self._usc_folder
@@ -33633,6 +33726,7 @@ print("EXR write complete")
         self.ups_squeeze_var = tk.StringVar(value="2.0")
         self._anam_row(c1, self.ups_anam_var, self.ups_squeeze_var,
                        self._ups_anam_changed)
+        self._batch_row(c1, "upstudio")
 
         c2 = self._card(lf, "Resolution")
         self.ups_res_var = tk.StringVar(value="UHD")
@@ -33907,6 +34001,8 @@ print("EXR write complete")
             self._ups_accept(p)
 
     def _ups_accept(self, path):
+        if self._batch_wants("upstudio", path):
+            return
         if os.path.isdir(path):
             self._ups_is_movie, self._ups_src_movie = False, None
             return self._ups_load_folder(path)
@@ -34393,6 +34489,418 @@ print("EXR write complete")
                          "off.", "dim")
         except Exception:
             pass
+
+    # ══ Batch: all shots in this folder ══════════════════════════════
+    # One tick box in the Input card of the slow, non-interactive
+    # modules. Ticked, the folder picked is a PARENT: every subfolder
+    # holding an image sequence (MOV -> EXR: every movie in the folder)
+    # is a shot, and Run applies the tab's settings, exactly as they
+    # are, to each shot in turn through the module's own Run -- so the
+    # log, the progress bar, the cache, the versioned output folder
+    # next to each shot and the hand-off to the next module all behave
+    # as for a single shot. A shot dropdown picks which shot Preview
+    # looks at. One level only: the ADW/ output folders are never
+    # entered, and the queue stops at the module's own CANCEL.
+    BATCH_SEQ_EXTS = (".exr", ".png", ".jpg", ".jpeg", ".tif", ".tiff",
+                      ".dpx")
+    BATCH_MODULES = {
+        "upstudio": dict(busy="_ups_running", accept="_ups_accept",
+                         run="_ups_run", log="ups_log", cancel="_ups_cancel",
+                         kind="seq", title="Upscale"),
+        "detail":   dict(busy="_det_running", accept="_det_accept",
+                         run="_det_run", log="det_log", cancel="_det_cancel",
+                         kind="seq", title="Detail"),
+        "upscale":  dict(busy="_usc_running", accept="_usc_accept",
+                         run="_usc_run", log="usc_log", cancel="_usc_cancel",
+                         kind="seq", title="Expansion"),
+        "exr":      dict(busy="_e_running", accept="_e_accept", run="_erun",
+                         log="elog", cancel=None, kind="mov",
+                         title="MOV → EXR"),
+    }
+    _batch_loading = False
+    _batch_state = None
+    _batch_confirm = None     # tests inject a yes/no; None = messagebox
+
+    @classmethod
+    def _batch_scan_shots(cls, root):
+        """The shot folders directly under root: subfolders that hold an
+        image sequence, in name order. Output folders (ADW) and hidden
+        folders are skipped. A root that holds frames itself and no
+        shot subfolders is one shot."""
+        shots = []
+        try:
+            names = sorted(os.listdir(root))
+        except Exception:
+            return shots
+        for n in names:
+            if n.startswith(".") or n == "ADW":
+                continue
+            d = os.path.join(root, n)
+            if os.path.isdir(d) and cls._batch_count_frames(d):
+                shots.append(d)
+        if not shots and cls._batch_count_frames(root):
+            shots = [root]
+        return shots
+
+    @classmethod
+    def _batch_count_frames(cls, d):
+        try:
+            return sum(1 for f in os.listdir(d)
+                       if os.path.splitext(f)[1].lower() in cls.BATCH_SEQ_EXTS)
+        except Exception:
+            return 0
+
+    @classmethod
+    def _batch_scan_movies(cls, root):
+        exts = set(cls.FF_MOV_EXTS)
+        try:
+            return sorted(os.path.join(root, f) for f in os.listdir(root)
+                          if not f.startswith(".")
+                          and os.path.splitext(f)[1].lower() in exts)
+        except Exception:
+            return []
+
+    def _batch_row(self, parent, key):
+        """The tick box, the shot dropdown and the count, in a module's
+        Input card."""
+        st = self._batch.setdefault(key, {})
+        st["var"] = tk.BooleanVar(value=False)
+        st["shots"], st["root"] = [], None
+        row = tk.Frame(parent, bg=S); row.pack(fill="x", pady=(4, 0))
+        tk.Checkbutton(row, text="Batch: all shots in this folder",
+                       variable=st["var"], bg=S, fg=W, selectcolor="#222222",
+                       activebackground=S, activeforeground=W, font=FSM,
+                       bd=0).pack(side="left")
+        i = tk.Label(row, text="ⓘ", font=FSM, bg=S, fg="#555555",
+                     cursor="hand2")
+        i.pack(side="left", padx=(6, 0))
+        mov = self.BATCH_MODULES[key]["kind"] == "mov"
+        self._tooltip(
+            ("Run every movie in the picked movie's folder, one\n"
+             "after the other, with the settings on this tab.\n"
+             if mov else
+             "Treat the picked folder as a parent: every subfolder\n"
+             "holding an image sequence is a shot, and Run applies\n"
+             "the settings on this tab to each shot in turn.\n")
+            + "Each shot's render lands next to that shot, as\n"
+              "usual. Preview looks at the shot chosen below.\n"
+              "One level only — ADW output folders are skipped.\n"
+              "CANCEL stops the queue after the current frame.")(i)
+        sr = tk.Frame(parent, bg=S)
+        st["shot_row"] = sr
+        top = tk.Frame(sr, bg=S); top.pack(fill="x")
+        tk.Label(top, text="Shot", font=FSM, bg=S, fg=G, width=12,
+                 anchor="w").pack(side="left")
+        st["shot_var"] = tk.StringVar(value="")
+        st["combo"] = ttk.Combobox(top, textvariable=st["shot_var"],
+                                   values=[], state="readonly", font=FSM,
+                                   width=22)
+        st["combo"].pack(side="left", padx=(4, 0))
+        st["lbl"] = tk.Label(sr, text="", font=FSM, bg=S, fg="#555555",
+                             anchor="w", wraplength=370, justify="left")
+        st["lbl"].pack(fill="x", pady=(2, 0))
+        st["combo"].bind("<<ComboboxSelected>>",
+                         lambda e, k=key: self._batch_select_shot(k))
+        st["var"].trace_add("write", lambda *_, k=key: self._batch_toggled(k))
+        st["row"] = row
+        return row
+
+    @property
+    def _batch(self):
+        d = self.__dict__.get("_batch_d")
+        if d is None:
+            d = self.__dict__["_batch_d"] = {}
+        return d
+
+    def _batch_on(self, key):
+        st = self._batch.get(key)
+        try:
+            return bool(st and st["var"].get())
+        except Exception:
+            return False
+
+    def _batch_toggled(self, key):
+        st = self._batch[key]
+        if not st["var"].get():
+            try:
+                st["shot_row"].pack_forget()
+            except Exception:
+                pass
+            st["lbl"].configure(text="")
+            st["shots"], st["root"] = [], None
+            return
+        # Ticked after a shot was already loaded: its parent is the root.
+        cur = self._batch_current_path(key)
+        if cur:
+            self._batch_set_root(key, cur)
+
+    def _batch_current_path(self, key):
+        g = lambda n: self.__dict__.get(n, getattr(type(self), n, None))
+        if key == "upstudio":
+            return g("_ups_src_movie") if g("_ups_is_movie") else g("_ups_folder")
+        if key == "detail":
+            return g("_det_src_movie") if g("_det_is_movie") else g("_det_folder")
+        if key == "upscale":
+            return g("_usc_src_movie") if g("_usc_is_movie") else g("_usc_folder")
+        if key == "exr":
+            return g("exr_file")
+        return None
+
+    def _batch_wants(self, key, path):
+        """Called first thing by a module's accept: True when the pick
+        should become the batch root instead of a single shot."""
+        if self._batch_loading or not self._batch_on(key):
+            return False
+        self._batch_set_root(key, path)
+        return True
+
+    def _batch_root_of(self, key, path):
+        kind = self.BATCH_MODULES[key]["kind"]
+        if kind == "mov":
+            return path if os.path.isdir(path) else os.path.dirname(path)
+        if os.path.isdir(path):
+            return path
+        # A frame inside a shot folder: the shot's parent is the root.
+        shot = os.path.dirname(path)
+        return os.path.dirname(shot) if self._batch_count_frames(shot) else shot
+
+    def _batch_set_root(self, key, path):
+        st = self._batch[key]
+        m = self.BATCH_MODULES[key]
+        root = self._batch_root_of(key, path)
+        shots = (self._batch_scan_movies(root) if m["kind"] == "mov"
+                 else self._batch_scan_shots(root))
+        st["root"], st["shots"] = root, shots
+        log = getattr(self, m["log"], None)
+        if not shots:
+            st["shot_row"].pack(fill="x", pady=(4, 0))
+            st["lbl"].configure(text="no shots found", fg=R)
+            st["combo"].configure(values=[])
+            st["shot_var"].set("")
+            if log is not None:
+                self.log(log, f"Batch: nothing to run under {root}", "err")
+            return
+        names = [os.path.basename(s) for s in shots]
+        st["combo"].configure(values=names)
+        st["shot_row"].pack(fill="x", pady=(4, 0))
+        if m["kind"] == "mov":
+            st["lbl"].configure(text=f"{len(shots)} movie(s)", fg="#555555")
+        else:
+            n = sum(self._batch_count_frames(s) for s in shots)
+            st["lbl"].configure(text=f"{len(shots)} shot(s) · {n:,} frames",
+                                fg="#555555")
+        if log is not None:
+            self.log(log, f"Batch: {len(shots)} shot(s) under {root}", "hi")
+        # Start on the shot that was picked (or the one on screen) if
+        # it is one of them, else the first.
+        if m["kind"] == "mov":
+            cur = None if os.path.isdir(path) else path
+        else:
+            cur = path if os.path.isdir(path) else os.path.dirname(path)
+        if cur is None or os.path.normpath(cur) == os.path.normpath(root):
+            cur = self._batch_current_path(key)
+        want = 0
+        if cur:
+            cur = os.path.normpath(cur)
+            for i, s in enumerate(shots):
+                if os.path.normpath(s) == cur:
+                    want = i
+                    break
+        st["shot_var"].set(names[want])
+        self._batch_load(key, shots[want])
+
+    def _batch_load(self, key, shot):
+        """Load one shot into the module through its own accept, with
+        the batch hook bypassed."""
+        self._batch_loading = True
+        try:
+            return getattr(self, self.BATCH_MODULES[key]["accept"])(shot)
+        finally:
+            self._batch_loading = False
+
+    def _batch_select_shot(self, key):
+        st = self._batch[key]
+        name = st["shot_var"].get()
+        for s in st["shots"]:
+            if os.path.basename(s) == name:
+                self._batch_load(key, s)
+                return
+
+    def _batch_cloud_models(self, key):
+        """The paid models the tab would use, for the confirmation."""
+        try:
+            if key == "upstudio":
+                ms = self._ups_multi_models() or [self._ups_render_model()]
+                return [self.UPS_MODEL_NAMES[m] for m in ms
+                        if m in self.UPS_ENDPOINTS]
+            if key == "detail":
+                ms = self._det_multi_models() or [self._det_render_model()]
+                return [n for m, n in self.DET_MODELS
+                        if m in ms and m != "esrgan"]
+            if key == "upscale":
+                ms = self._usc_multi_models() or [self._usc_render_model()]
+                return [self.USC_MODEL_NAMES[m] for m in ms if m != "tonemap"]
+        except Exception:
+            pass
+        return []
+
+    def _batch_output_dir(self, input_folder, module_name, create):
+        """While a batch runs, a module's versioned output is ONE version
+        folder for the whole batch with a subfolder per shot --
+        ADW/UPSCALE_v03/sh010, ADW/UPSCALE_v03/sh020 -- so the shots
+        of one run stay together and the version folder is itself a
+        batch root for the next module. None outside a batch."""
+        import re
+        bs = self.__dict__.get("_batch_state")
+        if not bs or not bs.get("shot"):
+            return None
+        vers = bs.setdefault("vers", {})
+        ver_dir = vers.get(module_name)
+        if ver_dir is None:
+            root = self._adw_output_root(bs["shot"])
+            pat = re.compile(r"^" + re.escape(module_name) + r"_v(\d+)$")
+            existing = []
+            try:
+                for name in os.listdir(root):
+                    m = pat.match(name)
+                    if m and os.path.isdir(os.path.join(root, name)):
+                        existing.append(int(m.group(1)))
+            except FileNotFoundError:
+                pass
+            ver = (max(existing) + 1) if existing else 1
+            ver_dir = os.path.join(root, f"{module_name}_v{ver:02d}")
+            if not create:
+                return os.path.join(ver_dir, os.path.basename(bs["shot"]))
+            os.makedirs(ver_dir, exist_ok=True)
+            vers[module_name] = ver_dir
+        out = os.path.join(ver_dir, os.path.basename(bs["shot"]))
+        if create:
+            os.makedirs(out, exist_ok=True)
+        return out
+
+    def _batch_busy(self, key):
+        return bool(getattr(self, self.BATCH_MODULES[key]["busy"], False))
+
+    def _batch_reveal(self, path):
+        """Open the output in the file manager -- not for every shot of
+        a batch, once at the end."""
+        bs = self.__dict__.get("_batch_state")
+        if bs and bs.get("i", 0) < len(bs.get("shots", ())) - 1:
+            return
+        self._reveal(path)
+
+    def _batch_wants_run(self, key):
+        """Called first thing by a module's Run: True when Run should
+        start the queue instead of rendering the loaded shot. While the
+        queue is running, Run falls through and renders the shot the
+        queue loaded."""
+        if self._batch_state is not None or not self._batch_on(key):
+            return False
+        st = self._batch[key]
+        if not st["shots"]:
+            return False
+        if self._batch_busy(key):
+            return False
+        return self._batch_run(key)
+
+    def _batch_run(self, key):
+        st = self._batch[key]
+        m = self.BATCH_MODULES[key]
+        shots = list(st["shots"])
+        log = getattr(self, m["log"], None)
+        cloud = self._batch_cloud_models(key)
+        if m["kind"] == "mov":
+            what = f"{len(shots)} movie(s)"
+        else:
+            n = sum(self._batch_count_frames(s) for s in shots)
+            what = f"{len(shots)} shot(s), {n:,} frames"
+        msg = f"Run {m['title']} on {what} with the current settings?"
+        if cloud:
+            msg += (f"\n\nThis sends every frame to fal.ai "
+                    f"({', '.join(cloud)}) and is charged per frame; "
+                    "frames already in the cache are not re-sent.")
+        ok = True
+        try:
+            ok = (self._batch_confirm(msg) if self._batch_confirm
+                  else messagebox.askyesno("Batch", msg))
+        except Exception:
+            ok = True
+        if not ok:
+            return True
+        self._slow_model_notice()
+        self._batch_state = dict(key=key, i=0, shots=shots, done=0,
+                                 failed=0, cancel=False)
+        if log is not None:
+            self.log(log, f"── Batch: {what} ──", "hi")
+        self._batch_next()
+        return True
+
+    def _batch_next(self):
+        bs = self._batch_state
+        if bs is None:
+            return
+        key = bs["key"]
+        m = self.BATCH_MODULES[key]
+        st = self._batch[key]
+        log = getattr(self, m["log"], None)
+        n = len(bs["shots"])
+        if bs["cancel"] or bs["i"] >= n:
+            self._batch_state = None
+            summary = (f"Batch {'cancelled' if bs['cancel'] else 'done'} "
+                       f"— {bs['done']} of {n} shot(s) rendered"
+                       + (f", {bs['failed']} failed" if bs["failed"] else "")
+                       + ".")
+            st["lbl"].configure(text=summary, fg=RB if bs["cancel"] or
+                                bs["failed"] else "#7CFF96")
+            if log is not None:
+                self.log(log, summary, "err" if bs["cancel"] or bs["failed"]
+                         else "ok")
+                for v in (bs.get("vers") or {}).values():
+                    self.log(log, f"Batch output \u2192 {v}/ \u2014 one folder "
+                             "per shot; tick Batch in the next module and "
+                             "pick this folder to carry on.", "ok")
+            self.setstatus(summary, RB if bs["cancel"] or bs["failed"] else GR)
+            return
+        shot = bs["shots"][bs["i"]]
+        name = os.path.basename(shot)
+        bs["shot"] = shot
+        st["lbl"].configure(text=f"shot {bs['i'] + 1} / {n}", fg=W)
+        try:
+            st["shot_var"].set(name)
+        except Exception:
+            pass
+        if log is not None:
+            self.log(log, f"── Shot {bs['i'] + 1} / {n}: {name}", "hi")
+        try:
+            self._batch_load(key, shot)
+            getattr(self, m["run"])()
+        except Exception as ex:
+            if log is not None:
+                self.log(log, f"{name}: {ex}", "err")
+        if not self._batch_busy(key):
+            # Run did not start (nothing loaded, a preview in the way):
+            # that is a failed shot, not a reason to stall.
+            bs["failed"] += 1
+            bs["i"] += 1
+            self.after(50, self._batch_next)
+            return
+        self._batch_poll()
+
+    def _batch_poll(self):
+        bs = self._batch_state
+        if bs is None:
+            return
+        key = bs["key"]
+        m = self.BATCH_MODULES[key]
+        if self._batch_busy(key):
+            self.after(400, self._batch_poll)
+            return
+        if m["cancel"] and getattr(self, m["cancel"], False):
+            bs["cancel"] = True
+        else:
+            bs["done"] += 1
+            bs["i"] += 1
+        self.after(50, self._batch_next)
 
     def _anam_row(self, parent, anam_var, squeeze_var, on_change):
         """The Anamorphic checkbox + squeeze factor row, shared by the
@@ -35946,6 +36454,8 @@ print("EXR write complete")
         return out
 
     def _ups_run(self):
+        if self._batch_wants_run("upstudio"):
+            return
         if not self._ups_folder or not self._ups_frames:
             return
         self._slow_model_notice()
@@ -36290,6 +36800,7 @@ print("EXR write complete")
         self.det_squeeze_var = tk.StringVar(value="2.0")
         self._anam_row(c1, self.det_anam_var, self.det_squeeze_var,
                        self._det_anam_changed)
+        self._batch_row(c1, "detail")
 
         # ── Detail: downscale + blend sliders ──
         c2 = self._card(lf, "Detail")
@@ -36584,6 +37095,8 @@ print("EXR write complete")
             self._det_accept(p)
 
     def _det_accept(self, path):
+        if self._batch_wants("detail", path):
+            return
         if os.path.isdir(path):
             self._det_is_movie, self._det_src_movie = False, None
             return self._det_load_folder(path)
@@ -37744,6 +38257,8 @@ print("EXR write complete")
         return out
 
     def _det_run(self):
+        if self._batch_wants_run("detail"):
+            return
         if not self._det_folder or not self._det_frames:
             return
         self._slow_model_notice()

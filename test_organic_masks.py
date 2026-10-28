@@ -2271,11 +2271,89 @@ class TestRoiClear(unittest.TestCase):
         self.assertIsNone(App._organic_roi_crop(
             (240, 360), self.app._organic_roi, dict(App._ORGANIC_BASE)))
 
-    def test_the_double_click_is_actually_bound(self):
-        with open(SRC, encoding="utf-8") as fh:
-            src = fh.read()
-        self.assertIn('self.organic_roi_btn._lbl.bind("<Double-Button-1>",',
-                      src)
+    def test_the_second_click_on_the_button_clears(self):
+        """One button, one gesture: the click that turns ROI off is the
+        one that drops the box (no double-click to hunt for)."""
+        import inspect
+        self.assertIn("self._organic_roi_clear()",
+                      inspect.getsource(App._organic_toggle_roi))
+
+
+class TestRoiButtonIsAToggle(unittest.TestCase):
+    """The ROI button: one click on (red), drag a box, updates render
+    the effect inside the box only -- even before any full render; the
+    next click turns it off and drops the box. A box left over while
+    the button is off constrains nothing."""
+
+    def setUp(self):
+        self.app = _StubApp()
+        self.app._organic_roi = None
+        self.app._organic_roi_mode = False
+        self.app._organic_roi_drag = None
+        self.app.organic_roi_btn = _FakeButton()
+        self.app.organic_roi_lbl = _FakeLabel()
+        self.app.organic_canvas = _FakeCanvas(700, 400)
+        self.app._organic_redraw = lambda: None
+        self.app._organic_mark_stale = lambda: None
+        self.app.log = lambda *a, **k: None
+        self.app.organic_log_txt = None
+
+    def test_click_turns_it_on_and_red(self):
+        self.app._organic_toggle_roi()
+        self.assertTrue(self.app._organic_roi_mode)
+        self.assertEqual(self.app.organic_roi_btn.cfg.get("fg"), "#FF6666")
+        self.assertEqual(self.app.organic_canvas.cursor, "crosshair")
+
+    def test_second_click_turns_it_off_and_drops_the_box(self):
+        self.app._organic_toggle_roi()
+        self.app._organic_roi = (10, 20, 90, 140)
+        self.app._organic_toggle_roi()
+        self.assertFalse(self.app._organic_roi_mode)
+        self.assertIsNone(self.app._organic_roi)
+        self.assertEqual(self.app.organic_roi_btn.cfg.get("fg"), G)
+
+    def test_the_box_only_counts_while_the_button_is_on(self):
+        self.app._organic_roi = (10, 20, 90, 140)
+        self.assertIsNone(self.app._organic_roi_active())
+        self.app._organic_roi_mode = True
+        self.assertEqual(self.app._organic_roi_active(), (10, 20, 90, 140))
+
+    def test_no_double_click_binding_on_the_button(self):
+        import inspect
+        src = inspect.getsource(App._tab_organic)
+        i = src.index("self.organic_roi_btn = ")
+        self.assertNotIn("Double-Button-1", src[i:i + 400])
+
+    def test_first_roi_update_shows_the_plate_outside_the_box(self):
+        """No full render yet: the effect appears inside the box and the
+        untouched plate everywhere else, rather than the box being
+        ignored and the whole frame rendered."""
+        from PIL import Image
+        app = self.app
+        lin = np.full((60, 80, 3), 0.2, np.float32)
+        app.organic_lin = lin
+        app.organic_processed = None
+        app._organic_proc_lin = None
+        app._organic_roi_mode = True
+        app._organic_roi = (10, 10, 40, 50)
+        app._organic_params = lambda: dict(App._ORGANIC_BASE)
+        app._organic_frame_seed = lambda i: 1
+        app._organic_preview_state = lambda *a, **k: None
+        app._organic_progress_bar = lambda *a: ""
+        app._organic_exp_ensure_full = lambda: None
+        app.organic_update_btn = None
+        app._organic_idx = 0
+        app._organic_stale = True
+        inner = np.full((30, 40, 3), 0.9, np.float32)
+        app._organic_apply_stack_roi = lambda *a, **k: (inner, (10, 10, 40, 50))
+        app._organic_apply_stack = lambda *a, **k: self.fail("full render")
+        app._organic_recompute()
+        pl = app._organic_proc_lin
+        self.assertEqual(pl.shape, lin.shape)
+        self.assertAlmostEqual(float(pl[20, 20, 0]), 0.9)
+        self.assertAlmostEqual(float(pl[5, 5, 0]), 0.2)
+        self.assertIsInstance(app.organic_processed, Image.Image)
+        self.assertEqual(app.organic_processed.size, (80, 60))
 
 
 class TestHashNoise(unittest.TestCase):
@@ -18693,7 +18771,7 @@ class TestMovExrTabLayoutAndAnalysis(unittest.TestCase):
 
     # ── MOV -> EXR preview ──
     def test_picking_a_movie_makes_a_preview(self):
-        body = self._src(App._epick)
+        body = self._src(App._epick) + self._src(App._e_accept)
         self.assertIn("self._m2e_refresh_preview()", body)
         self.assertNotIn("self._exr_sample_histogram(p)", body)
 
@@ -19446,6 +19524,8 @@ class TestExpansionAdjustmentIsNotLaggy(unittest.TestCase):
         st.organic_exp_var = V(1.0)
         st.organic_exp_val = Lbl()
         st._organic_roi = roi
+        st._organic_roi_mode = roi is not None
+        st._organic_roi_active = lambda: App._organic_roi_active(st)
         st.n = {"recompute": 0, "show": 0, "after": 0, "idle": 0}
         st.states = []
         st._organic_preview_state = lambda s_, t=None: st.states.append(s_)
@@ -19572,6 +19652,244 @@ class TestLensStudioFrameNames(unittest.TestCase):
         self.assertEqual((base + "%05d") % 7, stem)
         self.assertIn('_re_mov.sub(r"\\d+$", ""',
                       inspect.getsource(App._organic_encode_mov))
+
+class TestBatchShots(unittest.TestCase):
+    """Batch: all shots in this folder. The picked folder is a parent;
+    each subfolder with a sequence (or each movie in the folder) is a
+    shot; Run drives the module's own Run once per shot, writing one
+    version folder for the batch with a subfolder per shot, and the
+    queue stops at CANCEL. Preview looks at the shot chosen in the
+    dropdown."""
+
+    def _root(self):
+        import tempfile
+        from PIL import Image
+        root = tempfile.mkdtemp()
+        for shot in ("sh010", "sh020"):
+            d = os.path.join(root, shot); os.makedirs(d)
+            for i in range(2):
+                Image.new("RGB", (4, 4)).save(
+                    os.path.join(d, f"{shot}.{i + 1:04d}.png"))
+        os.makedirs(os.path.join(root, "ADW", "UPSCALE_v01"))
+        Image.new("RGB", (4, 4)).save(
+            os.path.join(root, "ADW", "UPSCALE_v01", "x.png"))
+        os.makedirs(os.path.join(root, "notes"))
+        os.makedirs(os.path.join(root, ".hidden"))
+        Image.new("RGB", (4, 4)).save(os.path.join(root, ".hidden", "a.png"))
+        return root
+
+    def test_scan_finds_shot_folders_and_skips_output_and_hidden(self):
+        root = self._root()
+        shots = [os.path.basename(s) for s in App._batch_scan_shots(root)]
+        self.assertEqual(shots, ["sh010", "sh020"])
+
+    def test_a_folder_of_frames_with_no_shot_subfolders_is_one_shot(self):
+        root = self._root()
+        one = os.path.join(root, "sh010")
+        self.assertEqual(App._batch_scan_shots(one), [one])
+        self.assertEqual(App._batch_scan_shots(os.path.join(root, "notes")), [])
+
+    def test_scan_movies_lists_only_movies(self):
+        import tempfile
+        d = tempfile.mkdtemp()
+        for n in ("b.mov", "a.mp4", "notes.txt", ".c.mov"):
+            open(os.path.join(d, n), "w").close()
+        self.assertEqual([os.path.basename(m) for m in App._batch_scan_movies(d)],
+                         ["a.mp4", "b.mov"])
+
+    def _stub(self, key="upstudio", kind="seq"):
+        app = App.__new__(App)
+        app.log = lambda *a, **k: None
+        app.ups_log = None
+        app.setstatus = lambda *a, **k: None
+        app._slow_model_notice = lambda: False
+        app._batch_confirm = lambda msg: True
+        class V:
+            def __init__(self, v=""): self.v = v
+            def get(self): return self.v
+            def set(self, v): self.v = v
+        class W:
+            def __init__(self): self.kw = {}
+            def configure(self, **kw): self.kw.update(kw)
+            def pack(self, **kw): pass
+            def pack_forget(self): pass
+        app._batch[key] = dict(var=V(True), shots=[], root=None, lbl=W(),
+                               combo=W(), shot_var=V(), shot_row=W())
+        app.BATCH_MODULES = {key: dict(busy="_fake_busy", accept="_fake_accept",
+                                       run="_fake_run", log="ups_log",
+                                       cancel="_fake_cancel", kind=kind,
+                                       title="Fake")}
+        app._fake_busy = False
+        app._fake_cancel = False
+        app.loaded = []
+        app.ran = []
+        pending = []
+        app.after = lambda ms, fn=None, *a: pending.append(fn)
+        app.pending = pending
+        def accept(p):
+            app.loaded.append(p)
+        def run():
+            # The real Runs set their running flag synchronously and
+            # clear it from the worker thread via after().
+            app.ran.append(app.loaded[-1])
+            app._fake_busy = True
+            pending.append(lambda: setattr(app, "_fake_busy", False))
+        app._fake_accept = accept
+        app._fake_run = run
+        return app
+
+    def _drain(self, app, limit=500):
+        n = 0
+        while app.pending and n < limit:
+            app.pending.pop(0)(); n += 1
+        self.assertLess(n, limit, "the batch never finished")
+
+    def test_pick_with_batch_on_sets_the_root_and_loads_the_picked_shot(self):
+        root = self._root()
+        app = self._stub()
+        frame = os.path.join(root, "sh020", "sh020.0001.png")
+        self.assertTrue(app._batch_wants("upstudio", frame))
+        st = app._batch["upstudio"]
+        self.assertEqual(st["root"], root)
+        self.assertEqual([os.path.basename(s) for s in st["shots"]],
+                         ["sh010", "sh020"])
+        self.assertEqual(st["shot_var"].get(), "sh020")
+        self.assertEqual(app.loaded, [os.path.join(root, "sh020")])
+        self.assertIn("2 shot(s)", st["lbl"].kw["text"])
+        self.assertIn("4 frames", st["lbl"].kw["text"])
+        # the dropdown loads the chosen shot through the module's accept
+        st["shot_var"].set("sh010")
+        app._batch_select_shot("upstudio")
+        self.assertEqual(app.loaded[-1], os.path.join(root, "sh010"))
+
+    def test_pick_with_batch_off_is_an_ordinary_pick(self):
+        app = self._stub()
+        app._batch["upstudio"]["var"].set(False)
+        self.assertFalse(app._batch_wants("upstudio", self._root()))
+        self.assertEqual(app.loaded, [])
+
+    def test_a_movie_pick_batches_the_movies_beside_it(self):
+        import tempfile
+        d = tempfile.mkdtemp()
+        for n in ("a.mov", "b.mov"):
+            open(os.path.join(d, n), "w").close()
+        app = self._stub(kind="mov")
+        self.assertTrue(app._batch_wants("upstudio", os.path.join(d, "b.mov")))
+        st = app._batch["upstudio"]
+        self.assertEqual(st["root"], d)
+        self.assertEqual(st["shot_var"].get(), "b.mov")
+        self.assertEqual(app.loaded, [os.path.join(d, "b.mov")])
+
+    def test_run_drives_every_shot_through_the_modules_own_run(self):
+        root = self._root()
+        app = self._stub()
+        app._batch_wants("upstudio", root)
+        self.assertTrue(app._batch_wants_run("upstudio"))
+        self.assertIsNotNone(app._batch_state)
+        # while the queue runs, Run falls through (the queue's own call)
+        self.assertFalse(app._batch_wants_run("upstudio"))
+        self._drain(app)
+        self.assertIsNone(app._batch_state)
+        self.assertEqual([os.path.basename(p) for p in app.ran],
+                         ["sh010", "sh020"])
+        self.assertIn("2 of 2", app._batch["upstudio"]["lbl"].kw["text"])
+
+    def test_cancel_in_the_module_stops_the_queue(self):
+        root = self._root()
+        app = self._stub()
+        app._batch_wants("upstudio", root)
+        run = app._fake_run
+        def cancelling_run():
+            run()
+            app._fake_cancel = True
+        app._fake_run = cancelling_run
+        app._batch_wants_run("upstudio")
+        self._drain(app)
+        self.assertEqual(len(app.ran), 1)
+        self.assertIn("cancelled", app._batch["upstudio"]["lbl"].kw["text"])
+
+    def test_declining_the_confirmation_runs_nothing(self):
+        root = self._root()
+        app = self._stub()
+        app._batch_wants("upstudio", root)
+        app._batch_confirm = lambda msg: False
+        self.assertTrue(app._batch_wants_run("upstudio"))   # handled: no render
+        self.assertIsNone(app._batch_state)
+        self.assertEqual(app.ran, [])
+
+    def test_the_confirmation_names_the_cloud_models_and_the_count(self):
+        root = self._root()
+        app = self._stub()
+        app._batch_wants("upstudio", root)
+        seen = []
+        app._batch_confirm = lambda msg: (seen.append(msg), False)[1]
+        app._batch_cloud_models = lambda key: ["SeedVR2"]
+        app._batch_wants_run("upstudio")
+        self.assertIn("2 shot(s), 4 frames", seen[0])
+        self.assertIn("SeedVR2", seen[0])
+        self.assertIn("fal.ai", seen[0])
+
+    def test_a_run_that_does_not_start_counts_as_failed_not_a_stall(self):
+        root = self._root()
+        app = self._stub()
+        app._batch_wants("upstudio", root)
+        app._fake_run = lambda: None          # e.g. a preview in the way
+        app._batch_wants_run("upstudio")
+        self._drain(app)
+        self.assertIsNone(app._batch_state)
+        self.assertIn("2 failed", app._batch["upstudio"]["lbl"].kw["text"])
+
+    def test_batch_output_is_one_version_folder_with_a_subfolder_per_shot(self):
+        root = self._root()
+        app = App.__new__(App)
+        shots = [os.path.join(root, "sh010"), os.path.join(root, "sh020")]
+        app._batch_state = dict(key="upstudio", i=0, shots=shots, shot=shots[0])
+        peek = app._adw_peek_next_version_dir(shots[0], "UPSCALE")
+        out1 = app._adw_versioned_output_dir(shots[0], "UPSCALE")
+        self.assertEqual(out1, os.path.join(root, "ADW", "UPSCALE_v02", "sh010"))
+        self.assertEqual(peek, out1)
+        self.assertTrue(os.path.isdir(out1))
+        app._batch_state.update(i=1, shot=shots[1])
+        out2 = app._adw_versioned_output_dir(shots[1], "UPSCALE")
+        self.assertEqual(out2, os.path.join(root, "ADW", "UPSCALE_v02", "sh020"))
+        # another module in the same batch gets its own version folder
+        self.assertEqual(app._adw_versioned_output_dir(shots[1], "EXPAND"),
+                         os.path.join(root, "ADW", "EXPAND_v01", "sh020"))
+        # and outside a batch the numbering is the ordinary one
+        app._batch_state = None
+        self.assertEqual(app._adw_peek_next_version_dir(shots[0], "UPSCALE"),
+                         os.path.join(root, "ADW", "UPSCALE_v03"))
+
+    def test_the_hand_off_and_the_notice_happen_once_per_batch(self):
+        app = App.__new__(App)
+        app._batch_state = dict(key="upstudio", i=0, shots=["a", "b", "c"])
+        calls = []
+        app._reveal = lambda p: calls.append(p)
+        app._batch_reveal("x")
+        self.assertEqual(calls, [])
+        app._batch_state["i"] = 2
+        app._batch_reveal("x")
+        self.assertEqual(calls, ["x"])
+        app._slow_notice_heard = False
+        app._batch_state["i"] = 1
+        self.assertFalse(app._slow_model_notice())
+
+    def test_every_module_has_the_row_and_the_hooks(self):
+        import inspect
+        for key, accept, run, tab in (
+                ("upstudio", "_ups_accept", "_ups_run", "_tab_upstudio"),
+                ("detail", "_det_accept", "_det_run", "_tab_detail"),
+                ("upscale", "_usc_accept", "_usc_run", "_tab_upscale"),
+                ("exr", "_e_accept", "_erun", "_tab_exr")):
+            with self.subTest(module=key):
+                self.assertIn(f'self._batch_wants("{key}", ',
+                              inspect.getsource(getattr(App, accept)))
+                self.assertIn(f'self._batch_wants_run("{key}")',
+                              inspect.getsource(getattr(App, run)))
+                self.assertIn(f'self._batch_row(c', inspect.getsource(
+                    getattr(App, tab)))
+                self.assertIn(f'"{key}")', inspect.getsource(getattr(App, tab)))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -17,6 +17,7 @@ Studio Toolbox is a VFX processing suite featuring:
 - **Expansion Studio** — SDR-to-HDR tone mapping with AI upsampling
 - **Upscale Studio** — Video upscaling (SeedVR2, FlashVSR, ESRGAN)
 - **Detail Studio** — Texture at the input resolution: downscale, upscale back, keep only the invented detail
+- **Batch** — Tick *Batch: all shots in this folder* in Upscale, Detail, Expansion or MOV→EXR and Run applies the tab's settings to every shot under the picked folder, one version folder with a subfolder per shot
 - **Paint Studio** — Per-frame hand painting and smudging
 - **Fix Missing Frames** — rebuild dropped, black or held frames with RIFE or Wan VACE
 - Plus: MOV ↔ EXR conversion and SAM 3 segmentation
