@@ -1,6 +1,7 @@
 from PIL import Image, ImageDraw, ImageFont
 import numpy as np, cv2
-S=1024; P="/tmp/claude-0/-home-claude/fed10f93-feb6-50c9-91b8-5d8648588e21/scratchpad/"
+S=1024; import os
+P=os.environ.get("ICON_OUT", os.path.dirname(os.path.abspath(__file__))+"/")
 RED=(204,68,68,255); DARK=(20,20,22,255); WHITE=(235,235,240,255)
 BAYER=((0,8,2,10),(12,4,14,6),(3,11,1,9),(15,7,13,5))
 FONT="/usr/share/fonts/truetype/google-fonts/Poppins-Medium.ttf"
@@ -53,7 +54,7 @@ def scene(p):
         t0,t1=i/N,(i+1)/N
         d=np.minimum(d,sd_round_cone(p,bez(t0),bez(t1),0.27-0.15*t0,0.27-0.15*t1))
     # handle: torus arc on the left
-    d=np.minimum(d,sd_torus_seg(p,np.array([-1.05,0.18,0]),0.55,0.11,2,np.radians(60),np.radians(300)))
+    d=np.minimum(d,sd_torus_seg(p,np.array([-0.98,0.22,0]),0.40,0.09,2,np.radians(55),np.radians(305)))
     # base ring
     d=np.minimum(d,sd_torus_seg(p,np.array([0,-0.62,0]),0.62,0.07,2,0,2*np.pi)*0+ (np.hypot(np.hypot(p[...,0],p[...,2])-0.62,p[...,1]+0.62)-0.07))
     return d
