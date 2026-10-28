@@ -13266,6 +13266,30 @@ class TestMovToExrWithoutZscale(unittest.TestCase):
             raise errors[0]
 
 
+class TestTargetPeakTip(unittest.TestCase):
+    """Expansion Studio's Target peak has an info icon that says how
+    bright target pixels sit for the HDR deliverables people are
+    asked for -- diffuse white, skin, graphics, speculars -- and what
+    600 / 1000 / 4000 nits each mean against HDR10, Dolby Vision and
+    the streaming platforms' masters."""
+
+    def test_the_combo_carries_the_tip(self):
+        import inspect
+        body = inspect.getsource(App._tab_upscale)
+        i = body.index('"Target peak"')
+        self.assertIn("tip=self.USC_PEAK_TIP", body[i:i + 200])
+
+    def test_the_tip_covers_the_standards_and_every_option(self):
+        tip = App.USC_PEAK_TIP
+        for frag in ("Dolby Vision", "HDR10+", "Prime Video", "Netflix", "HLG",
+                     "MaxCLL", "MaxFALL", "203", "skin", "diffuse white",
+                     "600 nits", "1000 nits", "4000 nits", "10,000"):
+            with self.subTest(fragment=frag):
+                self.assertIn(frag, tip)
+        for peak in App.HDR_PEAKS:
+            self.assertIn(peak, tip)
+
+
 class TestSetupRifeLabel(unittest.TestCase):
     """The Setup & Install component row for the RIFE install was
     labelled "ADW-Blur", which stopped being accurate the moment Fix
