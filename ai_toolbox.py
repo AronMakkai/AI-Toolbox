@@ -2401,6 +2401,86 @@ class App(tk.Tk):
         "...#...#...",
     )
 
+    # ── the slow-models notice ────────────────────────────────────────
+    # Shown once per session on the first Preview or Run in Expansion,
+    # Upscale or Detail Studio: the models are external and slow. "I
+    # hear you" keeps it away for the rest of the session; "Whatever"
+    # only closes it, so it comes back next time. Nothing is saved, so
+    # every launch starts with the notice again.
+    _slow_notice_heard = False
+    _slow_notice_win = None
+    SLOW_NOTICE_TEXT = ("Blip Blop.. The models used are external and slow, "
+                        "so they may take a while to run. Patience is "
+                        "non optional here")
+
+    def _slow_model_notice(self):
+        """Show the notice if it has not been heard this session. Never
+        blocks: the preview or run it was raised for carries on behind
+        it."""
+        if self._slow_notice_heard:
+            return False
+        win = self._slow_notice_win
+        try:
+            if win is not None and win.winfo_exists():
+                win.lift()
+                return True
+        except Exception:
+            pass
+        win = tk.Toplevel(self)
+        self._slow_notice_win = win
+        win.title("Blip Blop")
+        win.configure(bg=BG)
+        win.resizable(False, False)
+        try:
+            win.transient(self)
+        except Exception:
+            pass
+        body = tk.Frame(win, bg=BG, padx=22, pady=18)
+        body.pack(fill="both", expand=True)
+        cell = 7
+        rows, cols = len(self._ROBOT_PIXELS), len(self._ROBOT_PIXELS[0])
+        cv = tk.Canvas(body, width=cols * cell, height=rows * cell, bg=BG,
+                       highlightthickness=0)
+        cv.pack(pady=(0, 12))
+        self._usc_draw_glyph(cv, "robot", 0, 0, "#CC4444", cell=cell)
+        tk.Label(body, text=self.SLOW_NOTICE_TEXT, font=FSM, bg=BG, fg=W,
+                 wraplength=340, justify="center").pack()
+        row = tk.Frame(body, bg=BG)
+        row.pack(fill="x", pady=(18, 0))
+
+        def _heard():
+            self._slow_notice_heard = True
+            self._slow_notice_close()
+
+        small = tk.Label(row, text="I hear you", font=FM, bg="#1A1A1A", fg=G,
+                         cursor="hand2", padx=8, pady=3, highlightthickness=1,
+                         highlightbackground=BD)
+        small.pack(side="left")
+        small.bind("<Button-1>", lambda e: _heard())
+        big = self._mkbtn(row, "Whatever", self._slow_notice_close,
+                          bg="#2A0A0A", fg="#CC4444")
+        tk.Label.configure(big._lbl, width=0, pady=10, padx=28)
+        big.pack(side="right")
+        self._slow_notice_small, self._slow_notice_big = small, big
+        win.protocol("WM_DELETE_WINDOW", self._slow_notice_close)
+        try:
+            win.update_idletasks()
+            x = self.winfo_rootx() + (self.winfo_width() - win.winfo_reqwidth()) // 2
+            y = self.winfo_rooty() + (self.winfo_height() - win.winfo_reqheight()) // 3
+            win.geometry(f"+{max(0, x)}+{max(0, y)}")
+        except Exception:
+            pass
+        return True
+
+    def _slow_notice_close(self):
+        win = self._slow_notice_win
+        self._slow_notice_win = None
+        try:
+            if win is not None:
+                win.destroy()
+        except Exception:
+            pass
+
     def _robot_badge(self, parent, cell=2):
         """Just the pixel glyph, no label, no click handler.
 
@@ -30941,6 +31021,7 @@ print("EXR write complete")
         gets a green box and can be clicked to compare."""
         if not self._usc_folder or not self._usc_frames:
             return
+        self._slow_model_notice()
         if getattr(self, "_usc_previewing", False):
             # While a preview runs, the Preview button IS its cancel --
             # a preview stuck on fal must never leave the artist with
@@ -32868,6 +32949,7 @@ print("EXR write complete")
 
     def _usc_run(self):
         if not self._usc_folder or not self._usc_frames: return
+        self._slow_model_notice()
         _folder = self._usc_folder
         _frames = list(self._usc_frames)
         # Whatever is being viewed (or, failing that, the first selected
@@ -35520,6 +35602,7 @@ print("EXR write complete")
         another. While it runs, this same button is its Cancel."""
         if not self._ups_folder or not self._ups_frames:
             return
+        self._slow_model_notice()
         if self._ups_previewing:
             self._ups_preview_cancel()
             return
@@ -35689,6 +35772,7 @@ print("EXR write complete")
     def _ups_run(self):
         if not self._ups_folder or not self._ups_frames:
             return
+        self._slow_model_notice()
         if self._ups_previewing:
             # Both would be paying fal and writing the same cache at once.
             self.log(self.ups_log, "A preview is running — cancel it "
@@ -37322,6 +37406,7 @@ print("EXR write complete")
         another. While it runs, this same button is its Cancel."""
         if not self._det_folder or not self._det_frames:
             return
+        self._slow_model_notice()
         if self._det_previewing:
             self._det_preview_cancel()
             return
@@ -37485,6 +37570,7 @@ print("EXR write complete")
     def _det_run(self):
         if not self._det_folder or not self._det_frames:
             return
+        self._slow_model_notice()
         if self._det_previewing:
             self.log(self.det_log, "A preview is running — cancel it "
                      "or let it finish, then Run.", "err")
