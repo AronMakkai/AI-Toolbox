@@ -13356,6 +13356,42 @@ class TestMaskButtonsToggle(unittest.TestCase):
         self.assertIn('self._usc_ai_toggle_mask("crushed")', body)
 
 
+class TestSlowModelNotice(unittest.TestCase):
+    """The first Preview or Run in Expansion, Upscale or Detail Studio
+    raises the Blip Blop notice (red robot, the text, a small "I hear
+    you" that silences it for the session, a big "Whatever" that only
+    closes it). Nothing is saved: every launch starts with it again."""
+
+    def test_every_studio_entry_raises_it_after_its_own_guard(self):
+        import inspect
+        for fn in (App._usc_preview, App._usc_run, App._ups_preview, App._ups_run,
+                   App._det_preview, App._det_run):
+            with self.subTest(fn=fn.__name__):
+                body = inspect.getsource(fn)
+                self.assertEqual(body.count("self._slow_model_notice()"), 1)
+                # after the nothing-loaded guard, so an idle click shows nothing
+                self.assertLess(body.index("return"), body.index("self._slow_model_notice()"))
+
+    def test_the_text_and_the_two_buttons(self):
+        import inspect
+        self.assertEqual(App.SLOW_NOTICE_TEXT,
+                         "Blip Blop.. The models used are external and slow, so they "
+                         "may take a while to run. Patience is non optional here")
+        body = inspect.getsource(App._slow_model_notice)
+        self.assertIn('"I hear you"', body)
+        self.assertIn('"Whatever"', body)
+        self.assertIn('self._usc_draw_glyph(cv, "robot", 0, 0, "#CC4444"', body)
+        self.assertFalse(App._slow_notice_heard)            # per launch, not saved
+
+    def test_heard_silences_whatever_does_not(self):
+        app = App.__new__(App)
+        app._slow_notice_heard = False
+        app._slow_notice_win = None
+        app._slow_notice_close()                           # nothing to close: fine
+        app._slow_notice_heard = True
+        self.assertFalse(app._slow_model_notice())        # heard: no window made
+
+
 class TestSetupRifeLabel(unittest.TestCase):
     """The Setup & Install component row for the RIFE install was
     labelled "ADW-Blur", which stopped being accurate the moment Fix
