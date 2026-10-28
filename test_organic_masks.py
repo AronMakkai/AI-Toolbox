@@ -2274,11 +2274,89 @@ class TestRoiClear(unittest.TestCase):
         self.assertIsNone(App._organic_roi_crop(
             (240, 360), self.app._organic_roi, dict(App._ORGANIC_BASE)))
 
-    def test_the_double_click_is_actually_bound(self):
-        with open(SRC, encoding="utf-8") as fh:
-            src = fh.read()
-        self.assertIn('self.organic_roi_btn._lbl.bind("<Double-Button-1>",',
-                      src)
+    def test_the_second_click_on_the_button_clears(self):
+        """One button, one gesture: the click that turns ROI off is the
+        one that drops the box (no double-click to hunt for)."""
+        import inspect
+        self.assertIn("self._organic_roi_clear()",
+                      inspect.getsource(App._organic_toggle_roi))
+
+
+class TestRoiButtonIsAToggle(unittest.TestCase):
+    """The ROI button: one click on (red), drag a box, updates render
+    the effect inside the box only -- even before any full render; the
+    next click turns it off and drops the box. A box left over while
+    the button is off constrains nothing."""
+
+    def setUp(self):
+        self.app = _StubApp()
+        self.app._organic_roi = None
+        self.app._organic_roi_mode = False
+        self.app._organic_roi_drag = None
+        self.app.organic_roi_btn = _FakeButton()
+        self.app.organic_roi_lbl = _FakeLabel()
+        self.app.organic_canvas = _FakeCanvas(700, 400)
+        self.app._organic_redraw = lambda: None
+        self.app._organic_mark_stale = lambda: None
+        self.app.log = lambda *a, **k: None
+        self.app.organic_log_txt = None
+
+    def test_click_turns_it_on_and_red(self):
+        self.app._organic_toggle_roi()
+        self.assertTrue(self.app._organic_roi_mode)
+        self.assertEqual(self.app.organic_roi_btn.cfg.get("fg"), "#FF6666")
+        self.assertEqual(self.app.organic_canvas.cursor, "crosshair")
+
+    def test_second_click_turns_it_off_and_drops_the_box(self):
+        self.app._organic_toggle_roi()
+        self.app._organic_roi = (10, 20, 90, 140)
+        self.app._organic_toggle_roi()
+        self.assertFalse(self.app._organic_roi_mode)
+        self.assertIsNone(self.app._organic_roi)
+        self.assertEqual(self.app.organic_roi_btn.cfg.get("fg"), G)
+
+    def test_the_box_only_counts_while_the_button_is_on(self):
+        self.app._organic_roi = (10, 20, 90, 140)
+        self.assertIsNone(self.app._organic_roi_active())
+        self.app._organic_roi_mode = True
+        self.assertEqual(self.app._organic_roi_active(), (10, 20, 90, 140))
+
+    def test_no_double_click_binding_on_the_button(self):
+        import inspect
+        src = inspect.getsource(App._tab_organic)
+        i = src.index("self.organic_roi_btn = ")
+        self.assertNotIn("Double-Button-1", src[i:i + 400])
+
+    def test_first_roi_update_shows_the_plate_outside_the_box(self):
+        """No full render yet: the effect appears inside the box and the
+        untouched plate everywhere else, rather than the box being
+        ignored and the whole frame rendered."""
+        from PIL import Image
+        app = self.app
+        lin = np.full((60, 80, 3), 0.2, np.float32)
+        app.organic_lin = lin
+        app.organic_processed = None
+        app._organic_proc_lin = None
+        app._organic_roi_mode = True
+        app._organic_roi = (10, 10, 40, 50)
+        app._organic_params = lambda: dict(App._ORGANIC_BASE)
+        app._organic_frame_seed = lambda i: 1
+        app._organic_preview_state = lambda *a, **k: None
+        app._organic_progress_bar = lambda *a: ""
+        app._organic_exp_ensure_full = lambda: None
+        app.organic_update_btn = None
+        app._organic_idx = 0
+        app._organic_stale = True
+        inner = np.full((30, 40, 3), 0.9, np.float32)
+        app._organic_apply_stack_roi = lambda *a, **k: (inner, (10, 10, 40, 50))
+        app._organic_apply_stack = lambda *a, **k: self.fail("full render")
+        app._organic_recompute()
+        pl = app._organic_proc_lin
+        self.assertEqual(pl.shape, lin.shape)
+        self.assertAlmostEqual(float(pl[20, 20, 0]), 0.9)
+        self.assertAlmostEqual(float(pl[5, 5, 0]), 0.2)
+        self.assertIsInstance(app.organic_processed, Image.Image)
+        self.assertEqual(app.organic_processed.size, (80, 60))
 
 
 class TestHashNoise(unittest.TestCase):
@@ -20422,6 +20500,8 @@ class TestExpansionAdjustmentIsNotLaggy(unittest.TestCase):
         st.organic_exp_var = V(1.0)
         st.organic_exp_val = Lbl()
         st._organic_roi = roi
+        st._organic_roi_mode = roi is not None
+        st._organic_roi_active = lambda: App._organic_roi_active(st)
         st.n = {"recompute": 0, "show": 0, "after": 0, "idle": 0}
         st.states = []
         st._organic_preview_state = lambda s_, t=None: st.states.append(s_)

@@ -31619,7 +31619,7 @@ class App(tk.Tk):
         # the zoom and the comparison toggles live.
         _bar = tk.Frame(rf, bg=BG); _bar.pack(fill="x", padx=16, pady=(10, 3))
         tk.Label(_bar, text="Scroll to zoom  |  ⌥drag to pan  |  "
-                 "ROI: drag a box, then only that region re-renders",
+                 "ROI on: drag a box, the effect renders inside it only",
                  font=FSM, bg=BG, fg=G).pack(side="left")
         for sym, fn in (("−", lambda: self._organic_zoom_step(-0.25)),
                         ("+", lambda: self._organic_zoom_step(+0.25)),
@@ -31645,8 +31645,6 @@ class App(tk.Tk):
             self._organic_toggle_roi, bg="#0D0D0D", fg=G)
         tk.Label.configure(self.organic_roi_btn._lbl, width=5, pady=2)
         self.organic_roi_btn.pack(side="right", padx=(2, 10))
-        self.organic_roi_btn._lbl.bind("<Double-Button-1>",
-                                       self._organic_roi_clear)
 
         self.organic_canvas = tk.Canvas(rf, bg="#0D0D0D", highlightthickness=0)
         self.organic_canvas.pack(fill="both", expand=True, padx=16)
@@ -32424,7 +32422,7 @@ class App(tk.Tk):
             self._organic_exp_refresh_label()
             return
         crop = None
-        roi = getattr(self, "_organic_roi", None)
+        roi = self._organic_roi_active()
         if (roi and self.organic_processed is not None and mask is not None
                 and mask.shape == raw.shape[:2]
                 and self.organic_lin.shape == raw.shape):
@@ -32807,10 +32805,10 @@ class App(tk.Tk):
             from PIL import Image
             p = self._organic_params()
             seed = self._organic_frame_seed(getattr(self, "_organic_idx", 0))
-            roi = getattr(self, "_organic_roi", None)
+            roi = self._organic_roi_active()
             note = ""
             inner = None
-            if roi and self.organic_processed is not None:
+            if roi:
                 inner, box = self._organic_apply_stack_roi(
                     self.organic_lin, p, roi, seed=seed, progress=_tick)
                 if inner is None:
@@ -32822,17 +32820,25 @@ class App(tk.Tk):
                 y0, x0, y1, x1 = box
                 patch = Image.fromarray(
                     self._organic_linear_to_display(inner), "RGB")
-                base = self.organic_processed.copy()
+                # Outside the box: the last render if there is one,
+                # else the untouched plate -- the effect shows inside
+                # the box only, which is what the box is for.
+                pl = getattr(self, "_organic_proc_lin", None)
+                if (self.organic_processed is None or pl is None
+                        or pl.shape[:2] != self.organic_lin.shape[:2]):
+                    pl = self.organic_lin.copy()
+                    base = Image.fromarray(
+                        self._organic_linear_to_display(pl), "RGB")
+                else:
+                    base = self.organic_processed.copy()
+                    pl = pl.copy()
                 base.paste(patch, (x0, y0))
                 self.organic_processed = base
                 # The float mirrors the paste, so exposure still works
                 # after a region update rather than showing the last
                 # full frame.
-                pl = getattr(self, "_organic_proc_lin", None)
-                if pl is not None and pl.shape[:2] == self.organic_lin.shape[:2]:
-                    pl = pl.copy()
-                    pl[y0:y1, x0:x1] = inner
-                    self._organic_proc_lin = pl
+                pl[y0:y1, x0:x1] = inner
+                self._organic_proc_lin = pl
                 note = f"  ROI {x1 - x0}\u00d7{y1 - y0}"
             else:
                 self._organic_exp_ensure_full()
@@ -32982,30 +32988,27 @@ class App(tk.Tk):
 
     # ── region of interest ──
     def _organic_toggle_roi(self):
-        self._organic_roi_mode = not self._organic_roi_mode
+        """The ROI button: one click turns it on (red) -- drag a box and
+        updates render the effect inside it only; the next click turns
+        it off, drops the box and goes back to the whole frame. The box
+        constrains nothing while the button is off."""
         if self._organic_roi_mode:
-            self.organic_roi_btn.configure(bg="#3A1414", fg="#FF6666")
-            self.organic_canvas.configure(cursor="crosshair")
-            self.log(self.organic_log_txt,
-                     "ROI: drag a box. Click once to clear it.", "hi")
-        else:
-            self.organic_roi_btn.configure(bg="#0D0D0D", fg=G)
-            self.organic_canvas.configure(cursor="arrow")
+            self._organic_roi_clear()
+            return
+        self._organic_roi_mode = True
+        self.organic_roi_btn.configure(bg="#3A1414", fg="#FF6666")
+        self.organic_canvas.configure(cursor="crosshair")
+        self.log(self.organic_log_txt,
+                 "ROI on: drag a box \u2014 updates render the effect inside "
+                 "it only. Click ROI again to go back to the whole "
+                 "frame.", "hi")
         self._organic_redraw()
 
     def _organic_roi_clear(self, _e=None):
-        """Double-click the ROI button: drop the box AND leave the mode.
-
-        A single click only toggles the mode, which leaves the red box
-        sitting there still constraining the next update -- so switching
-        ROI off and expecting the whole frame back gave a frame that was
-        only partly current. The two halves of "I'm done with this
-        region" now happen together.
-
-        Tk sends Button-1 twice before Double-Button-1, so the two
-        single-click toggles cancel out and this lands on whatever state
-        the mode started in; it sets the mode explicitly rather than
-        toggling for that reason."""
+        """ROI off: drop the box AND leave the mode, together -- a box
+        left behind would still constrain the next update, so switching
+        off and expecting the whole frame back gave a frame that was
+        only partly current."""
         self._organic_roi = None
         self._organic_roi_drag = None
         self._organic_roi_mode = False
@@ -33019,8 +33022,20 @@ class App(tk.Tk):
         # at newer settings, so it is genuinely out of date now.
         self._organic_mark_stale()
         self.log(self.organic_log_txt,
-                 "ROI cleared — updates cover the whole frame.", "dim")
+                 "ROI off — updates cover the whole frame.", "dim")
         self._organic_redraw()
+        try:
+            if self.__dict__.get("organic_auto_var") is not None \
+                    and self.organic_auto_var.get():
+                self._organic_auto_schedule()
+        except Exception:
+            pass
+
+    def _organic_roi_active(self):
+        """The box, when the button is on; None otherwise."""
+        if not getattr(self, "_organic_roi_mode", False):
+            return None
+        return getattr(self, "_organic_roi", None) or None
 
     def _organic_roi_status(self):
         roi = getattr(self, "_organic_roi", None)
@@ -33082,6 +33097,14 @@ class App(tk.Tk):
             if e is not None:
                 self._organic_roi_from_drag(e)
             self._organic_roi_drag = None
+            # A new box is a new request: the screen does not show the
+            # effect in it yet, so Update goes red (and auto runs).
+            try:
+                self._organic_mark_stale()
+                if self.organic_auto_var.get():
+                    self._organic_auto_schedule()
+            except Exception:
+                pass
         self._organic_wipe_drag = None
         self._organic_pan_ref = None
 
@@ -33222,7 +33245,7 @@ class App(tk.Tk):
             self.log(self.organic_log_txt, f"Redraw failed: {ex}", "err")
 
     def _organic_draw_roi(self, cv):
-        roi = getattr(self, "_organic_roi", None)
+        roi = self._organic_roi_active()
         if not roi:
             return
         y0, x0, y1, x1 = roi
