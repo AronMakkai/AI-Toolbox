@@ -8548,6 +8548,44 @@ class App(tk.Tk):
 
     HDR_MODES = ("Keep as-is", "SDR \u2192 HDR10 (PQ / BT.2020)")
     HDR_PEAKS = ("1000 nits", "600 nits", "4000 nits")
+    # What the Target peak means against the deliverables people are
+    # actually asked for. Diffuse white here is 100 nits (HDR_SDR_WHITE),
+    # so the peak is also the headroom above it.
+    USC_PEAK_TIP = (
+        "How bright the brightest pixels may go, in\n"
+        "nits. Diffuse white (paper, a white wall)\n"
+        "stays near 100; the peak is headroom for\n"
+        "speculars, lamps, sky and fire.\n"
+        "\n"
+        "In a graded HDR master:\n"
+        "skin ~40\u2013120 nits (well under white)\n"
+        "diffuse white 100\u2013203 (BT.2408: 203)\n"
+        "graphics / titles ~200, never near peak\n"
+        "speculars, sun: up to the target peak\n"
+        "\n"
+        "600 nits \u2014 consumer panels, HLG-style\n"
+        "broadcast. 6\u00d7 headroom, nothing blinding.\n"
+        "\n"
+        "1000 nits \u2014 the common mastering peak.\n"
+        "HDR10, HDR10+ and Dolby Vision are mostly\n"
+        "graded on 1,000-nit monitors; Netflix,\n"
+        "Prime Video and Apple take 1,000-nit\n"
+        "masters. The safe default.\n"
+        "\n"
+        "4000 nits \u2014 Dolby Pulsar-class mastering,\n"
+        "the other peak Prime Video and Dolby Vision\n"
+        "accept. Only when the delivery spec asks\n"
+        "for a 4,000-nit master; a 1,000-nit TV\n"
+        "tone-maps everything above down.\n"
+        "\n"
+        "Metadata (HDR10 / HDR10+): MaxCLL, the\n"
+        "brightest pixel, must not exceed the\n"
+        "mastering peak; MaxFALL, the brightest\n"
+        "frame average, is commonly kept at or\n"
+        "under 400 nits. Dolby Vision carries\n"
+        "per-shot trims from the same 1,000 /\n"
+        "4,000-nit master. The PQ container goes to\n"
+        "10,000 nits; no deliverable asks for that.")
     HDR_ENGINES = ("Built-in (numpy, works anywhere)",
                    "libplacebo BT.2446a (GPU, needs Vulkan)")
     HDR_KNEES = ("0.60  (more expansion)", "0.70", "0.80  (highlights only)")
@@ -29028,7 +29066,7 @@ print("EXR write complete")
             return var
 
         self.usc_hdr_peak_var = _combo_row(c_dr, "Target peak",
-            list(self.HDR_PEAKS))
+            list(self.HDR_PEAKS), tip=self.USC_PEAK_TIP)
         self.usc_hdr_knee_var = _combo_row(c_dr, "Knee",
             list(self.HDR_KNEES))
 
