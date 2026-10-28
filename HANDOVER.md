@@ -122,6 +122,12 @@ prefixes. Use this table before searching.
   3840 / squeeze wide and keeps its aspect; a factor is a factor either
   way. Cache signatures carry `|sq=`.
 
+## Batch: all shots in this folder (Upscale, Detail, Expansion, MOV→EXR)
+- One toolkit, `_batch_*`, inserted before `_anam_row`. `BATCH_MODULES` maps a tab key to the module's running flag, accept, run, log, cancel flag and kind (`seq`/`mov`). `_batch_row(parent, key)` builds the tick box + Shot dropdown + count label; state in `self._batch[key]` (a property over `__dict__["_batch_d"]`, stub-safe).
+- Hooks: each module's accept starts with `if self._batch_wants(key, path): return` (sets the root, scans shots, loads the picked shot through the same accept with `_batch_loading` set); each Run starts with `if self._batch_wants_run(key): return` (confirms, then `_batch_next` loads shot i, calls the module's own Run and polls its running flag every 400 ms; a Run that does not start counts as failed; the module's cancel flag ends the queue). `_e_accept` was split out of `_epick`; `_erun` now keeps `_e_running`.
+- Output while a batch runs: `_adw_versioned_output_dir` / `_adw_peek_next_version_dir` defer to `_batch_output_dir` → one version folder per module per batch with a subfolder per shot (`ADW/UPSCALE_v03/sh010`). The version folder is itself a batch root for the next module. `_adw_propagate_output` and `_batch_reveal` only fire on the last shot; `_slow_model_notice` once per batch.
+- `_batch_confirm` (None → messagebox) is injected by tests. Tests: `TestBatchShots`.
+
 ## Colour handling
 
 - Every studio has an "Input colour" choice: Auto, display-encoded
