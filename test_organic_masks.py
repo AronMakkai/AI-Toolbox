@@ -2560,6 +2560,41 @@ class TestColourspaceToolkit(unittest.TestCase):
         self.assertEqual(App._cs_tagged_key(d), "linear")
 
 
+class TestStudioOutputNames(unittest.TestCase):
+    """Every studio names its frames <Module>.<plate frame number>:
+    Expansion_Studio.01001.exr, Upscale_Studio.00003.exr -- what made
+    it and which plate frame it is, the way Lens Studio already did."""
+
+    def test_the_shared_stem(self):
+        fr = ["p.1001.exr", "p.1002.exr"]
+        self.assertEqual(App._adw_out_stem("Expansion_Studio", fr, 1),
+                         "Expansion_Studio.01002")
+        self.assertEqual(App._adw_out_stem("X", ["a.png", "b.png"], 1), "X.00002")
+        self.assertEqual(App._organic_out_stem(fr, 0), "Lens_Studio.01001")
+
+    def test_every_studio_uses_it(self):
+        import inspect
+        for fn, name in ((App._ups_run, "self.UPS_OUT_NAME"),
+                         (App._det_run, "self.DET_OUT_NAME"),
+                         (App._usc_run, "self.USC_OUT_NAME")):
+            with self.subTest(fn=fn.__name__):
+                body = inspect.getsource(fn)
+                self.assertIn("self._adw_out_stem(", body)
+                self.assertIn(name, body)
+                self.assertNotIn(":05d}{", body)
+        self.assertEqual(App.USC_OUT_NAME, "Expansion_Studio")
+
+    def test_movies_encode_from_a_glob_not_a_counter(self):
+        import inspect
+        for fn in (App._ups_encode_movie, App._det_encode_movie,
+                   App._usc_encode_movie):
+            with self.subTest(fn=fn.__name__):
+                body = inspect.getsource(fn)
+                self.assertIn("self._adw_glob_input(folder)", body)
+                self.assertNotIn('"%05d.png"', body)
+        self.assertEqual(App._adw_glob_input("/o")[:2], ["-pattern_type", "glob"])
+
+
 class TestHashNoise(unittest.TestCase):
     """Grain's field is addressed by absolute pixel position rather than
     drawn from a sequential stream, so any sub-rectangle renders exactly

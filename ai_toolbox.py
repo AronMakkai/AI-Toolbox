@@ -23523,14 +23523,27 @@ def cs_convert(a, src, dst):
     @classmethod
     def _organic_out_stem(cls, frames, i):
         """Name of rendered frame `i`, without extension:
-        Lens_Studio.00012 -- the module's name, then the SOURCE's own
-        frame number, so a render of 1001-1100 is still 1001-1100.
+        Lens_Studio.00012 (see _adw_out_stem)."""
+        return cls._adw_out_stem(cls.LENS_OUT_NAME, frames, i)
 
-        A source named only by its number (Expansion Studio writes
-        00012.exr) used to come out as 00012.exr again, which said
-        nothing about which module made it. When the source frames carry
-        no usable number, or two would land on the same one, the
-        position in the sequence is used instead."""
+    # Every studio names its frames the same way: the module, then the
+    # source's own frame number. Upscale_Studio.01001.exr says what
+    # made it and which plate frame it is; 01001.exr said neither.
+    UPS_OUT_NAME = "Upscale_Studio"
+    DET_OUT_NAME = "Detail_Studio"
+    USC_OUT_NAME = "Expansion_Studio"
+
+    @staticmethod
+    def _adw_out_stem(name, frames, i):
+        """Name of rendered frame `i`, without extension:
+        <name>.00012 -- the module's name, then the SOURCE's own frame
+        number, so a render of 1001-1100 is still 1001-1100.
+
+        A source named only by its number (00012.exr) used to come out
+        as 00012.exr again, which said nothing about which module made
+        it. When the source frames carry no usable number, or two would
+        land on the same one, the position in the sequence is used
+        instead."""
         import re
         nums = []
         for nm in frames:
@@ -23540,7 +23553,16 @@ def cs_convert(a, src, dst):
             n = i + 1
         else:
             n = nums[i]
-        return f"{cls.LENS_OUT_NAME}.{n:05d}"
+        return f"{name}.{n:05d}"
+
+    @staticmethod
+    def _adw_glob_input(folder, ext=".png"):
+        """ffmpeg input arguments for every <ext> frame in folder, in
+        name order -- a glob rather than %05d, so frames named by the
+        module and the plate's own numbers (which need not start at 1)
+        still encode."""
+        return ["-pattern_type", "glob", "-i",
+                os.path.join(folder, "*" + ext)]
 
     def _organic_after_run_sendto(self, out_dir):
         self._adw_propagate_output(out_dir, "organic", self.organic_log_txt)
@@ -33858,9 +33880,9 @@ print("EXR write complete")
                            or folder,
                            os.path.splitext(base)[0] + "_UPSCALE"
                            + ("_HDR10" if hdr else "") + spec["ext"])
-        cmd = ["ffmpeg", "-v", "error", "-y", "-framerate", f"{fps:g}",
-               "-i", os.path.join(folder, "%05d.png"),
-               "-c:v", spec["enc"]] + list(spec["opts"]) + \
+        cmd = ["ffmpeg", "-v", "error", "-y", "-framerate", f"{fps:g}"] \
+            + self._adw_glob_input(folder) \
+            + ["-c:v", spec["enc"]] + list(spec["opts"]) + \
               ["-pix_fmt", spec["pix"]]
         if hdr:
             cmd += self._hdr_tags()
@@ -34073,8 +34095,8 @@ print("EXR write complete")
                 for i, fname in enumerate(_sel):
                     if self._usc_cancel: break
                     src_path = os.path.join(_folder, fname)
-                    dst_path = os.path.join(out,
-                                            f"{i+1:05d}{_fspec['ext']}")
+                    dst_path = os.path.join(out, self._adw_out_stem(
+                        self.USC_OUT_NAME, _sel, i) + _fspec["ext"])
 
                     self.after(0, lambda i=i,f=fname: self.log(
                         self.usc_log, f"Frame {i+1}/{total}: {f}", "dim"))
@@ -37225,8 +37247,8 @@ print("EXR write complete")
         out = os.path.join(os.path.dirname(str(self._ups_src_movie)) or folder,
                            os.path.splitext(base)[0] + "_UPSCALE"
                            + ("_HDR10" if hdr else "") + spec["ext"])
-        cmd = (["ffmpeg", "-v", "error", "-y", "-framerate", f"{fps:g}",
-                "-i", os.path.join(folder, "%05d.png"), "-c:v", spec["enc"]]
+        cmd = (["ffmpeg", "-v", "error", "-y", "-framerate", f"{fps:g}"]
+               + self._adw_glob_input(folder) + ["-c:v", spec["enc"]]
                + list(spec["opts"]) + ["-pix_fmt", spec["pix"]]
                # PQ pixels with SDR tags are misread by everything after
                + (self._hdr_tags() if hdr else []) + [out])
@@ -37345,7 +37367,8 @@ print("EXR write complete")
                     if self._ups_cancel:
                         break
                     src = os.path.join(folder, fname)
-                    dst = os.path.join(out, f"{i + 1:05d}{spec['ext']}")
+                    dst = os.path.join(out, self._adw_out_stem(
+                        self.UPS_OUT_NAME, sel, i) + spec["ext"])
                     try:
                         orig, gain = self._ups_read_source(src)
                         tw, th = self._ups_model_size(orig.width, orig.height,
@@ -39040,8 +39063,8 @@ print("EXR write complete")
         out = os.path.join(os.path.dirname(str(self._det_src_movie)) or folder,
                            os.path.splitext(base)[0] + "_DETAIL"
                            + ("_HDR10" if hdr else "") + spec["ext"])
-        cmd = (["ffmpeg", "-v", "error", "-y", "-framerate", f"{fps:g}",
-                "-i", os.path.join(folder, "%05d.png"), "-c:v", spec["enc"]]
+        cmd = (["ffmpeg", "-v", "error", "-y", "-framerate", f"{fps:g}"]
+               + self._adw_glob_input(folder) + ["-c:v", spec["enc"]]
                + list(spec["opts"]) + ["-pix_fmt", spec["pix"]]
                + (self._hdr_tags() if hdr else []) + [out])
         r = subprocess.run(cmd, capture_output=True, text=True)
@@ -39156,7 +39179,8 @@ print("EXR write complete")
                     if self._det_cancel:
                         break
                     src = os.path.join(folder, fname)
-                    dst = os.path.join(out, f"{i + 1:05d}{spec['ext']}")
+                    dst = os.path.join(out, self._adw_out_stem(
+                        self.DET_OUT_NAME, sel, i) + spec["ext"])
                     try:
                         orig, gain = self._det_read(src)
                         base = np.asarray(orig, np.float32) / 255.0
