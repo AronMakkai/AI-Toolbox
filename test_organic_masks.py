@@ -2315,6 +2315,35 @@ class TestRoiButtonIsAToggle(unittest.TestCase):
         self.assertIsNone(self.app._organic_roi)
         self.assertEqual(self.app.organic_roi_btn.cfg.get("fg"), G)
 
+    def test_once_a_box_is_drawn_the_mouse_is_the_wipes_again(self):
+        """Drawing a second box over the first was all the mouse could
+        do, so the wipe could not be dragged with ROI on."""
+        class E:
+            def __init__(s, x, y): s.x, s.y = x, y
+        app = self.app
+        from PIL import Image
+        app.organic_img_base = Image.new("RGB", (700, 400))
+        app._organic_canvas_to_img = lambda x, y: (x, y)
+        app._organic_zoom = 1.0; app._organic_scale = 1.0
+        app._organic_pan_x = app._organic_pan_y = 0
+        app._organic_toggle_roi()
+        self.assertTrue(app._organic_roi_armed)
+        app._organic_canvas_click(E(100, 100))
+        app._organic_canvas_drag(E(200, 180))
+        app._organic_canvas_release(E(200, 180))
+        self.assertEqual(app._organic_roi, (100, 100, 180, 200))
+        self.assertFalse(app._organic_roi_armed)      # mouse handed back
+        self.assertTrue(app._organic_roi_mode)        # box still counts
+        # a wipe drag now moves the wipe, not the box
+        app.organic_mode = "wipe"; app._organic_mask_key = None
+        app._organic_wipe_drag = None; app._organic_wipe_t = 0.5
+        app._organic_canvas_click(E(350, 50))
+        self.assertEqual(app._organic_roi, (100, 100, 180, 200))
+        self.assertAlmostEqual(app._organic_wipe_t, 0.5)
+        # the button turns it off and drops the box
+        app._organic_toggle_roi()
+        self.assertIsNone(app._organic_roi)
+
     def test_the_box_only_counts_while_the_button_is_on(self):
         self.app._organic_roi = (10, 20, 90, 140)
         self.assertIsNone(self.app._organic_roi_active())
