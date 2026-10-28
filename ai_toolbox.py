@@ -204,6 +204,7 @@ except Exception:
 """
 
 
+APP_NAME = "AI-Toolbox"
 APP_VERSION = "v01"
 from tkinter import filedialog, messagebox, ttk
 import subprocess, threading, os, shutil, time, tempfile, sys
@@ -2554,7 +2555,11 @@ class App(tk.Tk):
                 return True
         except Exception:
             pass
-        win = tk.Toplevel(self)
+        try:
+            win = tk.Toplevel(self)
+        except Exception:
+            # no window system (tests, a headless run): nothing to show
+            return False
         self._slow_notice_win = win
         win.title("Blip Blop")
         win.configure(bg=BG)
@@ -4696,47 +4701,82 @@ class App(tk.Tk):
 
         # ── SETUP & INSTALL ───────────────────────────────────────────────
         _w("Setup & Install\n", "h1")
-        _w("Manages Python virtual environments and model weights for modules "
-           "that require them. Each module's install is independent — run "
-           "only the installs for modules you plan to use.\n\n", "body")
+        _w("Installs the pieces the modules need, each once, into "
+           "~/RifeApp. Install only what you will use; the status dots "
+           "say what is there (green), what to Test (yellow) and what is "
+           "missing (red).\n\n", "body")
 
         _end = _sec("Install overview", expanded=True)
+        _w("ffmpeg\n", "param")
+        _w("Every module decodes and encodes through it. A build without "
+           "the zscale filter is fine: MOV \u2194 EXR linearises in the app "
+           "when zscale is missing or refuses a clip.\n\n", "body_indent")
+        _w("Real-ESRGAN\n", "param")
+        _w("The free local upscaler: Upscale Studio, Detail Studio and Fix "
+           "Missing Frames use it (and ADW-Blur's upscale option on "
+           "AI-Toolbox). Without it those fall back to Lanczos + sharpen "
+           "and say so in the log.\n\n", "body_indent")
         _w("RIFE Install\n", "param")
-        _w("Required for ADW-Blur, Fix Missing Frames (its RIFE-first "
-           "single-frame repair), ADW-Curve Look, ADW-Area Look. "
-           "Creates a Python venv at ~/RifeApp/venv/ and downloads the "
-           "practical-RIFE weights. Run once; no re-install needed unless "
-           "the venv is deleted or the app is moved.\n\n", "body_indent")
-        _w("ESRGAN Install\n", "param")
-        _w("Required for the ESRGAN upscale algorithm in the Upscale module "
-           "and the ADW-Blur Upscale Algorithm option. Separate venv.\n\n", "body_indent")
-        _w("SAM 3 Install\n", "param")
-        _w("Required for the Segment module. Downloads SAM 3 weights from "
-           "HuggingFace — requires a valid access token saved in this tab "
-           "before install. Large download (~5 GB). CUDA GPU required.\n\n", "body_indent")
-        _w("⚠ HuggingFace token: ", "warn")
-        _w("create a token at huggingface.co/settings/tokens with at least "
-           "'Read' permission on gated models. Paste it in the field on "
-           "this tab and click Save before running the SAM 3 install.\n", "body_indent")
+        _w("Frame interpolation. Fix Missing Frames rebuilds a single "
+           "missing frame from its neighbours with it before spending a "
+           "cloud call; on AI-Toolbox it also drives ADW-Blur, CurveLock "
+           "and AreaLock. Creates ~/RifeApp/venv and the practical-RIFE "
+           "weights.\n\n", "body_indent")
+        _w("SAM 3\n", "param")
+        _w("Segmentation. Downloads the SAM 3 weights from Hugging Face "
+           "(gated: request access, save a Read token here first). Runs "
+           "on Apple-silicon GPU (MPS) or CUDA; the Setup row says whether "
+           "the installed transformers has the video tracker that Frame "
+           "Linking needs.\n\n", "body_indent")
+        _w("fal.ai key\n", "param")
+        _w("The cloud models: SeedVR2 and FlashVSR (Upscale and Detail "
+           "Studio), Topaz and Wan inpaint (Expansion Studio), VACE (Fix "
+           "Missing Frames, ADW-Interpolate), depth. Paste the key once; "
+           "every paid frame is cached, so it is only ever paid for once "
+           "per setting. Clear upscale cache in the studios empties it.\n", "body_indent")
+        _end()
+
+        _end = _sec("Installing the app itself")
+        _w("macOS DMG\n", "param")
+        _w("Drag the app to Applications. It is not signed with a paid "
+           "Apple ID, so macOS blocks the first launch: double-click "
+           "Fix Permissions.command in the installer window, or in "
+           "Terminal:  xattr -cr /Applications/<App>.app  then open it. "
+           "READ ME FIRST.txt in the DMG has the full steps.\n\n", "body_indent")
+        _w("Python\n", "param")
+        _w("The app runs on a Python that has torch, opencv-python, numpy "
+           "and Pillow (Miniconda first, then Homebrew). Missing: install "
+           "Miniconda, then  conda create -n studio python=3.13 && conda "
+           "activate studio && pip install torch opencv-python numpy "
+           "pillow OpenEXR.\n\n", "body_indent")
+        _w("Updating\n", "param")
+        _w("Replace the app (or git pull in the repo) and relaunch. The "
+           "installs in ~/RifeApp, the fal key, the caches and saved "
+           "projects are kept.\n", "body_indent")
         _end()
 
         _end = _sec("Troubleshooting installs")
         _w("Install says 'venv not found' on run\n", "param")
-        _w("The install was not completed or the ~/RifeApp/ directory was "
-           "moved or deleted. Re-run the install from Setup.\n\n", "body_indent")
+        _w("The install was not completed or ~/RifeApp was moved or "
+           "deleted. Re-run the install from Setup.\n\n", "body_indent")
         _w("RIFE inference fails silently\n", "param")
-        _w("Check that the Python venv has torch and that your CUDA / MPS "
-           "device is recognised. The app logs the inference call in the "
-           "activity log — look for a non-zero return code.\n\n", "body_indent")
-        _w("SAM 3 crashes on launch\n", "param")
-        _w("Usually a CUDA device issue or insufficient VRAM. SAM 3 requires "
-           "at least 8 GB GPU VRAM. Confirm your device shows in the "
-           "Setup tab's device readout.\n\n", "body_indent")
-        _w("EXR output from a full run is PNG instead\n", "param")
-        _w("This can happen if ffmpeg's EXR encoder is unavailable. The app "
-           "logs a fallback message in the activity log when this occurs. "
-           "Update ffmpeg to a build with EXR support (libav with "
-           "gbrpf32le pixel format).\n", "body_indent")
+        _w("Check that the venv has torch and that your MPS / CUDA device "
+           "is recognised. The activity log shows the inference call "
+           "\u2014 look for a non-zero return code.\n\n", "body_indent")
+        _w("SAM 3 will not load\n", "param")
+        _w("Usually VRAM or a missing token: the first preview loads a "
+           "large model into GPU memory, and the weights only download "
+           "once access on Hugging Face is approved. Restart the server "
+           "from the SAM 3 tab after an update.\n\n", "body_indent")
+        _w("A fal model times out or refuses the factor\n", "param")
+        _w("A job that keeps reporting is left to run; only real silence "
+           "times out. A refused upscale factor is retried lower and the "
+           "rest made up with Lanczos \u2014 the log says what was rendered. "
+           "The standing panel under Run shows the request id for fal "
+           "support.\n\n", "body_indent")
+        _w("MOV \u2192 EXR says 'No such filter: zscale'\n", "param")
+        _w("Older builds only. Current builds of this app linearise in the "
+           "app when zscale is missing; update and run again.\n", "body_indent")
         _end()
 
         _man_t.configure(state="disabled")
@@ -39017,333 +39057,335 @@ print("EXR write complete")
         self._demo_show()
 
     def _demo_steps(self):
-        """Define all tour steps. Each step is a dict with:
-           tab, widget (optional), title, body, arrow ('n','s','e','w')"""
-        return [
+        """The guided tour, one step per thing a new user needs to know.
+        Each step is a dict: tab, widget (optional, see
+        _demo_get_widget), title, body, arrow ('n','s','e','w').
+
+        Written once for both builds: a step whose tab is not in this
+        build (the ADW modules on Studio Toolbox) is dropped, and the
+        tab-bar step lists whatever tabs are actually there."""
+        name = globals().get("APP_NAME", "AI-Toolbox")
+        tabs = list(self.tab_btns.keys()) if hasattr(self, "tab_btns") else []
+        labels = {k: b.cget("text") for k, b in getattr(self, "tab_btns", {}).items()}
+        bar = "\n".join(f"• {labels[k]}" for k in tabs if k in labels)
+        steps = [
             dict(tab="setup", widget=None,
-                 title="Welcome to AI-Toolbox",
+                 title=f"Welcome to {name}",
                  body=(
-                     "This guided tour walks through every feature.\n\n"
-                     "Use  Next →  to advance,  ← Prev  to go back,\n"
-                     "or  Skip  to exit at any time.\n\n"
-                     "No footage is required — the tour explains the UI.\n\n"
+                     f"{name} is a set of VFX tools for AI-generated and\n"
+                     "camera footage: convert it, upscale it, add detail,\n"
+                     "expand it to HDR, add lens character, paint it, fix\n"
+                     "broken frames and cut mattes with SAM 3.\n\n"
+                     "This tour walks through every tab.\n"
+                     "Next → to advance, ← Prev to go back, Skip to leave.\n"
+                     "No footage is needed — the tour explains the UI.\n\n"
                      "Built by Aron Makkai\n"
                      "aron.makkai.vfx@gmail.com"
                  ), arrow=None),
 
             dict(tab="setup", widget="tab_btns",
-                 title="Four Modules",
+                 title="The tabs",
                  body=(
-                     "The tab bar gives you four independent tools:\n\n"
-                     "• Setup & Install — install and test dependencies\n"
-                     "• MOV ↔ EXR — convert video to EXR and back\n"
-                     "• RIFE — Smooth — AI temporal interpolation\n"
-                     "• SAM 3 — Segment — AI masking and rotoscoping"
+                     "Every tool is a tab. Left to right:\n\n" + bar + "\n\n"
+                     "Each module writes its result next to your footage\n"
+                     "and hands it to the other modules, so you can move\n"
+                     "from one tab to the next without picking the folder\n"
+                     "again. Save Project / Load Project (top right) keep\n"
+                     "every tab's folder and settings together."
                  ), arrow="n"),
 
             dict(tab="setup", widget="setup_components",
-                 title="Component Setup",
+                 title="Setup & Install — the pieces",
                  body=(
-                     "Each component shows its current status:\n\n"
-                     "● Green  — installed and working\n"
-                     "● Yellow — detected, click Test to verify\n"
-                     "● Red    — missing, click Install to set up\n\n"
-                     "ffmpeg is required for all modules.\n"
-                     "RIFE and SAM 3 are independent of each other."
+                     "Each component shows its status:\n"
+                     "● Green — installed and working\n"
+                     "● Yellow — found, press Test to check\n"
+                     "● Red — missing, press Install\n\n"
+                     "ffmpeg — every module needs it.\n"
+                     "Real-ESRGAN — the free local upscaler (Upscale\n"
+                     "  Studio, Detail Studio, Fix Missing Frames).\n"
+                     "RIFE — frame interpolation for repairs.\n"
+                     "SAM 3 — segmentation; Apple-silicon GPU or CUDA.\n\n"
+                     "Installs land in ~/RifeApp and are done once."
+                 ), arrow="w"),
+
+            dict(tab="setup", widget="fal_card",
+                 title="fal.ai key — the cloud models",
+                 body=(
+                     "The slow, heavy models run on fal.ai and cost money\n"
+                     "per clip: SeedVR2 and FlashVSR (upscaling and\n"
+                     "detail), Topaz and Wan (HDR expansion), VACE (frame\n"
+                     "repair). Paste a key here once.\n\n"
+                     "Everything local works without a key. Every paid\n"
+                     "frame is cached, so a frame is only ever paid for\n"
+                     "once per setting, and a standing panel under Run\n"
+                     "shows the job's queue, ETA and health while it is\n"
+                     "out."
                  ), arrow="w"),
 
             dict(tab="setup", widget="hf_card",
-                 title="HuggingFace Token",
+                 title="Hugging Face token — SAM 3",
                  body=(
-                     "SAM 3 is hosted on HuggingFace and requires\n"
-                     "a free account and one-time access request.\n\n"
-                     "1. Click  Request SAM3 Access  to open the model page\n"
-                     "2. Click  Open HF →  to get your token\n"
-                     "3. Paste the token here and click Save\n\n"
-                     "NOTE: SAM 3 IS A GATED MODEL.\n"
-                     "ACCESS APPROVAL CAN TAKE 1-2 DAYS.\n\n"
-                     "\"Patience is bitter, but its fruit is sweet.\"\n"
-                     "— Jean-Jacques Rousseau"
+                     "SAM 3 is a gated model on Hugging Face: a free\n"
+                     "account and a one-time access request.\n\n"
+                     "1. Request SAM 3 Access opens the model page\n"
+                     "2. Open HF → gets your token\n"
+                     "3. Paste it here and Save, then Install SAM 3\n\n"
+                     "Approval can take a day or two."
                  ), arrow="w"),
-            dict(tab="exr", widget=None,
-                 title="MOV ↔ EXR — Two-Way Conversion",
-                 body=(
-                     "This tab converts between camera video and\n"
-                     "OpenEXR image sequences — in both directions.\n\n"
-                     "Click  MOV → EXR  or  EXR → MOV  at the top\n"
-                     "to toggle between the two modes."
-                 ), arrow=None),
 
             dict(tab="exr", widget="exr_toggle",
-                 title="Mode Toggle",
+                 title="MOV ↔ EXR — four jobs",
                  body=(
-                     "The toggle switches the entire left panel:\n\n"
-                     "MOV → EXR:  pick a video file, choose colour\n"
-                     "space and bit depth, then Convert to EXR.\n\n"
-                     "EXR → MOV:  pick an EXR sequence folder,\n"
-                     "choose codec (ProRes/H.264/H.265), frame rate,\n"
-                     "output colour space, then Convert to MOV."
+                     "MOV → EXR — a movie to an EXR sequence, scene-\n"
+                     "  linear, ACES2065-1 or display-encoded. The whole\n"
+                     "  clip is on the timeline the moment it loads; click\n"
+                     "  any frame to preview it as it will be written.\n"
+                     "EXR → MOV — a sequence back to ProRes / H.264 /\n"
+                     "  H.265, with exposure and gamma for the view.\n"
+                     "Video → Video — re-encode or retarget a movie.\n"
+                     "And..CUT! — find the cuts in a reel and split it\n"
+                     "  into shots (movies or EXR sub-folders)."
                  ), arrow="s"),
 
             dict(tab="exr", widget="exr_cm",
-                 title="Colour Management",
+                 title="Colour management",
                  body=(
-                     "Colour conversion happens inside ffmpeg:\n\n"
-                     "Input space (MOV→EXR): camera footage is usually\n"
-                     "Rec.709. Choosing this converts gamma-encoded\n"
-                     "pixels to linear light for compositing.\n\n"
-                     "Output space (EXR→MOV): Linear → Rec.709 bakes\n"
-                     "the correct gamma into the deliverable."
+                     "Input space says what the movie is (Rec.709, sRGB,\n"
+                     "or passthrough for AI footage); Output says what the\n"
+                     "EXR becomes. Linearising works whether or not your\n"
+                     "ffmpeg has the zscale filter — the app undoes the\n"
+                     "curve itself when it does not.\n\n"
+                     "The preview shows the values the file will hold,\n"
+                     "with a histogram, a frequency graph and a clipping\n"
+                     "view, so you see over- and under-range before you\n"
+                     "commit."
                  ), arrow="w"),
 
-            dict(tab="exr", widget="exr_hist",
-                 title="Input Histogram",
+            dict(tab="exr", widget="cut_btn",
+                 title="And..CUT!",
                  body=(
-                     "When a file is selected, AI-Toolbox samples\n"
-                     "up to 8 frames and builds an averaged RGB histogram.\n\n"
-                     "Red, Green, Blue channels are shown as separate\n"
-                     "coloured lines with filled layers underneath.\n\n"
-                     "Useful for checking exposure and clipping before\n"
-                     "committing to a colour space conversion."
+                     "Load a movie or sequence and press Analyse once:\n"
+                     "every frame is scored for change. Sensitivity then\n"
+                     "re-thresholds instantly; the timeline shows the\n"
+                     "shots, blue at the first frame of each.\n\n"
+                     "Merge with next / Split here fix what the detector\n"
+                     "got wrong; ← → step a frame, Shift+← → twenty.\n"
+                     "Cut writes name_shot1, name_shot2… frame-accurate\n"
+                     "(stream copy for intra codecs, ProRes for long-GOP)."
                  ), arrow="w"),
 
-            dict(tab="rife", widget=None,
-                 title="RIFE — Temporal Smoothing",
+            dict(tab="upstudio", widget="ups_tiles",
+                 title="Upscale Studio",
                  body=(
-                     "RIFE (Real-time Intermediate Flow Estimation)\n"
-                     "inserts AI-generated frames between existing ones.\n\n"
-                     "Pick an EXR sequence folder, choose smoothing\n"
-                     "level (2× / 4× / 8×) and scale, then run.\n\n"
-                     "Output goes into a  RIFE/  folder next\n"
-                     "your input sequence folder.\n\n"
-                     "Auto Retime uses OpenCV DIS optical flow (already\n"
-                     "installed) to retime RIFE/ back to original\n"
-                     "length. No extra installation required."
-                 ), arrow=None),
+                     "Pick one or more upscalers (tiles turn amber):\n"
+                     "ESRGAN local and free; SeedVR2 and FlashVSR on fal.\n"
+                     "Preview runs each on the frame on screen, the tile\n"
+                     "filling as its progress bar; a green box means a\n"
+                     "result is ready — click it to put it on screen.\n\n"
+                     "Output Res: HD / UHD / 4K DCI, or ×2 / ×4.\n"
+                     "Run renders the model you are viewing; Multi model\n"
+                     "output writes every ticked model as its own EXR\n"
+                     "layer to compare on the whole shot."
+                 ), arrow="w"),
 
-            dict(tab="rife", widget="rife_timeline",
-                 title="Frame Timeline",
+            dict(tab="upstudio", widget="ups_freq",
+                 title="Compare: wipe, diff, detail, frequency",
                  body=(
-                     "The timeline shows every frame as a small box.\n\n"
-                     "Dark red = available, Bright red = selected.\n\n"
-                     "Click any box to jump to that frame.\n"
-                     "Scroll horizontally with the mouse wheel on\n"
-                     "long sequences. The selection auto-scrolls\n"
-                     "to stay in view."
-                 ), arrow="n"),
+                     "Drag the line to wipe input against result; scroll\n"
+                     "to zoom, ⌥-drag to pan, 1:1 for real pixels.\n"
+                     "Diff shows what changed; Detail on black shows only\n"
+                     "the fine detail.\n\n"
+                     "The frequency graph is the honest measure: how much\n"
+                     "fine detail each upscaler put ABOVE what the input\n"
+                     "could hold (the dashed line). The red number is the\n"
+                     "gain of the model on screen in dB."
+                 ), arrow="w"),
+
+            dict(tab="upstudio", widget="ups_input",
+                 title="Input colour and Anamorphic",
+                 body=(
+                     "Input colour: Auto reads the folder's tag, the file\n"
+                     "type and the pixels; or say sRGB / Linear / ACES /\n"
+                     "HDR PQ. Linear and HDR sources are encoded for the\n"
+                     "upscaler and decoded back, highlights kept.\n\n"
+                     "Anamorphic: the frames are desqueezed before any\n"
+                     "model sees them and squeezed back on write, with\n"
+                     "the pixel aspect in the EXR. An EXR that says its\n"
+                     "own aspect ticks the box itself."
+                 ), arrow="w"),
+
+            dict(tab="detail", widget="det_tiles",
+                 title="Detail Studio",
+                 body=(
+                     "Texture at the input resolution. Each frame is\n"
+                     "downscaled (½ or ¼), upscaled back by the same\n"
+                     "factor, and the invented fine detail laid over the\n"
+                     "original — pores, weave, foliage a sharpen cannot\n"
+                     "make. Same tiles, compare and graph as Upscale\n"
+                     "Studio; same size in, same size out.\n\n"
+                     "Strength blends it in; Protect keeps the plate's own\n"
+                     "fine detail where it already has some; Detail only\n"
+                     "keeps the original's colour and grade exactly. One\n"
+                     "Preview, then the sliders re-blend instantly."
+                 ), arrow="w"),
+
+            dict(tab="upscale", widget="usc_peak",
+                 title="Expansion Studio — SDR to HDR",
+                 body=(
+                     "Expands SDR into HDR at the plate's resolution.\n"
+                     "Target peak (600 / 1000 / 4000 nits — the ⓘ says\n"
+                     "what each deliverable wants) and Knee set the\n"
+                     "headroom; mid-tones below the knee pass through.\n\n"
+                     "Three models as tiles: Tone map (instant, local),\n"
+                     "Topaz and Wan inpaint (fal). Wan repaints blown\n"
+                     "highlights and crushed shadows with invented\n"
+                     "detail — Show blown / crushed mask toggles what it\n"
+                     "will touch before you spend a call.\n\n"
+                     "Writes EXR (ACES2065-1 or linear) or an HDR10 movie,\n"
+                     "with BlowMask / CrunchMask channels if you like."
+                 ), arrow="w"),
+
+            dict(tab="organic", widget="organic_canvas",
+                 title="Lens Studio",
+                 body=(
+                     "Lens and sensor character in linear float:\n"
+                     "chromatic aberration, bloom, vignette, grain,\n"
+                     "softness — the things a render or an AI clip is\n"
+                     "missing. Input colour as everywhere; an ROI limits\n"
+                     "the effect; Preview, Wipe and Diff compare.\n\n"
+                     "Writes Lens_Studio.NNNNN.exr, keeping the source's\n"
+                     "frame numbers."
+                 ), arrow="w"),
+
+            dict(tab="smudge", widget="sm_canvas",
+                 title="Paint Studio",
+                 body=(
+                     "Hand paint and smudge, frame by frame: brushes,\n"
+                     "clone, masks, and Save Frame writes just that frame\n"
+                     "into a versioned folder. Not procedural, so every\n"
+                     "render is a fresh version — nothing is clobbered.\n\n"
+                     "Play with the wipe to check a fix against the\n"
+                     "original in motion."
+                 ), arrow="w"),
+
+            dict(tab="fixframes", widget="ff_scan",
+                 title="Fix Missing Frames",
+                 body=(
+                     "Scan a sequence for black, missing or duplicated\n"
+                     "frames and for temporal faults. Each fault is\n"
+                     "repaired from its real neighbours — RIFE first,\n"
+                     "free and local; VACE on fal only when RIFE cannot\n"
+                     "— and written as FF_ beside the source.\n\n"
+                     "The standing fal panel shows the repair's progress\n"
+                     "and health while it is out."
+                 ), arrow="w"),
+
+            dict(tab="curve", widget="curve_canvas",
+                 title="ADW-CurveLock",
+                 body=(
+                     "Edge consistency across a shot: Analyse motion,\n"
+                     "then lock a curve to the image so a line that\n"
+                     "wanders frame to frame stays put. Wipe against\n"
+                     "the original to judge it."
+                 ), arrow="w"),
+
+            dict(tab="area", widget="area_canvas",
+                 title="ADW-AreaLock",
+                 body=(
+                     "Frequency stabilisation of a region: the texture\n"
+                     "inside the area is held steady over the shot while\n"
+                     "the motion is kept. Place the area, Analyse motion,\n"
+                     "Preview, Wipe."
+                 ), arrow="w"),
 
             dict(tab="rife", widget="rife_wipe_diff",
-                 title="Wipe & Diff Comparison",
+                 title="ADW-Blur",
                  body=(
-                     "After running Preview, two comparison modes:\n\n"
-                     "⬛ Wipe — drag the line to compare input vs Riffled.\n"
-                     "RIGHT-CLICK WIPE to choose split direction:\n"
-                     "Vertical / Horizontal / Diagonal.\n\n"
-                     "△ Diff — amplified absolute difference matte.\n"
-                     "Black = no change, bright = motion or difference.\n"
-                     "RIGHT-CLICK DIFF to set amplification 1×–10×."
+                     "Re-time and motion blur with RIFE: smoothing 2× /\n"
+                     "4× / 8×, Auto Retime back to length, and a motion\n"
+                     "mask that protects fast areas (green = blended, red\n"
+                     "= protected). Presets keep a whole setup.\n\n"
+                     "Wipe and Diff compare input against the result;\n"
+                     "right-click Wipe for the split direction."
                  ), arrow="n"),
 
-            dict(tab="rife", widget="rife_canvas",
-                 title="Preview Canvas",
+            dict(tab="interp", widget="ip_canvas",
+                 title="ADW-Interpolate",
                  body=(
-                     "The preview canvas supports full zoom and pan:\n\n"
-                     "• Scroll wheel — zoom in / out\n"
-                     "• ⌥ drag (Option + drag) — pan\n"
-                     "• ⊙ button — reset to fit\n"
-                     "• −  +  buttons — zoom steps\n\n"
-                     "In Wipe mode, drag the split line left/right.\n"
-                     "In Diff mode, the canvas is read-only."
+                     "Rebuilds a span of frames with VACE on fal from the\n"
+                     "frames either side, for gaps RIFE cannot bridge.\n"
+                     "Mark the segment, Generate, then Wipe source\n"
+                     "against result before Export splices it in."
                  ), arrow="w"),
 
-            dict(tab="sam", widget=None,
-                 title="SAM 3 — Segment Anything",
-                 body=(
-                     "SAM 3 is Meta's open-vocabulary segmentation model.\n"
-                     "It generates a mask for any subject you describe\n"
-                     "or click on, then propagates it across the sequence.\n\n"
-                     "The output is a folder of PNG masks and\n"
-                     "pre-composited images ready for compositing."
-                 ), arrow=None),
-
             dict(tab="sam", widget="sam_server",
-                 title="SAM 3 Server",
+                 title="SAM 3 — Segment",
                  body=(
-                     "SAM 3 loads a 3.5 GB model into GPU memory.\n"
-                     "Rather than reloading it every preview, a\n"
-                     "persistent server stays running in the background.\n\n"
-                     "● Green = Running — instant previews\n"
-                     "● Grey  = Stopped — first preview will load the model\n\n"
-                     "Restart reloads after code updates.\n"
-                     "Kill frees GPU memory when you're done."
+                     "Meta's Segment Anything 3: a matte for anything you\n"
+                     "click on or describe, tracked through the sequence.\n\n"
+                     "The model stays loaded in a background server:\n"
+                     "● Green = running, previews are instant\n"
+                     "● Grey = stopped, the first preview loads it\n"
+                     "Restart after an update; Kill frees the GPU."
                  ), arrow="n"),
 
             dict(tab="sam", widget="sam_prompts",
-                 title="Prompts — Points & Text",
+                 title="Prompts and objects",
                  body=(
-                     "Two ways to tell SAM 3 what to segment:\n\n"
-                     "+ Include  — click on the subject (green dot)\n"
-                     "− Exclude  — click to remove regions (red dot)\n"
-                     "□ Box      — drag a bounding box around subject\n\n"
-                     "Text prompt  — type a noun like  'person'  or\n"
-                     "'car'  to guide the language-vision model.\n\n"
-                     "Points and text work together — combine them\n"
-                     "for the most accurate mask."
+                     "+ Include — click the subject (green dot)\n"
+                     "− Exclude — click what to leave out (red dot)\n"
+                     "□ Box — drag a box round it\n"
+                     "Text — a noun: 'person', 'car'\n\n"
+                     "Each object is its own tab with its own prompts\n"
+                     "and settings, and its own channel in the EXR.\n"
+                     "Preview mask on the frame you are on, then Wipe\n"
+                     "original against matte."
                  ), arrow="w"),
 
             dict(tab="sam", widget="sam_canvas",
-                 title="Canvas — Zoom, Pan, Wipe",
+                 title="Tracking, colour, output",
                  body=(
-                     "Same zoom/pan controls as RIFE:\n"
-                     "scroll to zoom, ⌥ drag to pan.\n\n"
-                     "After Preview, click ⬛ Wipe to compare\n"
-                     "original vs green-screen matte side by side.\n"
-                     "Right-click Wipe to set split direction.\n\n"
-                     "The canvas is also where you place points —\n"
-                     "click anywhere on the subject to add a prompt."
+                     "Frame Linking runs SAM 3's video tracker: prompted\n"
+                     "once on the frame you are on, tracked forward and\n"
+                     "back through the whole sequence with memory — not\n"
+                     "re-segmented frame by frame.\n\n"
+                     "Input colour decides how EXRs are read for the\n"
+                     "viewer and for SAM (Auto / sRGB / Linear / ACES /\n"
+                     "PQ). Mask Size, Edge Contrast, Edge Softness and\n"
+                     "Temporal shape the alpha; Choker and the Luma\n"
+                     "corridor refine edges; AI-Removal fills the matte\n"
+                     "with a colour and can write a ProRes 4444 MOV."
                  ), arrow="w"),
-
-            dict(tab="sam", widget="setup_components",
-                 title="SAM 3 — Mask Parameters",
-                 body=(
-                     "These four sliders refine SAM 3's raw output\n"
-                     "before temporal processing. All stored per object.\n\n"
-                     "Mask Size — confidence threshold.\n"
-                     "  ← Lower grows mask into uncertain areas.\n"
-                     "  Higher → keeps only high-confidence pixels.\n\n"
-                     "Edge Contrast — sigmoid sharpening on the alpha\n"
-                     "  falloff. Preserves edge position; sharpens\n"
-                     "  the transition. 2–4× for crisp keys.\n\n"
-                     "Edge Softness — guided filter radius. Snaps\n"
-                     "  soft transitions to source colour boundaries.\n"
-                     "  8–16 px recommended.\n\n"
-                     "Temporal Blend — blends mask with prev frame\n"
-                     "  via optical flow. Suppresses flicker.\n"
-                     "  Set to 0 if mask lags behind fast motion."
-                 ), arrow="w"),
-
-            dict(tab="sam", widget="setup_components",
-                 title="SAM 3 — Post-Processing",
-                 body=(
-                     "Applied after SAM runs, before EXR export.\n"
-                     "Each object's settings are independent.\n\n"
-                     "── Choker ──────────────────────────────\n"
-                     "Morphological erode / dilate.\n"
-                     "Negative — shrinks mask inward (erode).\n"
-                     "  Removes edge fringing and colour spill.\n"
-                     "  Try −2 to −6 to tighten a loose edge.\n"
-                     "Positive — expands mask outward (dilate).\n"
-                     "  Fills holes and thin missed areas.\n\n"
-                     "── Luma Corridor Keyer ─────────────────\n"
-                     "Uses source luminance to refine mask edges —\n"
-                     "similar to a colour difference key in Nuke.\n\n"
-                     "Luma Lo / Hi — the luminance corridor. Pixels\n"
-                     "  inside this range are correction candidates.\n"
-                     "Luma Strength — how strongly the corridor\n"
-                     "  overrides the raw SAM alpha at edge zones.\n"
-                     "  0% = SAM only.  100% = corridor drives.\n\n"
-                     "Use it to recover hair, fur, or transparent\n"
-                     "areas SAM underestimates."
-                 ), arrow="w"),
-
-            dict(tab="sam", widget="setup_components",
-                 title="AI-Removal Mode",
-                 body=(
-                     "Tick AI-Removal to multiply the masked area\n"
-                     "by the chosen colour.\n\n"
-                     "Colour swatch: Green / Red / Blue / Teal\n"
-                     "/ Purple / Yellow.\n\n"
-                     "Preview wipe updates immediately.\n\n"
-                     "Tick  Out .MOV  to encode as ProRes 4444 MOV\n"
-                     "after the run. Leave unticked for PNG/EXR."
-                 ), arrow="w"),
-
-
-            dict(tab="setup", widget="setup_manual",
-                 title="Illustrated Manual",
-                 body=(
-                     "The right panel contains a built-in manual\n"
-                     "explaining every module in depth.\n\n"
-                     "Scroll through it to read about:\n"
-                     "• MOV ↔ EXR — format conversion\n"
-                     "• Upscale — AI vs traditional algorithms\n"
-                     "• ADW-Blur — full pipeline walkthrough\n"
-                     "• Motion Mask — still vs moving areas\n"
-                     "• SAM 3 — prompts, Mask Parameters,\n"
-                     "  Choker, and Luma Corridor Keyer\n\n"
-                     "The install log sits below it in a split pane."
-                 ), arrow="e"),
-
-            dict(tab="rife", widget="rife_presets",
-                 title="Presets",
-                 body=(
-                     "Save your entire ADW-Blur setup as a\n"
-                     "named preset — all 17 settings in one click.\n\n"
-                     "+ button  — saves instantly as  Preset_01,\n"
-                     "           Preset_02… (no dialog needed)\n\n"
-                     "Presets button  — opens the preset list.\n"
-                     "Left-click any preset to load it.\n\n"
-                     "Right-click the Presets button (or any preset\n"
-                     "in the list) to Rename… or Delete.\n\n"
-                     "Presets are stored in  ~/.ai_toolbox/presets_adw.json\n"
-                     "so they persist across sessions and projects."
-                 ), arrow="n"),
-
-            dict(tab="rife", widget="rife_motion_mask",
-                 title="Motion Mask",
-                 body=(
-                     "The Motion Mask controls how much temporal\n"
-                     "smoothing is applied per pixel:\n\n"
-                     "  Green  — still area → full blend → smooth\n"
-                     "  Red    — fast area  → protected → sharp\n\n"
-                     "Tick  Preview mask  to see the overlay live\n"
-                     "in the viewer as you adjust the slider.\n\n"
-                     "The slider sets the flow magnitude threshold\n"
-                     "(in pixels) below which blending is allowed."
-                 ), arrow="w"),
-
-            dict(tab="rife", widget="rife_adv_settings",
-                 title="Advanced Motion Mask Settings",
-                 body=(
-                     "Click  Settings  (top-right of Auto Retime)\n"
-                     "to open three advanced controls:\n\n"
-                     "Hi Mult ×  — width of the protection ramp.\n"
-                     "  Low = sharp cutoff, High = gradual fade.\n\n"
-                     "Dilation px  — expands the 'protect' halo\n"
-                     "  around detected object edges.\n\n"
-                     "Feather σ  — Gaussian softness on the mask\n"
-                     "  boundary between blend and protect zones.\n\n"
-                     "Opening Settings auto-enables the mask preview\n"
-                     "so you see every slider change live."
-                 ), arrow="n"),
-
-            dict(tab="rife", widget="rife_output",
-                 title="Where Files End Up",
-                 body=(
-                     "Each module writes output into a subfolder\n"
-                     "named after itself, created automatically\n"
-                     "next to your input files:\n\n"
-                     "  EXR/       — MOV → EXR conversion\n"
-                     "  RIFE/   — RIFE interpolation\n"
-                     "  SAM/       — SAM 3 masks & segments\n\n"
-                     "After each run, the  ⇢ Open output folder\n"
-                     "button appears — click it to reveal the\n"
-                     "result in Finder immediately."
-                 ), arrow="n"),
 
             dict(tab="setup", widget=None,
-                 title="You're all set!",
+                 title="Where things go, and the robot",
                  body=(
-                     "That's the full tour.\n\n"
-                     "Quick-start checklist:\n"
-                     "1. Install ffmpeg (Setup tab)\n"
-                     "2. Install RIFE for interpolation\n"
-                     "3. Install SAM 3 for masking (needs HF token)\n"
-                     "4. Drop an EXR sequence into RIFE or SAM 3\n"
-                     "5. Place a point, click Preview, compare\n\n"
-                     "Good luck with your VFX work!"
+                     "Every module writes into ADW/<MODULE>_vNN next to\n"
+                     "the footage — UPSCALE_v01, DETAIL_v01, CUT_v01… —\n"
+                     "a new version each run, never overwriting, and the\n"
+                     "folder is handed to the other tabs as their input.\n"
+                     "EXRs carry a colourspace tag so the next tab reads\n"
+                     "them right.\n\n"
+                     "The first Preview or Run in a studio raises the\n"
+                     "robot: the cloud models are slow. 'I hear you'\n"
+                     "silences it for the session; 'Whatever' does not."
+                 ), arrow=None),
+
+            dict(tab="setup", widget=None,
+                 title="You're all set",
+                 body=(
+                     "Quick start:\n"
+                     "1. Setup: install ffmpeg and Real-ESRGAN\n"
+                     "2. Add a fal.ai key for the cloud models (optional)\n"
+                     "3. SAM 3: Hugging Face token, then Install\n"
+                     "4. MOV ↔ EXR: convert a clip to scene-linear EXR\n"
+                     "5. Open it in any studio, Preview, compare, Run\n\n"
+                     "The manual on the right of the Setup tab goes\n"
+                     "deeper on every module. Good luck."
                  ), arrow=None),
         ]
+        return [st for st in steps if st.get("tab") in tabs]
 
     def _demo_show(self):
         # Close existing overlay if any
@@ -39382,7 +39424,10 @@ print("EXR write complete")
         target = self._demo_get_widget(step)
         self.update_idletasks()
 
-        OW, OH = 380, 260
+        # The card is as tall as its text: the height is measured once
+        # the labels are packed (below) and the position redone, so a
+        # longer step is never cut off at the bottom.
+        OW, OH = 400, 260
         if target:
             try:
                 tx = target.winfo_rootx()
@@ -39462,6 +39507,24 @@ print("EXR write complete")
         tk.Label.configure(nxt._lbl, width=0, pady=5, padx=12)
         nxt.pack(side="right")
 
+        # Now the real height: re-place the card so it fits its text and
+        # stays on screen.
+        try:
+            ov.update_idletasks()
+            OH2 = max(OH, ov.winfo_reqheight())
+            if OH2 != OH:
+                arrow = step.get("arrow", "e") if target else None
+                if arrow in ("w", "e") and target:
+                    oy = target.winfo_rooty() + target.winfo_height() // 2 - OH2 // 2
+                elif arrow == "s" and target:
+                    oy = target.winfo_rooty() - OH2 - 12
+                elif not target:
+                    oy = self.winfo_rooty() + self.winfo_height() // 2 - OH2 // 2
+                oy = max(8, min(sh - OH2 - 8, oy))
+                ov.geometry(f"{OW}x{OH2}+{ox}+{oy}")
+        except Exception:
+            pass
+
     def _demo_nav(self, delta):
         self._demo_step += delta
         steps = self._demo_steps()
@@ -39479,8 +39542,8 @@ print("EXR write complete")
                 except Exception: pass
             setattr(self, attr, None)
         self._demo_save_completed()
-        # After demo, default to SAM 3
-        self.after(300, lambda: self.show("sam"))
+        # After the tour, start where the work starts: MOV <-> EXR
+        self.after(300, lambda: self.show("exr" if "exr" in self.tabs else "sam"))
 
     def _demo_highlight_widget(self, step):
         """Draw a bright red highlight border around the target widget."""
@@ -39509,10 +39572,24 @@ print("EXR write complete")
         """Map step widget key to an actual tk widget."""
         key = step.get("widget")
         if not key: return None
+        tiles = lambda name: (getattr(self, name, None) or {}).get("esrgan")
         mapping = {
             "tab_btns":        self.winfo_children()[0] if self.winfo_children() else None,
             "setup_components": getattr(self, "_setup_comp_frame", None),
             "hf_card":         getattr(self, "_hf_token_entry", None),
+            "fal_card":        getattr(self, "_fal_status_lbl", None),
+            "cut_btn":         getattr(self, "cut_btn", None),
+            "ups_tiles":       tiles("_ups_tiles"),
+            "ups_freq":        getattr(self, "ups_freq_canvas", None),
+            "ups_input":       getattr(self, "ups_in_lbl", None),
+            "det_tiles":       tiles("_det_tiles"),
+            "usc_peak":        getattr(self, "usc_ai_mask_btn", None),
+            "organic_canvas":  getattr(self, "organic_canvas", None),
+            "sm_canvas":       getattr(self, "sm_canvas", None),
+            "ff_scan":         getattr(self, "ff_scan_btn", None),
+            "curve_canvas":    getattr(self, "curve_canvas", None),
+            "area_canvas":     getattr(self, "area_canvas", None),
+            "ip_canvas":       getattr(self, "ip_canvas", None),
             "setup_manual":    getattr(self, "_setup_manual_text", None),
             "exr_toggle":      getattr(self, "exr_f_to_exr", None),
             "exr_cm":          getattr(self, "exr_csp_var", None),

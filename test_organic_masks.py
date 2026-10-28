@@ -13392,6 +13392,69 @@ class TestSlowModelNotice(unittest.TestCase):
         self.assertFalse(app._slow_model_notice())        # heard: no window made
 
 
+class TestGuidedTour(unittest.TestCase):
+    """The first-run tour and the Setup manual describe the app as it
+    is: every tab gets a step, no step points at a tab the build does
+    not have, the welcome names the build, and the manual's install
+    section covers the current pieces."""
+
+    def _steps(self, tabs):
+        app = App.__new__(App)
+        class _B:
+            def __init__(s, t): s.t = t
+            def cget(s, k): return s.t
+        app.tab_btns = {k: _B(k.upper()) for k in tabs}
+        return app._demo_steps()
+
+    def test_every_tab_has_a_step_and_no_step_points_elsewhere(self):
+        tabs = ["setup", "exr", "upstudio", "detail", "upscale", "organic",
+                "smudge", "fixframes", "curve", "area", "rife", "interp", "sam"]
+        steps = self._steps(tabs)
+        self.assertEqual(set(st["tab"] for st in steps), set(tabs))
+        # the Studio Toolbox build: the ADW steps simply are not there
+        studio = [t for t in tabs if t not in ("curve", "area", "rife", "interp")]
+        s2 = self._steps(studio)
+        self.assertEqual(set(st["tab"] for st in s2), set(studio))
+        self.assertLess(len(s2), len(steps))
+        self.assertEqual(steps[0]["tab"], "setup")
+        self.assertIn("Welcome to", steps[0]["title"])
+        self.assertIn("You're all set", steps[-1]["title"])
+
+    def test_the_tab_step_lists_the_tabs_that_exist(self):
+        steps = self._steps(["setup", "exr", "sam"])
+        bar = [st for st in steps if st["title"] == "The tabs"][0]["body"]
+        self.assertIn("\u2022 EXR", bar)
+        self.assertNotIn("Four", bar)
+
+    def test_the_steps_cover_the_current_features(self):
+        body = "\n".join(st["title"] + st["body"] for st in self._steps(
+            ["setup", "exr", "upstudio", "detail", "upscale", "organic", "smudge",
+             "fixframes", "sam"]))
+        for frag in ("And..CUT!", "fal.ai", "Anamorphic", "Detail Studio",
+                     "Frame Linking", "Multi model", "Target peak", "Input colour",
+                     "ADW/<MODULE>_vNN", "I hear you", "SeedVR2", "zscale"):
+            with self.subTest(fragment=frag):
+                self.assertIn(frag, body)
+        for stale in ("RIFE \u2014 Smooth", "Four Modules", "Riffled"):
+            self.assertNotIn(stale, body)
+
+    def test_the_card_fits_its_text(self):
+        import inspect
+        body = inspect.getsource(App._demo_show)
+        self.assertIn("ov.winfo_reqheight()", body)
+
+    def test_the_manual_install_section_is_current(self):
+        with open(SRC, encoding="utf-8") as fh:
+            src = fh.read()
+        i = src.index('_w("Setup & Install\\n", "h1")\n        _w("Installs the pieces')
+        sec = src[i:i + 6000]
+        for frag in ("Real-ESRGAN", "fal.ai key", "SeedVR2", "Fix Permissions.command",
+                     "xattr -cr", "Miniconda", "zscale", "Apple-silicon"):
+            with self.subTest(fragment=frag):
+                self.assertIn(frag, sec)
+        self.assertNotIn("CUDA GPU required", sec)
+
+
 class TestSetupRifeLabel(unittest.TestCase):
     """The Setup & Install component row for the RIFE install was
     labelled "ADW-Blur", which stopped being accurate the moment Fix
