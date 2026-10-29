@@ -2452,8 +2452,10 @@ class TestColourspaceToolkit(unittest.TestCase):
         x = np.array([[[0.18, 0.5, 1.0], [0.0, 2.0, 8.0]]], np.float32)
         for k in App.CS_KEYS:
             r = App._cs_to_lin709(App._cs_from_lin709(x, k), k)
-            want = np.clip(x, 0, 1) if k in ("srgb", "rec709") else x
-            self.assertLess(float(np.abs(r - want).max()), 1e-3, k)
+            # nothing clips here, the display spaces included: their
+            # curve carries on above white, and only the 8-bit / PNG /
+            # movie writers clip, at their own door
+            self.assertLess(float(np.abs(r - x).max()), 1e-3, k)
         # PQ keeps the highlights, in absolute nits: 1.0 linear = 100
         self.assertAlmostEqual(
             float(App._cs_from_lin709(np.full((1, 1, 3), 10.0, np.float32),
@@ -2646,6 +2648,67 @@ class TestRec709PreviewMov(unittest.TestCase):
         self.assertGreater(float(px.mean()) / 255.0, 0.42)
         self.assertLess(float(px.mean()) / 255.0, 0.56)
         self.assertTrue(any("from Working ACEScg" in m for m in logs))
+
+
+class TestLensStudioNeverClamps(unittest.TestCase):
+    """Lens Studio keeps everything above white: the read, every
+    effect, the ROI path and the EXR write, in every linear space and
+    in a display-tagged EXR too. Only the viewer and a PNG / MOV clip."""
+
+    def _hdr(self):
+        lin = np.random.default_rng(0).random((40, 60, 3)).astype(np.float32) * 0.4
+        lin[10:20, 20:30] = (8.0, 6.0, 5.0)
+        return lin
+
+    def _all_on(self):
+        p = dict(App._ORGANIC_BASE)
+        for k in list(p):
+            if k.endswith("_on"):
+                p[k] = True
+        return p
+
+    def test_the_stack_keeps_the_highlights(self):
+        app = App.__new__(App)
+        out = app._organic_apply_stack(self._hdr(), self._all_on(), seed=1)
+        self.assertGreater(float(out.max()), 5.0)
+        # the ROI path too (a small effect reach, so the crop is taken)
+        p = dict(self._all_on(), bloom_intensity=0.0, veil_intensity=0.0)
+        inner, box = app._organic_apply_stack_roi(self._hdr(), p,
+                                                  (5, 10, 30, 50), seed=1)
+        self.assertIsNotNone(inner)
+        self.assertGreater(float(inner.max()), 5.0)
+
+    def test_every_exr_space_round_trips_the_highlights(self):
+        try:
+            import OpenEXR  # noqa: F401
+        except ImportError:
+            self.skipTest("OpenEXR not installed")
+        import tempfile
+        app = App.__new__(App)
+        d = tempfile.mkdtemp()
+        lin = self._hdr()
+        for cs in App.CS_KEYS:
+            with self.subTest(cs=cs):
+                dst = app._organic_write_frame(os.path.join(d, "f_" + cs), lin,
+                                               "EXR 32-bit float", cs=cs)
+                back = App._cs_to_lin709(app._ff_read_frame(dst), cs)
+                self.assertLess(float(np.abs(back - lin).max() / 8.0), 2e-3)
+
+    def test_a_display_tagged_exr_above_white_comes_through(self):
+        """An AI tool's EXR holds display code and sometimes goes past
+        1.0; reading it as Display sRGB must not cut that off."""
+        code = np.full((4, 4, 3), 1.6, np.float32)
+        self.assertGreater(float(App._cs_to_lin709(code, "srgb").max()), 2.0)
+        self.assertGreater(float(App._cs_to_lin709(code, "rec709").max()), 2.0)
+        self.assertEqual(float(App._cs_to_lin709(
+            np.full((1, 1, 3), 1.0, np.float32), "srgb")[0, 0, 0]), 1.0)
+
+    def test_only_the_integer_writers_clip(self):
+        import inspect
+        self.assertIn("np.clip(self._cs_from_lin709(",
+                      inspect.getsource(App._organic_write_frame))
+        self.assertIn("np.clip(self._cs_convert(a, src_key, \"rec709\")",
+                      inspect.getsource(App._adw_rec709_mov))
 
 
 class TestHashNoise(unittest.TestCase):
