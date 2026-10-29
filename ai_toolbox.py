@@ -8748,10 +8748,17 @@ class App(tk.Tk):
         linear spaces are a matrix or nothing."""
         import numpy as np
         a = np.asarray(a, np.float32)
-        if key == "srgb":
-            return cls._srgb_to_linear(a)
-        if key == "rec709":
-            return cls._hdr_eotf_1886(a)
+        if key in ("srgb", "rec709"):
+            # The curve continued above 1.0 rather than clipped there:
+            # a float file in a display space (an AI tool's EXR, a
+            # display-tagged EXR from another module) can hold values
+            # past white, and they must come through, not be cut.
+            c = np.maximum(a, 0.0)
+            if key == "srgb":
+                return np.where(c <= 0.04045, c / 12.92,
+                                np.power((c + 0.055) / 1.055, 2.4)
+                                ).astype(np.float32)
+            return np.power(c, 2.4).astype(np.float32)
         if key == "pq":
             nits = cls._hdr_pq_decode(np.clip(a, 0.0, 1.0))
             return np.maximum(cls._bt2020_to_709(
@@ -8769,11 +8776,16 @@ class App(tk.Tk):
         keeps everything up to 10,000 nits)."""
         import numpy as np
         lin = np.asarray(lin, np.float32)
-        if key == "srgb":
-            return cls._linear_to_srgb(np.clip(lin, 0.0, 1.0))
-        if key == "rec709":
-            return np.power(np.clip(lin, 0.0, 1.0), 1.0 / 2.4).astype(
-                np.float32)
+        if key in ("srgb", "rec709"):
+            # Not clipped here: an EXR in a display space keeps what
+            # was above white (the curve continued); the 8-bit, PNG and
+            # movie writers clip at their own door.
+            c = np.maximum(lin, 0.0)
+            if key == "srgb":
+                return np.where(c <= 0.0031308, c * 12.92,
+                                1.055 * np.power(c, 1.0 / 2.4) - 0.055
+                                ).astype(np.float32)
+            return np.power(c, 1.0 / 2.4).astype(np.float32)
         if key == "pq":
             n = np.maximum(lin @ np.array(cls._M_709_TO_2020, np.float32).T,
                            0.0)
@@ -8882,11 +8894,11 @@ def _cs_inv(m):
 def cs_to_lin709(a, key):
     a = _np.asarray(a, _np.float32)
     if key == "srgb":
-        c = _np.clip(a, 0.0, 1.0)
+        c = _np.maximum(a, 0.0)
         return _np.where(c <= 0.04045, c / 12.92,
                          _np.power((c + 0.055) / 1.055, 2.4)).astype(_np.float32)
     if key == "rec709":
-        return _np.power(_np.clip(a, 0.0, 1.0), 2.4).astype(_np.float32)
+        return _np.power(_np.maximum(a, 0.0), 2.4).astype(_np.float32)
     if key == "pq":
         n = _cs_pq_decode(a) / _CS_SDR_WHITE
         return _np.maximum(_cs_mat(n, _cs_inv(_CS_709_2020)), 0.0)
@@ -8899,11 +8911,11 @@ def cs_to_lin709(a, key):
 def cs_from_lin709(lin, key):
     lin = _np.asarray(lin, _np.float32)
     if key == "srgb":
-        c = _np.clip(lin, 0.0, 1.0)
+        c = _np.maximum(lin, 0.0)
         return _np.where(c <= 0.0031308, c * 12.92,
                          1.055 * _np.power(c, 1.0 / 2.4) - 0.055).astype(_np.float32)
     if key == "rec709":
-        return _np.power(_np.clip(lin, 0.0, 1.0), 1.0 / 2.4).astype(_np.float32)
+        return _np.power(_np.maximum(lin, 0.0), 1.0 / 2.4).astype(_np.float32)
     if key == "pq":
         return _cs_pq_encode(_np.maximum(_cs_mat(lin, _CS_709_2020), 0.0)
                              * _CS_SDR_WHITE)
