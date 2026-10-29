@@ -22685,6 +22685,31 @@ def cs_convert(a, src, dst):
             return False
         return int((a > float(limit)).sum()) >= int(min_count)
 
+    _organic_view_hdr = False     # the frame on screen is rolled off
+
+    def _organic_view_u8(self, lin, ev=0.0, gamma=1.0):
+        """What the VIEWER shows for a linear frame: an HDR frame (values
+        above white) is rolled off through the same smooth shoulder
+        Upscale Studio's base uses, so highlights read as highlights
+        rather than a flat clipped white; an SDR frame is the plain sRGB
+        encode. Nothing written goes through here -- the files keep
+        every value."""
+        import numpy as np
+        a = np.asarray(lin, np.float32)
+        if ev:
+            a = a * (2.0 ** float(ev))
+        over = bool(a.size) and float(a.max()) > 1.01
+        self._organic_view_hdr = over
+        if over:
+            n = np.maximum(a.max(axis=2), 1e-6)
+            a = a * (self._ups_shoulder(n) / n)[:, :, None]
+        u8 = self._organic_linear_to_display(a)
+        if gamma != 1.0:
+            g = np.power(np.clip(u8.astype(np.float32) / 255.0, 1e-6, 1.0),
+                         1.0 / float(gamma))
+            u8 = (g * 255.0 + 0.5).astype(np.uint8)
+        return u8
+
     @staticmethod
     def _organic_linear_to_display(lin):
         """Scene-linear float -> display-referred uint8, via the sRGB
@@ -22711,7 +22736,7 @@ def cs_convert(a, src, dst):
         from PIL import Image
         self.organic_lin = self._organic_load_linear(path)
         self.organic_img_base = Image.fromarray(
-            self._organic_linear_to_display(self.organic_lin), "RGB")
+            self._organic_view_u8(self.organic_lin), "RGB")
         self.organic_lin = self._organic_exp_apply(self.organic_lin, path)
         # organic_lin is now another frame than the one the slider's
         # in-memory copy was taken from; make the next move re-read.
@@ -22721,7 +22746,7 @@ def cs_convert(a, src, dst):
             self.organic_lin, self._organic_params(),
             seed=self._organic_frame_seed(getattr(self, "_organic_idx", 0)))
         self._organic_wipe_corrected_base = Image.fromarray(
-            self._organic_linear_to_display(out), "RGB")
+            self._organic_view_u8(out), "RGB")
         self.organic_processed = self._organic_wipe_corrected_base
         # Kept so the viewer can re-expose without re-running the
         # stack. The 8-bit image above is already clipped at 1.0, so
@@ -22743,7 +22768,7 @@ def cs_convert(a, src, dst):
             from PIL import Image
             self.organic_lin = self._organic_load_linear(path)
             self.organic_img_base = Image.fromarray(
-                self._organic_linear_to_display(self.organic_lin), "RGB")
+                self._organic_view_u8(self.organic_lin), "RGB")
             # After the "original" picture is taken, so the wipe compares
             # the untouched input against adjustment + effects.
             self.organic_lin = self._organic_exp_apply(
@@ -22845,7 +22870,7 @@ def cs_convert(a, src, dst):
             if inner is not None:
                 y0, x0, y1, x1 = box
                 patch = Image.fromarray(
-                    self._organic_linear_to_display(inner), "RGB")
+                    self._organic_view_u8(inner), "RGB")
                 # Outside the box: the last render if there is one,
                 # else the untouched plate -- the effect shows inside
                 # the box only, which is what the box is for.
@@ -22854,7 +22879,7 @@ def cs_convert(a, src, dst):
                         or pl.shape[:2] != self.organic_lin.shape[:2]):
                     pl = self.organic_lin.copy()
                     base = Image.fromarray(
-                        self._organic_linear_to_display(pl), "RGB")
+                        self._organic_view_u8(pl), "RGB")
                 else:
                     base = self.organic_processed.copy()
                     pl = pl.copy()
@@ -22871,7 +22896,7 @@ def cs_convert(a, src, dst):
                 out = self._organic_apply_stack(self.organic_lin, p,
                                                 seed=seed, progress=_tick)
                 self.organic_processed = Image.fromarray(
-                    self._organic_linear_to_display(out), "RGB")
+                    self._organic_view_u8(out), "RGB")
                 self._organic_proc_lin = out
         except Exception as ex:
             self.log(self.organic_log_txt, f"Preview failed: {ex}", "err")
@@ -23197,7 +23222,7 @@ def cs_convert(a, src, dst):
             return Image.fromarray(
                 self._apply_ev_gamma(np.array(img), ev, gm), "RGB")
         return Image.fromarray(np.ascontiguousarray(
-            self._apply_ev_gamma_float(fl, ev, gm, 1.0)), "RGB")
+            self._organic_view_u8(fl, ev, gm)), "RGB")
 
     def _organic_redraw(self):
         """Preview / Wipe / Diff. Geometry matches AreaLock's: fit the
@@ -23301,6 +23326,11 @@ def cs_convert(a, src, dst):
         state = self._organic_fx_state_line()
         if state:
             cv.create_text(cw - 6, 8, anchor="ne", text=state,
+                           font=FM, fill="#DDAA44")
+        if getattr(self, "_organic_view_hdr", False):
+            cv.create_text(6, 8, anchor="nw",
+                           text="HDR \u2014 highlights rolled off for the "
+                                "screen; the file keeps them (EV to inspect)",
                            font=FM, fill="#DDAA44")
         z = float(getattr(self, "_organic_zoom", 1.0))
         if abs(z - 1.0) > 1e-3:
