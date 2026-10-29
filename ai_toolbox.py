@@ -3333,7 +3333,7 @@ class App(tk.Tk):
         # (_fal_wizard) so it is there when you need it and gone once the
         # key is in — permanent instructions for a one-time job are just
         # clutter every day after the first.
-        fal_card = self._card(lf, "Wan VACE — Required for ADW-Interpolate")
+        fal_card = self._card(lf, "fal.ai \u2014 the cloud models")
 
         fal_top = tk.Frame(fal_card, bg=S); fal_top.pack(fill="x")
         self._fal_status_lbl = tk.Label(fal_top, text="No key yet",
@@ -3365,7 +3365,7 @@ class App(tk.Tk):
         self.after(0, self._fal_check_client)
 
         self._fal_hint_lbl = tk.Label(fal_card, text="",
-            font=FSM, bg=S, fg=G, wraplength=520, justify="left", anchor="w")
+            font=FSM, bg=S, fg=G, wraplength=330, justify="left", anchor="w")
         self._fal_hint_lbl.pack(fill="x", pady=(6, 0))
 
         if _en is not None and "interp" not in _en:
@@ -4757,9 +4757,19 @@ class App(tk.Tk):
         _w("fal.ai key\n", "param")
         _w("The cloud models: SeedVR2 and FlashVSR (Upscale and Detail "
            "Studio), Topaz and Wan inpaint (Expansion Studio), VACE (Fix "
-           "Missing Frames, ADW-Interpolate), depth. Paste the key once; "
-           "every paid frame is cached, so it is only ever paid for once "
-           "per setting. Clear upscale cache in the studios empties it.\n", "body_indent")
+           "Missing Frames, ADW-Interpolate). One key covers them all. "
+           "On the fal.ai card click Set up \u2192 and follow the five "
+           "steps: (1) create an account at fal.ai, (2) add credit under "
+           "Billing \u2014 jobs fail with 'insufficient balance' when it "
+           "runs out, (3) under Keys click Add key and copy it (shown "
+           "once, in the form id:secret), (4) paste the whole key and "
+           "Save, (5) Test key \u2014 a green line means it is accepted. "
+           "The fal client library must also be installed (the Install "
+           "button on the same card). The key lives in "
+           "~/.ai_toolbox/fal_key and survives updates; Forget key "
+           "removes it. Every paid frame is cached, so it is only ever "
+           "paid for once per setting; Clear upscale cache in the studios "
+           "empties that cache.\n", "body_indent")
         _end()
 
         _end = _sec("Installing the app itself")
@@ -5972,6 +5982,17 @@ class App(tk.Tk):
         self._fal_check_key()
         self._setup_detect()
 
+    def _fal_uses_text(self):
+        """Which modules the fal.ai key unlocks, for THIS build (the
+        Studio build has no ADW-Interpolate)."""
+        tabs = getattr(self, "_enabled_tabs", None)
+        has = lambda k: tabs is None or k in tabs
+        parts = ["SeedVR2 and FlashVSR (Upscale Studio, Detail Studio)",
+                 "Topaz and Wan inpaint (Expansion Studio)",
+                 "Wan VACE (Fix Missing Frames"
+                 + (", ADW-Interpolate)" if has("interp") else ")")]
+        return "; ".join(parts)
+
     def _fal_check_key(self):
         """Card state follows the key: once it is in, the walkthrough
         button steps aside and you get Test / Forget instead."""
@@ -5982,16 +6003,20 @@ class App(tk.Tk):
             self._fal_status_lbl.configure(
                 text=f"Key saved  ({k[:6]}\u2026{k[-4:]})", fg=GR)
             self._fal_hint_lbl.configure(
-                text="ADW-Interpolate is ready. Test the key if a "
-                     "generation starts failing.")
+                text="Connected \u2014 SeedVR2, FlashVSR, Topaz and Wan VACE "
+                     "are available; paid frames are cached. A job failing "
+                     "with 401 / Unauthorized: Test key. 'Insufficient "
+                     "balance': add credit at fal.ai/dashboard/billing.")
             self._fal_setup_btn.pack_forget()
             self._fal_forget_btn.pack(side="right")
             self._fal_test_btn.pack(side="right", padx=(0, 4))
         else:
             self._fal_status_lbl.configure(text="No key yet", fg=G)
             self._fal_hint_lbl.configure(
-                text="ADW-Interpolate rebuilds broken frames with Wan VACE, "
-                     "which runs on fal.ai. Set up a key to enable it.")
+                text="Needed for the cloud models \u2014 SeedVR2, FlashVSR, "
+                     "Topaz, Wan VACE \u2014 billed per use, cached per "
+                     "frame. Everything local works without it. Set up \u2192 "
+                     "walks through: account, credit, key, paste, test.")
             self._fal_test_btn.pack_forget()
             self._fal_forget_btn.pack_forget()
             self._fal_setup_btn.pack(side="right")
@@ -6016,8 +6041,8 @@ class App(tk.Tk):
             self._fal_lib_btn.pack_forget()
         except ImportError:
             self._fal_lib_lbl.configure(
-                text="\u2716 fal client NOT installed \u2014 uploads will "
-                     "fail without it", fg="#CC4444")
+                text="\u2716 fal client not installed (needed)",
+                fg="#CC4444")
             self._fal_lib_btn.pack(side="right")
 
     def _fal_install_client(self):
@@ -6080,25 +6105,27 @@ class App(tk.Tk):
 
         dlg = tk.Toplevel(self)
         self._fal_dlg = dlg
-        dlg.title("Wan VACE \u2014 Setup")
+        dlg.title("fal.ai \u2014 Setup")
         dlg.configure(bg=S)
         dlg.resizable(False, False)
         dlg.transient(self)
         dlg.grab_set()
         dlg.update_idletasks()
         sw, sh = dlg.winfo_screenwidth(), dlg.winfo_screenheight()
-        w, h = 560, 500
+        w, h = 560, 620
         dlg.geometry(f"{w}x{h}+{(sw-w)//2}+{(sh-h)//2}")
         pad = dict(padx=26)
 
-        tk.Label(dlg, text="Connect Wan VACE",
+        tk.Label(dlg, text="Connect fal.ai",
                  font=("Helvetica", 15, "bold"), bg=S, fg=W
                  ).pack(anchor="w", pady=(20, 3), **pad)
         tk.Label(dlg,
-            text="ADW-Interpolate rebuilds broken frames with Wan VACE. It "
-                 "runs on fal.ai rather than locally \u2014 the model is "
-                 "CUDA-only, so it cannot run on an Apple Silicon Mac at "
-                 "all. Generations cost roughly $0.05\u2013$0.50 each.",
+            text="The heavy models run on fal.ai rather than on this Mac "
+                 "(they are CUDA-only): " + self._fal_uses_text() + ". "
+                 "They are billed per use \u2014 roughly $0.05\u2013$0.50 per "
+                 "clip or generation \u2014 and every paid frame is cached, "
+                 "so a frame is only ever paid for once per setting. One "
+                 "key covers every module.",
             font=FSM, bg=S, fg=G, wraplength=w - 56, justify="left", anchor="w"
             ).pack(anchor="w", pady=(0, 12), **pad)
 
@@ -6119,19 +6146,23 @@ class App(tk.Tk):
         def _open(url):
             self._open_url(url)
 
-        _step(1, "Create a free fal.ai account.", "Open fal.ai \u2192",
+        _step(1, "Create a free fal.ai account (GitHub or Google sign-in "
+                 "works).", "Open fal.ai \u2192",
               lambda: _open("https://fal.ai/"))
-        _step(2, "Add credit \u2014 billed per second of video generated.",
+        _step(2, "Add credit under Billing \u2014 $10 goes a long way; jobs "
+                 "fail with 'insufficient balance' when it runs out.",
               "Billing \u2192",
               lambda: _open("https://fal.ai/dashboard/billing"))
-        _step(3, "Create an API key, then copy it.", "Get key \u2192",
+        _step(3, "Under Keys click Add key, name it (e.g. Toolbox), copy "
+                 "it \u2014 it is shown once, in the form key_id:secret.",
+              "Get key \u2192",
               lambda: _open("https://fal.ai/dashboard/keys"))
 
         r4 = tk.Frame(dlg, bg=S); r4.pack(fill="x", pady=(8, 2), **pad)
         tk.Label(r4, text=" 4 ", font=("Futura", 11, "bold"),
                  bg="#2A0A0A", fg="#CC4444", padx=4).pack(side="left", padx=(0, 10))
-        tk.Label(r4, text="Paste the key and save it:", font=FSM, bg=S, fg=W,
-                 anchor="w").pack(side="left")
+        tk.Label(r4, text="Paste the whole key (id:secret) and Save:",
+                 font=FSM, bg=S, fg=W, anchor="w").pack(side="left")
         ef = tk.Frame(dlg, bg=S2, highlightthickness=1,
                       highlightbackground=BD, highlightcolor=BD)
         ef.pack(fill="x", pady=(0, 4), padx=(26 + 30, 26))
@@ -6146,7 +6177,9 @@ class App(tk.Tk):
         self._fal_key_entry.bind("<Return>", lambda e: self._fal_save_key())
         self._fal_key_entry.focus_set()
 
-        _step(5, "Check it actually works before you rely on it.",
+        _step(5, "Test it \u2014 a green line here means the key is "
+                 "accepted. The fal client library (next to the key on "
+                 "the Setup tab) must be installed too.",
               "Test key", self._fal_test)
 
         _acc = tk.Frame(dlg, bg=S); _acc.pack(fill="x", pady=(6, 0), **pad)
@@ -6164,9 +6197,10 @@ class App(tk.Tk):
         self._fal_dlg_status.pack(fill="x", pady=(10, 0), **pad)
 
         tk.Label(dlg,
-            text="Stored in ~/.ai_toolbox/fal_key, readable only by you. "
-                 "FAL_KEY in the environment is used as a fallback. Never "
-                 "paste a key into a chat or a bug report.",
+            text="Stored in ~/.ai_toolbox/fal_key, readable only by you; "
+                 "it survives app updates. FAL_KEY in the environment is "
+                 "used as a fallback. Never paste a key into a chat or a "
+                 "bug report. Forget key removes it.",
             font=FSM, bg=S, fg="#777777", wraplength=w - 56,
             justify="left", anchor="w").pack(fill="x", pady=(10, 0), **pad)
 
@@ -39990,7 +40024,8 @@ print("EXR write complete")
                      "The slow, heavy models run on fal.ai and cost money\n"
                      "per clip: SeedVR2 and FlashVSR (upscaling and\n"
                      "detail), Topaz and Wan (HDR expansion), VACE (frame\n"
-                     "repair). Paste a key here once.\n\n"
+                     "repair). Click Set up → for the five steps: account,\n"
+                     "credit, key, paste, test. One key covers every module.\n\n"
                      "Everything local works without a key. Every paid\n"
                      "frame is cached, so a frame is only ever paid for\n"
                      "once per setting, and a standing panel under Run\n"

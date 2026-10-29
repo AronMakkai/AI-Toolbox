@@ -2737,6 +2737,48 @@ class TestLensStudioNeverClamps(unittest.TestCase):
                       inspect.getsource(App._adw_rec709_mov))
 
 
+class TestFalSetupInstructions(unittest.TestCase):
+    """The Setup tab says plainly what the fal.ai key is for, in every
+    build, and walks through getting one: account, credit, key, paste,
+    test."""
+
+    def test_the_card_and_hints_name_every_module_not_just_interpolate(self):
+        import inspect
+        src = inspect.getsource(App._tab_setup)
+        self.assertIn('"fal.ai \\u2014 the cloud models "', src)
+        self.assertNotIn("Wan VACE — Required for ADW-Interpolate", src)
+        app = App.__new__(App)
+        app._enabled_tabs = None
+        t = app._fal_uses_text()
+        for m in ("SeedVR2", "FlashVSR", "Topaz", "Wan VACE", "Upscale Studio",
+                  "Detail Studio", "Expansion Studio", "Fix Missing Frames",
+                  "ADW-Interpolate"):
+            self.assertIn(m, t)
+        app._enabled_tabs = ["setup", "upstudio", "fixframes"]
+        self.assertNotIn("ADW-Interpolate", app._fal_uses_text())
+        self.assertIn("Wan VACE (Fix Missing Frames)", app._fal_uses_text())
+
+    def test_the_wizard_walks_through_the_five_steps(self):
+        import inspect
+        src = inspect.getsource(App._fal_wizard)
+        for frag in ("Connect fal.ai", "fal.ai/dashboard/billing",
+                     "fal.ai/dashboard/keys", "insufficient balance",
+                     "id:secret", "Test key", "fal client library",
+                     "~/.ai_toolbox/fal_key"):
+            self.assertIn(frag, src)
+        self.assertNotIn("Connect Wan VACE", src)
+
+    def test_the_hint_explains_failures_and_the_manual_has_the_steps(self):
+        import inspect
+        src = inspect.getsource(App._fal_check_key)
+        self.assertIn("401 / Unauthorized", src)
+        self.assertIn("account, credit, key, paste, test", src)
+        self.assertIn("self._fal_uses_text()", inspect.getsource(App._fal_wizard))
+        man = inspect.getsource(App._build_manual) if hasattr(App, "_build_manual") \
+            else inspect.getsource(App._tab_setup)
+        self.assertIn("follow the five", man)
+
+
 class TestHashNoise(unittest.TestCase):
     """Grain's field is addressed by absolute pixel position rather than
     drawn from a sequential stream, so any sub-rectangle renders exactly
