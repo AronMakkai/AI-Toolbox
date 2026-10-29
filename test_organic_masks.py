@@ -2706,6 +2706,29 @@ class TestLensStudioNeverClamps(unittest.TestCase):
         self.assertEqual(float(App._cs_to_lin709(
             np.full((1, 1, 3), 1.0, np.float32), "srgb")[0, 0, 0]), 1.0)
 
+    def test_the_viewer_rolls_off_rather_than_clips(self):
+        """An ACEScg EXR from Expansion Studio LOOKED clamped: the
+        viewer hard-clipped at white. It now rolls the highlights off
+        through the same shoulder Upscale Studio's viewer uses, says so
+        in the HUD, and the file is untouched."""
+        app = App.__new__(App)
+        lin = self._hdr()
+        u8 = app._organic_view_u8(lin)
+        self.assertTrue(app._organic_view_hdr)
+        hi = u8[10:20, 20:30].astype(int)
+        # still distinct channels (8, 6, 5), not a flat 255 white
+        self.assertGreater(int(hi[..., 0].mean()) - int(hi[..., 2].mean()), 4)
+        self.assertLess(int(hi.max()), 255)
+        # SDR frames are the plain encode, flag off
+        sdr = np.clip(lin, 0, 1)
+        self.assertTrue(np.array_equal(app._organic_view_u8(sdr),
+                                       App._organic_linear_to_display(sdr)))
+        self.assertFalse(app._organic_view_hdr)
+        import inspect
+        self.assertNotIn("_organic_linear_to_display(", inspect.getsource(
+            App._organic_show_frame))
+        self.assertIn("_organic_view_u8(", inspect.getsource(App._organic_recompute))
+
     def test_only_the_integer_writers_clip(self):
         import inspect
         self.assertIn("np.clip(self._cs_from_lin709(",
