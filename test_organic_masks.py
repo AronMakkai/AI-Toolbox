@@ -2742,7 +2742,7 @@ class TestFalSetupInstructions(unittest.TestCase):
     def test_the_card_and_hints_name_every_module_not_just_interpolate(self):
         import inspect
         src = inspect.getsource(App._tab_setup)
-        self.assertIn('"fal.ai \\u2014 the cloud models "', src)
+        self.assertIn('"fal.ai \\u2014 the cloud models"', src)
         self.assertNotIn("Wan VACE — Required for ADW-Interpolate", src)
         app = App.__new__(App)
         app._enabled_tabs = None
