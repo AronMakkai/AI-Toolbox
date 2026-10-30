@@ -3213,6 +3213,38 @@ class App(tk.Tk):
             font=FSM, bg=S, fg=G, wraplength=330, justify="left", anchor="w")
         self._fal_hint_lbl.pack(fill="x", pady=(6, 0))
 
+        # LTX Alpha: a fal app the user deploys once (fal_ltx_alpha/),
+        # called with the same key. Its id lives here.
+        _ltx_row = tk.Frame(fal_card, bg=S); _ltx_row.pack(fill="x", pady=(8, 0))
+        tk.Label(_ltx_row, text="LTX Alpha app id", font=FSM, bg=S, fg=G,
+                 anchor="w").pack(side="left")
+        _ltx_i = tk.Label(_ltx_row, text="\u24d8", font=FSM, bg=S, fg="#555555",
+                          cursor="hand2")
+        _ltx_i.pack(side="left", padx=(6, 0))
+        self._tooltip(
+            "The alpha-matte model (LTX-2.5 IC-LoRA) for SAM 3's\n"
+            "LTX Alpha source runs on a fal Serverless app you\n"
+            "deploy once under your own account:\n\n"
+            "  1. fal.ai \u2192 Serverless \u2192 request access\n"
+            "  2. accept the LTX-2 licence on Hugging Face\n"
+            "  3. pip install fal; fal auth login;\n"
+            "     fal secrets set HF_TOKEN=hf_...\n"
+            "  4. cd fal_ltx_alpha; fal deploy app.py::LTXAlpha\n"
+            "     --app-name ltx-alpha\n"
+            "  5. paste the printed id (user/ltx-alpha) here, Save\n\n"
+            "Full steps: fal_ltx_alpha/DEPLOY.md in the repo.")(_ltx_i)
+        _ltx_ef = tk.Frame(fal_card, bg=S2, highlightthickness=1,
+                           highlightbackground=BD, highlightcolor=BD)
+        _ltx_ef.pack(fill="x", pady=(2, 0))
+        self.ltx_app_var = tk.StringVar(value=self._ltx_app_id())
+        tk.Entry(_ltx_ef, textvariable=self.ltx_app_var, bg=S2, fg=W, font=FM,
+                 bd=0, highlightthickness=0, insertbackground=W).pack(
+                     side="left", fill="x", expand=True, padx=6, pady=5)
+        _ltx_sv = self._mkbtn(_ltx_ef, "Save", self._ltx_save_app_id,
+                              bg="#1A0808", fg="#CC4444")
+        tk.Label.configure(_ltx_sv._lbl, width=0, pady=4, padx=10)
+        _ltx_sv.pack(side="right", padx=2)
+
         if _en is not None and "interp" not in _en:
             fal_card.master.pack_forget()
         self.after(0, self._fal_check_key)
@@ -4056,6 +4088,39 @@ class App(tk.Tk):
         _w("⚠ Apple Silicon note: ", "warn")
         _w("SAM 3 is not available on Apple Silicon (CUDA-only requirement). "
            "The earlier SAM 2.1 module (if present) does run on MPS.\n", "body_indent")
+        _end()
+
+        _end = _sec("LTX Alpha \u2014 the second matte source")
+        _w("Beside the SAM 3 tracker sits LTX Alpha: Lightricks' "
+           "alpha-matte IC-LoRA for LTX-2.5, which turns an RGB clip into "
+           "a matte with real soft edges \u2014 hair, fur, smoke, sheer "
+           "fabric, glass \u2014 with no prompt and no clicks. It needs an "
+           "H100-class GPU, so it runs on a fal Serverless app you deploy "
+           "once under your own account (fal_ltx_alpha/DEPLOY.md: request "
+           "Serverless access, accept the LTX-2 licence on Hugging Face, "
+           "fal deploy, paste the app id on the Setup tab). Billed per "
+           "second of GPU; every chunk is cached.\n\n", "body_indent")
+        _w("Tiles\n", "param")
+        _w("SAM 3 only is the tracker as before. LTX Alpha only sends the "
+           "clip and takes what comes back \u2014 the model picks the "
+           "foreground itself, so single-subject shots. Both: SAM decides "
+           "WHAT, LTX does the edges \u2014 the LTX matte is kept inside "
+           "SAM's mask grown by Limit to SAM px and softened.\n\n",
+           "body_indent")
+        _w("Chunk / Overlap / Max size\n", "param")
+        _w("The model takes at most 145 frames and 1920\u00d71088 per call, "
+           "sizes on multiples of 32 and frame counts on the 8k+1 grid. "
+           "Longer clips are split into chunks that overlap, and the "
+           "mattes are crossfaded across the overlap so the seam does not "
+           "pop; the note under the controls says how many chunks and "
+           "seams, and the size sent. Preview LTX Alpha runs one chunk "
+           "around the frame on screen so you can judge the hair before "
+           "paying for the shot.\n\n", "body_indent")
+        _w("Output\n", "param")
+        _w("The SAM_EXR files carry the LTX matte as A (SAM's per-object "
+           "channels stay with Multi-layer) plus a named `ltx` layer, so "
+           "comp can choose. AI-Removal and the SAM MOV use SAM's masks "
+           "and need SAM on.\n", "body_indent")
         _end()
 
         _end = _sec("Drawing segmentation input")
@@ -26124,6 +26189,100 @@ def cs_convert(a, src, dst):
         self.sam_preview_btn.configure(state="disabled")
         self.sam_preview_btn.pack(fill="x", pady=(6, 0))
 
+        # ── Matte source: SAM 3 and / or LTX Alpha ──────────────────────
+        cm = self._card(lf, "Matte source")
+        _tiles = tk.Frame(cm, bg=S); _tiles.pack(fill="x")
+        self.sam_src_sam_var = tk.BooleanVar(value=True)
+        self.sam_src_ltx_var = tk.BooleanVar(value=False)
+        self._sam_src_tiles = {}
+
+        def _src_tile(key, var, title, sub):
+            t = tk.Frame(_tiles, bg="#161616", highlightthickness=1,
+                         highlightbackground=BD, cursor="hand2")
+            t.pack(side="left", fill="x", expand=True, padx=(0, 4), pady=2)
+            a = tk.Label(t, text=title, font=FSM, bg="#161616", fg=W)
+            a.pack(anchor="w", padx=8, pady=(5, 0))
+            b = tk.Label(t, text=sub, font=FSM, bg="#161616", fg="#777777")
+            b.pack(anchor="w", padx=8, pady=(0, 5))
+            self._sam_src_tiles[key] = (t, a, b)
+
+            def _tog(_e=None, k=key, v=var):
+                v.set(not v.get())
+            for w_ in (t, a, b):
+                w_.bind("<Button-1>", _tog)
+            var.trace_add("write", lambda *_: self._sam_src_changed())
+        _src_tile("sam", self.sam_src_sam_var, "SAM 3",
+                  "tracker: prompts, clicks, boxes")
+        _src_tile("ltx", self.sam_src_ltx_var, "LTX Alpha",
+                  "hair, fur, smoke, glass \u00b7 fal")
+        _src_i = tk.Label(cm, text="\u24d8", font=FSM, bg=S, fg="#555555",
+                          cursor="hand2")
+        _src_i.pack(anchor="e")
+        _info_popup(
+            "SAM 3 only \u2014 what you have today.\n\n"
+            "LTX Alpha only \u2014 no prompts needed: the clip goes to\n"
+            "the LTX-2.5 alpha model on fal and a matte comes back,\n"
+            "with hair, fur, smoke, sheer fabric and glass. It picks\n"
+            "the foreground itself, so single-subject shots.\n\n"
+            "Both \u2014 SAM decides WHAT, LTX does the edges: the LTX\n"
+            "matte is limited to a grown, softened SAM mask\n"
+            "(Limit to SAM object).\n\n"
+            "LTX runs on a fal app you deploy once:\n"
+            "fal_ltx_alpha/DEPLOY.md, then the app id on Setup.")(_src_i)
+
+        self.sam_ltx_opts = tk.Frame(cm, bg=S)
+        _o = self.sam_ltx_opts
+        self.sam_ltx_chunk_var = self._combo(_o, "Chunk", list(self.LTX_CHUNKS),
+            default="145", tip="Frames per fal call \u2014 145 is the model's\n"
+            "limit (~6 s at 24 fps). Longer clips are split\n"
+            "and the mattes crossfaded at the seams.", width=8)
+        self.sam_ltx_overlap_var = self._combo(_o, "Overlap",
+            list(self.LTX_OVERLAPS), default="16",
+            tip="Frames shared by neighbouring chunks, blended\n"
+                "across so the seam does not pop.", width=8)
+        self.sam_ltx_size_var = self._combo(_o, "Max size", list(self.LTX_SIZES),
+            default=self.LTX_SIZES[0],
+            tip="The clip is fitted inside this (never enlarged),\n"
+                "padded to multiples of 32, and the matte resized\n"
+                "back to the plate. 1920\u00d71088 is the model's limit;\n"
+                "smaller is faster and cheaper.", width=12)
+        _sr = tk.Frame(_o, bg=S); _sr.pack(fill="x", pady=2)
+        tk.Label(_sr, text="Seed", font=FSM, bg=S, fg=G, width=12,
+                 anchor="w").pack(side="left")
+        self.sam_ltx_seed_var = tk.StringVar(value="42")
+        tk.Entry(_sr, textvariable=self.sam_ltx_seed_var, width=8, bg="#0D0D0D",
+                 fg=W, font=FSM, bd=0, insertbackground=W).pack(side="left",
+                                                                padx=4)
+        _lr = tk.Frame(_o, bg=S); _lr.pack(fill="x", pady=2)
+        tk.Label(_lr, text="Limit to SAM", font=FSM, bg=S, fg=G, width=12,
+                 anchor="w").pack(side="left")
+        self.sam_ltx_limit_var = tk.IntVar(value=0)
+        tk.Scale(_lr, from_=0, to=200, orient="horizontal",
+                 variable=self.sam_ltx_limit_var, bg=S, fg=W, troughcolor="#222",
+                 highlightthickness=0, bd=0, showvalue=True, length=150,
+                 font=FSM).pack(side="left", padx=4)
+        tk.Label(_lr, text="px grow (0 = off)", font=FSM, bg=S,
+                 fg="#555555").pack(side="left")
+        self.sam_ltx_note = tk.Label(_o, text="", font=FSM, bg=S, fg="#777777",
+                                     anchor="w", wraplength=330, justify="left")
+        self.sam_ltx_note.pack(fill="x", pady=(2, 0))
+        self.ltx_app_lbl = tk.Label(_o, text="", font=FSM, bg=S, fg="#777777",
+                                    anchor="w", wraplength=330, justify="left")
+        self.ltx_app_lbl.pack(fill="x")
+        self.sam_ltx_preview_btn = self._mkbtn(
+            _o, "Preview LTX Alpha on this frame", self._sam_preview_ltx,
+            bg="#2A0A0A", fg="#CC4444")
+        tk.Label.configure(self.sam_ltx_preview_btn._lbl, width=0)
+        self.sam_ltx_preview_btn.pack(fill="x", pady=(6, 0))
+        self.sam_fal_panel = tk.Label(_o, text="", font=FM, bg="#0D0D0D", fg=G,
+                                      anchor="w", justify="left", padx=10,
+                                      pady=6, wraplength=330)
+        self._sam_fal_state = {}
+        for _v in (self.sam_ltx_chunk_var, self.sam_ltx_overlap_var,
+                   self.sam_ltx_size_var):
+            _v.trace_add("write", lambda *_: self._ltx_update_note())
+        self._sam_src_changed()
+
         c3 = self._card(lf, "Output")
 
         # Sliders moved into Prompts card (per-object)
@@ -26798,6 +26957,62 @@ def cs_convert(a, src, dst):
             pass
 
     # ── SAM HANDLERS ─────────────────────────────────────────────────
+    def _sam_src_changed(self):
+        """Paint the matte-source tiles and show the LTX options when
+        LTX is on; make sure at least one source stays ticked."""
+        sv, lv = self.__dict__.get("sam_src_sam_var"), self.__dict__.get("sam_src_ltx_var")
+        if sv is None or lv is None:
+            return
+        try:
+            if not sv.get() and not lv.get():
+                sv.set(True)
+                return
+        except Exception:
+            return
+        for key, var in (("sam", sv), ("ltx", lv)):
+            t = self._sam_src_tiles.get(key)
+            if not t:
+                continue
+            on = bool(var.get())
+            bg = "#2A0A0A" if on else "#161616"
+            for w_ in t:
+                try:
+                    w_.configure(bg=bg)
+                except Exception:
+                    pass
+            try:
+                t[1].configure(fg="#FF6666" if on else W)
+            except Exception:
+                pass
+        opts = self.__dict__.get("sam_ltx_opts")
+        if opts is not None:
+            if lv.get():
+                opts.pack(fill="x", pady=(4, 0))
+                self.sam_fal_panel.pack(fill="x", pady=(6, 0))
+                self._ltx_refresh_state()
+                self._ltx_update_note()
+            else:
+                opts.pack_forget()
+        try:
+            self.sam_btn.configure(text=self._sam_run_label())
+            # LTX needs no prompt: a loaded folder is enough to run
+            if lv.get() and getattr(self, "sam_folder", None):
+                self.sam_btn.configure(state="normal")
+                self.sam_ltx_preview_btn.configure(state="normal")
+        except Exception:
+            pass
+
+    def _sam_run_label(self):
+        lv = self.__dict__.get("sam_src_ltx_var")
+        sv = self.__dict__.get("sam_src_sam_var")
+        ltx = bool(lv is not None and lv.get())
+        sam = bool(sv is None or sv.get())
+        if ltx and sam:
+            return "RUN SAM 3 + LTX ALPHA"
+        if ltx:
+            return "RUN LTX ALPHA ON SEQUENCE"
+        return "RUN SAM 3 ON SEQUENCE"
+
     def _sam_set_mode(self, mode):
         self.sam_mode = mode
         for btn in (self.sam_inc_btn, self.sam_exc_btn, self.sam_box_btn):
@@ -26875,6 +27090,10 @@ def cs_convert(a, src, dst):
         self.log(self.sam_log_txt,
             "Place at least one green Include point on the canvas.", "dim")
         self._sam_load_frame(os.path.join(p, frames[0]))
+        try:
+            self._sam_src_changed()
+        except Exception:
+            pass
 
     def _sam_load_frame(self, path):
         try:
@@ -28458,9 +28677,19 @@ if __name__ == '__main__':
         self.sam_btn.configure(state=state)
 
     def _sam_cancel_run(self):
-        """Ask for confirmation then terminate the running SAM sequence."""
+        """Ask for confirmation then terminate the running SAM sequence
+        (or the LTX Alpha job out on fal: its chunks stop after the one
+        in flight)."""
         proc = getattr(self, "_sam_proc", None)
         if proc is None or proc.poll() is not None:
+            lv = self.__dict__.get("sam_src_ltx_var")
+            if lv is not None and lv.get() and not self._ip_vace_cancel:
+                from tkinter import messagebox as _mb
+                if _mb.askyesno("Cancel Render",
+                                "Cancel the LTX Alpha job?\n\nChunks already "
+                                "returned stay in the cache.", icon="warning"):
+                    self._ip_vace_cancel = True
+                    self.log(self.sam_log_txt, "Cancelling LTX Alpha\u2026", "err")
             return  # already finished
 
         from tkinter import messagebox as _mb
@@ -28495,7 +28724,17 @@ if __name__ == '__main__':
         if not self.sam_folder: return
         text_prompt = self.sam_text_var.get().strip()
         has_spatial  = bool(self.sam_points or self.sam_bbox)
-        if not text_prompt and not has_spatial:
+        _lv, _sv = self.__dict__.get("sam_src_ltx_var"), self.__dict__.get("sam_src_sam_var")
+        use_ltx = bool(_lv is not None and _lv.get())
+        use_sam = bool(_sv is None or _sv.get())
+        if use_ltx and not self._ltx_app_id():
+            messagebox.showwarning(
+                "LTX Alpha not deployed",
+                "LTX Alpha runs on a fal app you deploy once.\n\n"
+                "See fal_ltx_alpha/DEPLOY.md, then paste the app id on the "
+                "Setup tab (fal.ai card).")
+            return
+        if use_sam and not text_prompt and not has_spatial:
             messagebox.showwarning(
                 "No Prompt",
                 "Add at least one prompt before running:\n\n"
@@ -28509,7 +28748,9 @@ if __name__ == '__main__':
 
         removal = getattr(self, "sam_removal_var",
             type("V",(),{"get":lambda s:False})()).get()
-        run_lbl = "RUN SAM 3 — AI REMOVAL" if removal else "RUN SAM 3 ON SEQUENCE"
+        run_lbl = "RUN SAM 3 — AI REMOVAL" if removal else self._sam_run_label()
+        self._ip_vace_cancel = False
+        _ltx_st = self._ltx_settings() if use_ltx else None
         self.sam_btn.configure(
             text="CANCEL RENDER", state="normal",
             bg="#2A0A0A", fg="#FF4444",
@@ -28552,7 +28793,7 @@ if __name__ == '__main__':
             except Exception: pass
             script = self._sam_runner_path()
 
-            if not os.path.exists(script):
+            if use_sam and not os.path.exists(script):
                 self.log(self.sam_log_txt,
                     "SAM2 models not found — run SAM Install in Setup tab.", "err")
                 self.setstatus("Error", RB)
@@ -28633,6 +28874,11 @@ if __name__ == '__main__':
             if con: cmd_parts += ["--edge_contrast",   str(round(con.get(),2))]
             if dro: cmd_parts += ["--dropout_threshold", str(round(dro.get(),3))]
             if two: cmd_parts += ["--stabilise_2pass",  "1" if two.get() else "0"]
+            if not use_sam:
+                # LTX only: no tracker pass; the matte comes from fal below
+                cmd_parts = [sys.executable, "-c",
+                             "print('LTX Alpha only: no SAM pass')"]
+                _n_passes = 1
             import shlex
             cmd_str = " ".join(shlex.quote(c) for c in cmd_parts)
             self.log(self.sam_log_txt, "$ " + cmd_str[:120] + "…", "dim")
@@ -28764,11 +29010,45 @@ if __name__ == '__main__':
                             f"  ✗ SAM failed for {_obj['name']}", "err")
                     _pass_num += 1
 
+                # ── LTX Alpha: the matte from fal, chunked and crossfaded,
+                # limited to the grown SAM mask when both are on ──
+                ltx_dir = None
+                if use_ltx:
+                    ltx_dir = os.path.join(folder, "_ltx_alpha_tmp")
+                    if os.path.exists(ltx_dir):
+                        shutil.rmtree(ltx_dir, ignore_errors=True)
+                    try:
+                        self._ltx_matte_all(
+                            folder, frames, _ltx_st, ltx_dir,
+                            on_log=lambda m: self.log(self.sam_log_txt,
+                                                      "LTX: " + m, "dim"),
+                            on_frac=lambda f: self.after(0, lambda f=f:
+                                self.progress(f, f"LTX Alpha  {f * 100:.0f}%")),
+                            cancel=lambda: self._ip_vace_cancel,
+                            limit_dir=out if (use_sam and _ltx_st["limit"] > 0)
+                            else None)
+                        rgba_files = sorted(f for f in os.listdir(ltx_dir)
+                                            if f.endswith(".png"))
+                        self.log(self.sam_log_txt,
+                                 f"LTX Alpha: {len(rgba_files)} mattes.", "ok")
+                    except Exception as ex:
+                        self.log(self.sam_log_txt,
+                                 f"LTX Alpha failed: {ex}", "err")
+                        if not use_sam:
+                            self.after(0, lambda: self.setstatus("Error", RB))
+                            self.after(0, lambda l=run_lbl: self.sam_btn.configure(
+                                text=l, bg="#2A0A0A", fg="#CC4444",
+                                command=self._sam_run, state="normal"))
+                            shutil.rmtree(ltx_dir, ignore_errors=True)
+                            return
+                        ltx_dir = None
                 # EXR output — always write; multi adds per-object channels
                 exr_ok = self._sam_write_multichannel_exr(
                     folder, frames, out, objects, _ao, subfolder,
-                    obj_mask_dirs=obj_mask_dirs,
-                    multi=do_exr)
+                    obj_mask_dirs=obj_mask_dirs if use_sam else {},
+                    multi=do_exr, ltx_dir=ltx_dir)
+                if ltx_dir and exr_ok:
+                    shutil.rmtree(ltx_dir, ignore_errors=True)
 
                 # Clean up intermediate PNG masks — EXR is the deliverable
                 if exr_ok:
@@ -28780,7 +29060,7 @@ if __name__ == '__main__':
                             _sh2.rmtree(_d, ignore_errors=True)
                 self.after(0, lambda n=len(rgba_files), np=_n_passes:
                     self.progress(1.0, f"EXR done — {n} frames × {np} obj{'s' if np>1 else ''}"))
-                if removal and rgba_files:
+                if removal and rgba_files and use_sam:
                     self._sam_apply_removal_multiply(out)
                     out_mov = getattr(self,"sam_out_mov_var",
                         type("V",(),{"get":lambda s:False})()).get()
@@ -29206,10 +29486,458 @@ if __name__ == '__main__':
                 _PI3.fromarray(out_arr).save(mpath)
             except Exception: pass
 
+    # ══ LTX Alpha — the alpha-matte IC-LoRA for LTX-2.5, on fal ═══════
+    # A second matte source beside the SAM tracker. It wants no prompt
+    # and no clicks: the clip goes to a fal Serverless app the user
+    # deployed once (fal_ltx_alpha/DEPLOY.md) and a grey matte video
+    # comes back. The model's limits are hard: 145 frames and 1920x1088
+    # per call, sizes on multiples of 32, frame counts on the 8k+1 grid,
+    # and no subject control -- so the clip is chunked with an overlap
+    # and the mattes crossfaded at the seams, and the result can be
+    # limited to a grown SAM mask so SAM picks WHAT and LTX does the
+    # hair. Every chunk is cached by clip + settings.
+    LTX_CHUNKS = ("97", "121", "145")
+    LTX_OVERLAPS = ("8", "16", "24")
+    LTX_SIZES = ("1920 x 1088", "1280 x 736", "960 x 544")
+    LTX_APP_FILE = os.path.expanduser("~/.ai_toolbox/ltx_app_id")
+    LTX_CACHE_DIR = os.path.expanduser("~/.ai_toolbox/ltx_cache")
+    sam_src_sam_var = None
+    sam_src_ltx_var = None
+    ltx_app_var = None
+
+    @classmethod
+    def _ltx_app_id(cls):
+        """The deployed app id (<user>/ltx-alpha), or ''."""
+        try:
+            with open(cls.LTX_APP_FILE, encoding="utf-8") as fh:
+                return fh.read().strip()
+        except Exception:
+            return (os.environ.get("LTX_ALPHA_APP") or "").strip()
+
+    def _ltx_save_app_id(self):
+        v = self.__dict__.get("ltx_app_var")
+        app_id = (v.get() if v is not None else "").strip().strip("/")
+        try:
+            os.makedirs(os.path.dirname(self.LTX_APP_FILE), exist_ok=True)
+            with open(self.LTX_APP_FILE, "w", encoding="utf-8") as fh:
+                fh.write(app_id)
+        except Exception:
+            pass
+        self._ltx_refresh_state()
+
+    def _ltx_refresh_state(self):
+        lbl = self.__dict__.get("ltx_app_lbl")
+        app_id = self._ltx_app_id()
+        if lbl is not None:
+            try:
+                lbl.configure(
+                    text=(f"LTX Alpha: {app_id}" if app_id
+                          else "LTX Alpha: not deployed — see "
+                               "fal_ltx_alpha/DEPLOY.md"),
+                    fg=GR if app_id else "#777777")
+            except Exception:
+                pass
+        note = self.__dict__.get("sam_ltx_note")
+        if note is not None:
+            try:
+                self._ltx_update_note()
+            except Exception:
+                pass
+
+    @staticmethod
+    def _ltx_grid_frames(n):
+        """The largest 8k+1 <= n (at least 9)."""
+        n = int(n)
+        return max(9, ((n - 1) // 8) * 8 + 1)
+
+    @staticmethod
+    def _ltx_grid_up(n):
+        """The smallest 8k+1 >= n (at least 9): a short last chunk is
+        padded up to it by repeating its final frame, so the model
+        always gets a count it accepts and every real frame is seen."""
+        n = max(1, int(n))
+        return max(9, ((n - 2) // 8 + 1) * 8 + 1)
+
+    @classmethod
+    def _ltx_plan(cls, n_frames, chunk=145, overlap=16):
+        """[(start, end)] half-open chunks covering n_frames, each on the
+        8k+1 grid and no longer than `chunk`, overlapping by `overlap`
+        frames (the crossfade). One chunk when the clip fits."""
+        n = int(n_frames)
+        chunk = cls._ltx_grid_frames(min(int(chunk), 145))
+        overlap = max(0, min(int(overlap), chunk // 2))
+        if n <= chunk:
+            return [(0, n)]
+        out, s = [], 0
+        while True:
+            e = min(n, s + chunk)
+            if e == n:
+                # the last chunk is sized back from the end so that it
+                # is on the grid and still overlaps the one before
+                s2 = max(0, n - chunk)
+                if out and s2 >= out[-1][1]:
+                    s2 = max(0, out[-1][1] - overlap)
+                out.append((s2, n))
+                break
+            out.append((s, e))
+            s = e - overlap
+        return out
+
+    @staticmethod
+    def _ltx_send_size(w, h, max_w=1920, max_h=1088):
+        """The size the clip is sent at: fitted inside max_w x max_h,
+        never enlarged, each side a multiple of 32."""
+        w, h = int(w), int(h)
+        s = min(1.0, max_w / max(w, 1), max_h / max(h, 1))
+        sw = max(32, int(w * s) // 32 * 32)
+        sh = max(32, int(h * s) // 32 * 32)
+        return sw, sh
+
+    @staticmethod
+    def _ltx_crossfade(a_prev, a_next, overlap):
+        """Blend two chunks' mattes over their `overlap` frames: a linear
+        ramp from the earlier chunk to the later one. a_prev / a_next
+        are lists of float arrays; returns the merged list."""
+        import numpy as np
+        if overlap <= 0 or not a_prev:
+            return list(a_prev) + list(a_next)
+        k = min(overlap, len(a_prev), len(a_next))
+        head = list(a_prev[:len(a_prev) - k])
+        tail = list(a_next[k:])
+        mid = []
+        for i in range(k):
+            t = (i + 1) / (k + 1)
+            mid.append((a_prev[len(a_prev) - k + i] * (1.0 - t)
+                        + a_next[i] * t).astype(np.float32))
+        return head + mid + tail
+
+    def _ltx_settings(self):
+        g = lambda n, d: (self.__dict__.get(n).get()
+                          if self.__dict__.get(n) is not None else d)
+        chunk = int(str(g("sam_ltx_chunk_var", "145")).split()[0])
+        overlap = int(str(g("sam_ltx_overlap_var", "16")).split()[0])
+        size = str(g("sam_ltx_size_var", self.LTX_SIZES[0]))
+        mw, mh = [int(x) for x in size.replace("x", " ").split()[:2]]
+        seed = int(float(g("sam_ltx_seed_var", 42) or 42))
+        limit = int(float(g("sam_ltx_limit_var", 0) or 0))
+        return dict(chunk=chunk, overlap=overlap, max_w=mw, max_h=mh,
+                    seed=seed, limit=limit)
+
+    def _ltx_update_note(self):
+        note = self.__dict__.get("sam_ltx_note")
+        if note is None:
+            return
+        frames = getattr(self, "sam_frames", None) or []
+        if not frames or not self.sam_folder:
+            note.configure(text="")
+            return
+        st = self._ltx_settings()
+        plan = self._ltx_plan(len(frames), st["chunk"], st["overlap"])
+        try:
+            from PIL import Image
+            p = os.path.join(self.sam_folder, frames[0])
+            if os.path.splitext(p)[1].lower() in self.FF_LINEAR_EXTS:
+                h, w = self._ups_raw_float(p).shape[:2]
+            else:
+                w, h = Image.open(p).size
+            sw, sh = self._ltx_send_size(w, h, st["max_w"], st["max_h"])
+            size = f"sent at {sw}×{sh}"
+        except Exception:
+            size = ""
+        n = len(plan)
+        note.configure(
+            text=f"{len(frames)} frames → {n} chunk{'s' if n != 1 else ''}"
+                 + (f", {n - 1} seam{'s' if n > 2 else ''}" if n > 1 else "")
+                 + (f"  ·  {size}" if size else ""))
+
+    def _ltx_cache_key(self, folder, frames, i0, i1, sw, sh, seed):
+        """One hash per (clip span, size, seed): the files' names, sizes
+        and mtimes, so an edited plate is a new key."""
+        import hashlib
+        h = hashlib.sha1()
+        h.update(os.path.abspath(folder).encode())
+        for f in frames[i0:i1]:
+            p = os.path.join(folder, f)
+            try:
+                st = os.stat(p)
+                h.update(f"{f}|{st.st_size}|{int(st.st_mtime)}".encode())
+            except Exception:
+                h.update(f.encode())
+        h.update(f"|{sw}x{sh}|{seed}|{i1 - i0}|in={self._sam_in_mode}".encode())
+        return h.hexdigest()[:20]
+
+    def _ltx_cached(self, key, n):
+        d = os.path.join(self.LTX_CACHE_DIR, key)
+        if not os.path.isdir(d):
+            return None
+        fs = sorted(f for f in os.listdir(d) if f.endswith(".png"))
+        return d if len(fs) >= n else None
+
+    def _ltx_encode_chunk(self, folder, frames, i0, i1, sw, sh, dst, fps=24.0):
+        """The span as an H.264 movie at the send size -- the display
+        picture SAM sees (Input colour applied), padded, not cropped."""
+        import cv2
+        import numpy as np
+        import tempfile, shutil as _sh
+        stage = tempfile.mkdtemp(prefix="ltx_in_")
+        try:
+            n_send = self._ltx_grid_up(i1 - i0)
+            last = None
+            for k in range(n_send):
+                f = frames[i0 + min(k, i1 - i0 - 1)]
+                if k < i1 - i0 or last is None:
+                    rgb = self._sam_display_rgb8(os.path.join(folder, f))
+                    last = cv2.resize(np.asarray(rgb), (sw, sh),
+                                      interpolation=cv2.INTER_AREA)
+                cv2.imwrite(os.path.join(stage, f"{k:05d}.png"),
+                            cv2.cvtColor(last, cv2.COLOR_RGB2BGR))
+            r = subprocess.run(
+                ["ffmpeg", "-v", "error", "-y", "-framerate", f"{fps:g}",
+                 "-i", os.path.join(stage, "%05d.png"), "-c:v", "libx264",
+                 "-crf", "10", "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+                 dst], capture_output=True, text=True)
+            if r.returncode != 0 or not os.path.exists(dst):
+                raise RuntimeError((r.stderr or "").strip()[-200:]
+                                   or "chunk encode failed")
+        finally:
+            _sh.rmtree(stage, ignore_errors=True)
+        return dst
+
+    def _ltx_decode_alpha(self, mov, n, out_w, out_h, key):
+        """The matte movie as n grey PNGs at the plate size, into the
+        cache under `key`. Returns the cache dir."""
+        import cv2
+        import tempfile, shutil as _sh
+        d = os.path.join(self.LTX_CACHE_DIR, key)
+        os.makedirs(d, exist_ok=True)
+        stage = tempfile.mkdtemp(prefix="ltx_out_")
+        try:
+            r = subprocess.run(
+                ["ffmpeg", "-v", "error", "-y", "-i", mov, "-pix_fmt", "gray",
+                 os.path.join(stage, "%05d.png")], capture_output=True,
+                text=True)
+            fs = sorted(f for f in os.listdir(stage) if f.endswith(".png"))
+            if r.returncode != 0 or not fs:
+                raise RuntimeError((r.stderr or "").strip()[-200:]
+                                   or "matte decode failed")
+            for k in range(n):
+                src = os.path.join(stage, fs[min(k, len(fs) - 1)])
+                a = cv2.imread(src, cv2.IMREAD_GRAYSCALE)
+                a = cv2.resize(a, (out_w, out_h), interpolation=cv2.INTER_LINEAR)
+                cv2.imwrite(os.path.join(d, f"{k:05d}.png"), a)
+        finally:
+            _sh.rmtree(stage, ignore_errors=True)
+        return d
+
+    def _ltx_chunk(self, folder, frames, i0, i1, st, on_log=None, panel=None,
+                   plate_size=None):
+        """One chunk's matte, from the cache or from fal. Returns the
+        cache dir holding (i1 - i0) grey PNGs at plate size."""
+        import time as _time
+        from PIL import Image
+        if plate_size is None:
+            p = os.path.join(folder, frames[i0])
+            if os.path.splitext(p)[1].lower() in self.FF_LINEAR_EXTS:
+                h, w = self._ups_raw_float(p).shape[:2]
+            else:
+                w, h = Image.open(p).size
+            plate_size = (w, h)
+        pw, ph = plate_size
+        sw, sh = self._ltx_send_size(pw, ph, st["max_w"], st["max_h"])
+        n = i1 - i0
+        key = self._ltx_cache_key(folder, frames, i0, i1, sw, sh, st["seed"])
+        hit = self._ltx_cached(key, n)
+        if hit:
+            if on_log:
+                on_log(f"frames {i0 + 1}–{i1}: cached")
+            return hit
+        app_id = self._ltx_app_id()
+        if not app_id:
+            raise RuntimeError("LTX Alpha is not deployed: paste the app id "
+                               "on the Setup tab (fal_ltx_alpha/DEPLOY.md).")
+        endpoint = app_id.rstrip("/") + "/alpha"
+        mov = os.path.join(self._vace_work_dir(), f"ltx_in_{key}.mp4")
+        fps = 24.0
+        self._ltx_encode_chunk(folder, frames, i0, i1, sw, sh, mov, fps)
+        p_lbl, p_attr = panel or (self.__dict__.get("sam_fal_panel"),
+                                  "_sam_fal_state")
+        try:
+            est, learned = self._vace_estimate(n, endpoint)
+        except Exception:
+            est, learned = 0.0, False
+        if p_lbl is not None:
+            self.after(0, lambda: self._fal_panel_begin(
+                p_lbl, p_attr, endpoint, n, est, learned))
+        t0 = _time.time()
+        try:
+            out = self._fal_video_submit(
+                endpoint, mov,
+                dict(num_frames=self._ltx_grid_up(n), width=sw, height=sh,
+                     frame_rate=int(round(fps)), seed=st["seed"]),
+                on_log=on_log, label="LTX",
+                on_panel=(lambda **kw: self._fal_panel_note(p_attr, **kw))
+                if p_lbl is not None else None)
+        except Exception:
+            if p_lbl is not None:
+                self.after(0, lambda: self._fal_panel_end(
+                    p_lbl, p_attr, "LTX Alpha: failed", ok=False))
+            raise
+        try:
+            self._vace_record_render(n, _time.time() - t0, endpoint)
+        except Exception:
+            pass
+        d = self._ltx_decode_alpha(out, n, pw, ph, key)
+        if p_lbl is not None:
+            self.after(0, lambda: self._fal_panel_end(
+                p_lbl, p_attr, f"LTX Alpha: {n} frames in "
+                f"{_time.time() - t0:.0f}s", ok=True))
+        try:
+            os.unlink(mov)
+        except Exception:
+            pass
+        return d
+
+    def _ltx_matte_all(self, folder, frames, st, out_dir, on_log=None,
+                       on_frac=None, cancel=lambda: False, limit_dir=None):
+        """Every frame's matte into out_dir as RGBA PNGs (alpha = matte,
+        the layout the SAM EXR merge reads): chunk by chunk, crossfaded
+        at the seams, optionally limited to the grown SAM mask in
+        limit_dir (st['limit'] px)."""
+        import cv2
+        import numpy as np
+        os.makedirs(out_dir, exist_ok=True)
+        plan = self._ltx_plan(len(frames), st["chunk"], st["overlap"])
+        if on_log:
+            on_log(f"LTX Alpha: {len(frames)} frames in {len(plan)} chunk(s)")
+        merged = []        # float mattes, in frame order
+        prev_end = 0
+        for ci, (i0, i1) in enumerate(plan):
+            if cancel():
+                raise RuntimeError("Cancelled.")
+            d = self._ltx_chunk(folder, frames, i0, i1, st, on_log=on_log)
+            mats = [cv2.imread(os.path.join(d, f"{k:05d}.png"),
+                               cv2.IMREAD_GRAYSCALE).astype(np.float32) / 255.0
+                    for k in range(i1 - i0)]
+            if merged:
+                ov = prev_end - i0
+                merged = self._ltx_crossfade(merged, mats, ov)
+            else:
+                merged = mats
+            prev_end = i1
+            if on_frac:
+                on_frac((ci + 1) / len(plan))
+        lim = st.get("limit", 0)
+        for k, f in enumerate(frames):
+            a = merged[k] if k < len(merged) else merged[-1]
+            if lim > 0 and limit_dir:
+                m = self._ltx_limit_mask(limit_dir, k, a.shape, lim)
+                if m is not None:
+                    a = a * m
+            rgb = self._sam_display_rgb8(os.path.join(folder, f))
+            if rgb.shape[:2] != a.shape:
+                rgb = cv2.resize(rgb, (a.shape[1], a.shape[0]))
+            a8 = np.clip(a * 255.0 + 0.5, 0, 255).astype(np.uint8)
+            cv2.imwrite(os.path.join(out_dir, f"{k:05d}.png"),
+                        cv2.cvtColor(np.dstack([rgb, a8]), cv2.COLOR_RGBA2BGRA))
+        return out_dir
+
+    @staticmethod
+    def _ltx_limit_mask(limit_dir, k, shape, px):
+        """SAM's mask for frame k, grown by px and softened, as 0..1 --
+        the region LTX's matte may live in. None when there is none."""
+        import cv2
+        import numpy as np
+        try:
+            fs = sorted(f for f in os.listdir(limit_dir) if f.endswith(".png"))
+            if not fs:
+                return None
+            img = cv2.imread(os.path.join(limit_dir, fs[min(k, len(fs) - 1)]),
+                             cv2.IMREAD_UNCHANGED)
+            if img is None:
+                return None
+            a = img[:, :, 3] if img.ndim == 3 and img.shape[2] == 4 else img
+            if a.ndim == 3:
+                a = a[:, :, 0]
+            if a.shape != tuple(shape):
+                a = cv2.resize(a, (shape[1], shape[0]))
+            ks = int(px) * 2 + 1
+            kern = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ks, ks))
+            grown = cv2.dilate((a > 127).astype(np.uint8) * 255, kern)
+            soft = cv2.GaussianBlur(grown.astype(np.float32) / 255.0,
+                                    (0, 0), max(1.0, px / 2.0))
+            return np.clip(soft, 0.0, 1.0)
+        except Exception:
+            return None
+
+    def _sam_preview_ltx(self):
+        """One chunk around the frame on screen, shown as the keyed
+        picture in the wipe viewer -- judge the hair before paying for
+        the shot."""
+        if not self.sam_folder or not getattr(self, "sam_frames", None):
+            return
+        import threading
+        st = self._ltx_settings()
+        n = len(self.sam_frames)
+        cur = max(0, self.sam_frame_cb.current())
+        span = self._ltx_grid_frames(min(st["chunk"], n))
+        i0 = max(0, min(cur - span // 2, n - span))
+        i1 = i0 + span
+        self.log(self.sam_log_txt,
+                 f"LTX Alpha preview: frames {i0 + 1}–{i1} "
+                 f"(frame {cur + 1} on screen)", "hi")
+        self._ip_vace_cancel = False
+
+        def go():
+            try:
+                d = self._ltx_chunk(
+                    self.sam_folder, self.sam_frames, i0, i1, st,
+                    on_log=lambda m: self.after(0, lambda m=m: self.log(
+                        self.sam_log_txt, "LTX: " + m, "dim")))
+                self.after(0, lambda: self._sam_show_ltx_alpha(d, cur - i0))
+            except Exception as ex:
+                self.after(0, lambda e=str(ex): self.log(
+                    self.sam_log_txt, f"LTX Alpha preview failed: {e}", "err"))
+        threading.Thread(target=go, daemon=True).start()
+
+    def _sam_show_ltx_alpha(self, d, k):
+        """The LTX matte for frame k of cache dir d, keyed over the chosen
+        Colour in the wipe viewer."""
+        import cv2
+        import numpy as np
+        from PIL import Image as _PIL
+        try:
+            a = cv2.imread(os.path.join(d, f"{k:05d}.png"), cv2.IMREAD_GRAYSCALE)
+            path = os.path.join(self.sam_folder, self.sam_frames[
+                max(0, self.sam_frame_cb.current())])
+            rgb = np.asarray(self._sam_display_rgb8(path))
+            if a.shape != rgb.shape[:2]:
+                a = cv2.resize(a, (rgb.shape[1], rgb.shape[0]))
+            af = a.astype(np.float32)[:, :, None] / 255.0
+            rf = rgb.astype(np.float32)
+            h2, w2 = rf.shape[:2]
+            sz = max(8, w2 // 48)
+            bg = np.zeros((h2, w2, 3), np.float32)
+            for cy in range(0, h2, sz):
+                for cx in range(0, w2, sz):
+                    bg[cy:cy + sz, cx:cx + sz] = (
+                        200.0 if (cx // sz + cy // sz) % 2 == 0 else 100.0)
+            comp = rf * af + bg * (1 - af)
+            self._wipe_orig_base = _PIL.fromarray(rgb, "RGB")
+            self._wipe_mask_base = _PIL.fromarray(
+                np.clip(comp, 0, 255).astype(np.uint8), "RGB")
+            self._wipe_orig_raw = None
+            self._wipe_mask_raw = None
+            self._sam_ltx_preview_dir = d
+            self._wipe_draw_on_main()
+            self.log(self.sam_log_txt, "LTX Alpha preview on screen — "
+                     "wipe to compare.", "ok")
+        except Exception as ex:
+            self.log(self.sam_log_txt, f"LTX Alpha preview: {ex}", "err")
+
     def _sam_write_multichannel_exr(self, folder, frames, sam_out,
                                      objects, active_obj, subfolder,
                                      obj_mask_dirs=None,
-                                     multi=False):
+                                     multi=False, ltx_dir=None):
         """Write one EXR per frame into SAM_EXR/.
         Always includes R,G,B,A (A = max of all object masks).
         multi=True adds one named channel per object on top.
@@ -29222,6 +29950,8 @@ if __name__ == '__main__':
 
         if obj_mask_dirs is None:
             obj_mask_dirs = {active_obj: sam_out}
+        if not obj_mask_dirs and not ltx_dir:
+            return False
 
         venv = os.path.expanduser("~/RifeApp/venv/bin/python3")
 
@@ -29269,6 +29999,7 @@ exr_dir   = cfg["exr_dir"]
 do_multi  = cfg["do_multi"]
 cs_in     = cfg.get("cs_in", "")
 cs_out    = cfg.get("cs_out", "")
+ltx_dir   = cfg.get("ltx_dir") or ""
 """ + self.CS_NUMPY_SRC + f"""
 
 from PIL import Image
@@ -29320,6 +30051,9 @@ for fi, fname in enumerate(frames):
         if a is not None:
             h, w = a.shape
         masks.append(a)
+    ltx_a = load_alpha(ltx_dir, fi) if ltx_dir else None
+    if ltx_a is not None:
+        h, w = ltx_a.shape
 
     if h == 0 or w == 0:
         print(f"  Frame {{fi+1}}: no mask data — skipping")
@@ -29330,11 +30064,14 @@ for fi, fname in enumerate(frames):
     elif cs_in and cs_out and cs_in != cs_out:
         rgb = cs_convert(rgb, cs_in, cs_out)
 
-    # Combined alpha = max across all objects
+    # Combined alpha = max across all objects -- or the LTX matte when
+    # there is one (SAM then only chose where it may live)
     combined_a = np.zeros((h, w), np.float32)
     for m in masks:
         if m is not None:
             combined_a = np.maximum(combined_a, m)
+    if ltx_a is not None:
+        combined_a = ltx_a
 
     safe_msks = [m if m is not None else np.zeros((h, w), np.float32)
                  for m in masks]
@@ -29342,7 +30079,8 @@ for fi, fname in enumerate(frames):
     base     = os.path.splitext(fname)[0]
     out_path = os.path.join(exr_dir, base + "_SAM.exr")
 
-    chan_names = ["R","G","B","A"] + (obj_names if do_multi else [])
+    chan_names = ["R","G","B","A"] + (obj_names if do_multi else []) \
+        + (["ltx"] if ltx_a is not None else [])
     hdr = OpenEXR.Header(w, h)
     hdr["channels"] = {{n: Imath.Channel(FT) for n in chan_names}}
     exr = OpenEXR.OutputFile(out_path, hdr)
@@ -29355,6 +30093,8 @@ for fi, fname in enumerate(frames):
     if do_multi:
         for name, m in zip(obj_names, safe_msks):
             data[name] = to_bytes(m)
+    if ltx_a is not None:
+        data["ltx"] = to_bytes(ltx_a)
     exr.writePixels(data)
     exr.close()
     print(f"Frame {{fi+1}}/{{len(frames)}}: {{base}}")
@@ -29379,6 +30119,7 @@ print("EXR write complete")
                 "do_multi":  multi,
                 "cs_in":     _cs_in,
                 "cs_out":    _cs_out,
+                "ltx_dir":   ltx_dir or "",
             }, _cf)
         if _cs_out:
             self._adw_write_colorspace(exr_dir, *self._cs_sidecar(_cs_out))
@@ -29763,6 +30504,21 @@ print("EXR write complete")
                      "with a colour and can write a ProRes 4444 MOV."
                  ), arrow="w"),
 
+            dict(tab="sam", widget="sam_ltx",
+                 title="LTX Alpha — hair, fur, smoke, glass",
+                 body=(
+                     "A second matte source: the LTX-2.5 alpha model,\n"
+                     "run on a fal app you deploy once (see\n"
+                     "fal_ltx_alpha/DEPLOY.md, then the app id on Setup).\n"
+                     "No prompts — the clip goes out, a matte with soft\n"
+                     "edges and partial transparency comes back.\n\n"
+                     "Tick both tiles and SAM decides WHAT, LTX does the\n"
+                     "edges (Limit to SAM grows SAM's mask by N px). Long\n"
+                     "clips are chunked to 145 frames and crossfaded at\n"
+                     "the seams; every chunk is cached. The EXR gets the\n"
+                     "matte as A plus an `ltx` layer."
+                 ), arrow="w"),
+
             dict(tab="setup", widget=None,
                  title="Where things go, and the robot",
                  body=(
@@ -29992,6 +30748,8 @@ print("EXR write complete")
             "usc_peak":        getattr(self, "usc_ai_mask_btn", None),
             "organic_canvas":  getattr(self, "organic_canvas", None),
             "sm_canvas":       getattr(self, "sm_canvas", None),
+            "sam_ltx":         (getattr(self, "_sam_src_tiles", {})
+                                .get("ltx", (None,))[0]),
             "ff_scan":         getattr(self, "ff_scan_btn", None),
             "curve_canvas":    getattr(self, "curve_canvas", None),
             "area_canvas":     getattr(self, "area_canvas", None),

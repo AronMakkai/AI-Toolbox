@@ -17,6 +17,7 @@ Studio Toolbox is a VFX processing suite featuring:
 - **Expansion Studio** — SDR-to-HDR tone mapping with AI upsampling
 - **Upscale Studio** — Video upscaling (SeedVR2, FlashVSR, ESRGAN)
 - **Detail Studio** — Texture at the input resolution: downscale, upscale back, keep only the invented detail
+- **LTX Alpha** — SAM 3 gains a second matte source: Lightricks' LTX-2.5 alpha IC-LoRA (hair, fur, smoke, glass) on a fal app you deploy once (`fal_ltx_alpha/DEPLOY.md`); chunked, crossfaded, cached, optionally limited to the SAM object
 - **Colourspaces** — Every module has the same Input colour / Output colour dropdowns (Auto / Same as input, Scene-linear Rec.709, Display sRGB, Display Rec.709, Display PQ / Rec.2020, Working ACEScg, Archive ACES2065-1) with a ⓘ explaining each
 - **Batch** — Tick *Batch: all shots in this folder* in Upscale, Detail, Expansion or MOV→EXR and Run applies the tab's settings to every shot under the picked folder, one version folder with a subfolder per shot
 - **Paint Studio** — Per-frame hand painting and smudging
