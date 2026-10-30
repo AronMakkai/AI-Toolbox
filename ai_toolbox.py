@@ -39462,5 +39462,19 @@ print("EXR write complete")
         threading.Thread(target=go, daemon=True).start()
 
 
+def _remember_python():
+    """Note which Python ran the app, so the macOS launcher can find it
+    next time without an activated conda env: the .app's launcher reads
+    ~/.ai_toolbox/python first."""
+    try:
+        d = os.path.expanduser("~/.ai_toolbox")
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "python"), "w", encoding="utf-8") as fh:
+            fh.write(sys.executable)
+    except Exception:
+        pass
+
+
 if __name__ == "__main__":
+    _remember_python()
     App().mainloop()
