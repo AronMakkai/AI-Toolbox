@@ -2855,6 +2855,15 @@ class TestLtxAlpha(unittest.TestCase):
         app.sam_src_ltx_var = V(False)
         self.assertEqual(app._sam_run_label(), "RUN SAM 3 ON SEQUENCE")
 
+    def test_the_switch_sits_above_and_hides_what_does_not_apply(self):
+        import inspect
+        src = inspect.getsource(App._tab_sam)
+        self.assertLess(src.index('self._card(lf, "Matte source")'),
+                        src.index("# \u2500\u2500 Prompts card with object tabs"))
+        body = inspect.getsource(App._sam_src_changed)
+        self.assertIn("po.pack_forget()", body)        # prompts go with SAM
+        self.assertIn("lr.pack_forget()", body)        # Limit to SAM too
+
     def test_the_run_and_the_writer_carry_the_matte(self):
         import inspect
         run = inspect.getsource(App._sam_run)

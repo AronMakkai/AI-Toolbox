@@ -36088,10 +36088,107 @@ def cs_convert(a, src, dst):
         self.sam_in_lbl.pack(anchor="w", pady=(2, 0))
         self.sam_in_var.trace_add("write", lambda *_: self._sam_in_changed())
 
+        # ── Matte source: SAM 3 and / or LTX Alpha ──────────────────────
+        cm = self._card(lf, "Matte source")
+        self._sam_src_card = cm.master
+        _tiles = tk.Frame(cm, bg=S); _tiles.pack(fill="x")
+        self.sam_src_sam_var = tk.BooleanVar(value=True)
+        self.sam_src_ltx_var = tk.BooleanVar(value=False)
+        self._sam_src_tiles = {}
+
+        def _src_tile(key, var, title, sub):
+            t = tk.Frame(_tiles, bg="#161616", highlightthickness=1,
+                         highlightbackground=BD, cursor="hand2")
+            t.pack(side="left", fill="x", expand=True, padx=(0, 4), pady=2)
+            a = tk.Label(t, text=title, font=FSM, bg="#161616", fg=W)
+            a.pack(anchor="w", padx=8, pady=(5, 0))
+            b = tk.Label(t, text=sub, font=FSM, bg="#161616", fg="#777777")
+            b.pack(anchor="w", padx=8, pady=(0, 5))
+            self._sam_src_tiles[key] = (t, a, b)
+
+            def _tog(_e=None, k=key, v=var):
+                v.set(not v.get())
+            for w_ in (t, a, b):
+                w_.bind("<Button-1>", _tog)
+            var.trace_add("write", lambda *_: self._sam_src_changed())
+        _src_tile("sam", self.sam_src_sam_var, "SAM 3",
+                  "tracker: prompts, clicks, boxes")
+        _src_tile("ltx", self.sam_src_ltx_var, "LTX Alpha",
+                  "hair, fur, smoke, glass \u00b7 fal")
+        _src_i = tk.Label(cm, text="\u24d8", font=FSM, bg=S, fg="#555555",
+                          cursor="hand2")
+        _src_i.pack(anchor="e")
+        self._tooltip(
+            "SAM 3 only \u2014 what you have today.\n\n"
+            "LTX Alpha only \u2014 no prompts needed: the clip goes to\n"
+            "the LTX-2.5 alpha model on fal and a matte comes back,\n"
+            "with hair, fur, smoke, sheer fabric and glass. It picks\n"
+            "the foreground itself, so single-subject shots.\n\n"
+            "Both \u2014 SAM decides WHAT, LTX does the edges: the LTX\n"
+            "matte is limited to a grown, softened SAM mask\n"
+            "(Limit to SAM object).\n\n"
+            "LTX runs on a fal app you deploy once:\n"
+            "fal_ltx_alpha/DEPLOY.md, then the app id on Setup.")(_src_i)
+
+        self.sam_ltx_opts = tk.Frame(cm, bg=S)
+        _o = self.sam_ltx_opts
+        self.sam_ltx_chunk_var = self._combo(_o, "Chunk", list(self.LTX_CHUNKS),
+            default="145", tip="Frames per fal call \u2014 145 is the model's\n"
+            "limit (~6 s at 24 fps). Longer clips are split\n"
+            "and the mattes crossfaded at the seams.", width=8)
+        self.sam_ltx_overlap_var = self._combo(_o, "Overlap",
+            list(self.LTX_OVERLAPS), default="16",
+            tip="Frames shared by neighbouring chunks, blended\n"
+                "across so the seam does not pop.", width=8)
+        self.sam_ltx_size_var = self._combo(_o, "Max size", list(self.LTX_SIZES),
+            default=self.LTX_SIZES[0],
+            tip="The clip is fitted inside this (never enlarged),\n"
+                "padded to multiples of 32, and the matte resized\n"
+                "back to the plate. 1920\u00d71088 is the model's limit;\n"
+                "smaller is faster and cheaper.", width=12)
+        _sr = tk.Frame(_o, bg=S); _sr.pack(fill="x", pady=2)
+        tk.Label(_sr, text="Seed", font=FSM, bg=S, fg=G, width=12,
+                 anchor="w").pack(side="left")
+        self.sam_ltx_seed_var = tk.StringVar(value="42")
+        tk.Entry(_sr, textvariable=self.sam_ltx_seed_var, width=8, bg="#0D0D0D",
+                 fg=W, font=FSM, bd=0, insertbackground=W).pack(side="left",
+                                                                padx=4)
+        _lr = tk.Frame(_o, bg=S); _lr.pack(fill="x", pady=2)
+        self._sam_ltx_limit_row = _lr
+        tk.Label(_lr, text="Limit to SAM", font=FSM, bg=S, fg=G, width=12,
+                 anchor="w").pack(side="left")
+        self.sam_ltx_limit_var = tk.IntVar(value=0)
+        tk.Scale(_lr, from_=0, to=200, orient="horizontal",
+                 variable=self.sam_ltx_limit_var, bg=S, fg=W, troughcolor="#222",
+                 highlightthickness=0, bd=0, showvalue=True, length=150,
+                 font=FSM).pack(side="left", padx=4)
+        tk.Label(_lr, text="px grow (0 = off)", font=FSM, bg=S,
+                 fg="#555555").pack(side="left")
+        self.sam_ltx_note = tk.Label(_o, text="", font=FSM, bg=S, fg="#777777",
+                                     anchor="w", wraplength=330, justify="left")
+        self.sam_ltx_note.pack(fill="x", pady=(2, 0))
+        self.ltx_app_lbl = tk.Label(_o, text="", font=FSM, bg=S, fg="#777777",
+                                    anchor="w", wraplength=330, justify="left")
+        self.ltx_app_lbl.pack(fill="x")
+        self.sam_ltx_preview_btn = self._mkbtn(
+            _o, "Preview LTX Alpha on this frame", self._sam_preview_ltx,
+            bg="#2A0A0A", fg="#CC4444")
+        tk.Label.configure(self.sam_ltx_preview_btn._lbl, width=0)
+        self.sam_ltx_preview_btn.pack(fill="x", pady=(6, 0))
+        self.sam_fal_panel = tk.Label(_o, text="", font=FM, bg="#0D0D0D", fg=G,
+                                      anchor="w", justify="left", padx=10,
+                                      pady=6, wraplength=330)
+        self._sam_fal_state = {}
+        for _v in (self.sam_ltx_chunk_var, self.sam_ltx_overlap_var,
+                   self.sam_ltx_size_var):
+            _v.trace_add("write", lambda *_: self._ltx_update_note())
+        self._sam_src_changed()
+
         # ── Prompts card with object tabs ─────────────────────────────────
         _prompt_outer = tk.Frame(lf, bg=S,
             highlightthickness=1, highlightbackground=BD)
         _prompt_outer.pack(fill="x", padx=16, pady=(4,0))
+        self._sam_prompts_outer = _prompt_outer
 
         # Tab bar row
         _tab_bar = tk.Frame(_prompt_outer, bg=BG)
@@ -36699,100 +36796,8 @@ def cs_convert(a, src, dst):
         tk.Label.configure(self.sam_preview_btn._lbl, width=0)
         self.sam_preview_btn.configure(state="disabled")
         self.sam_preview_btn.pack(fill="x", pady=(6, 0))
-
-        # ── Matte source: SAM 3 and / or LTX Alpha ──────────────────────
-        cm = self._card(lf, "Matte source")
-        _tiles = tk.Frame(cm, bg=S); _tiles.pack(fill="x")
-        self.sam_src_sam_var = tk.BooleanVar(value=True)
-        self.sam_src_ltx_var = tk.BooleanVar(value=False)
-        self._sam_src_tiles = {}
-
-        def _src_tile(key, var, title, sub):
-            t = tk.Frame(_tiles, bg="#161616", highlightthickness=1,
-                         highlightbackground=BD, cursor="hand2")
-            t.pack(side="left", fill="x", expand=True, padx=(0, 4), pady=2)
-            a = tk.Label(t, text=title, font=FSM, bg="#161616", fg=W)
-            a.pack(anchor="w", padx=8, pady=(5, 0))
-            b = tk.Label(t, text=sub, font=FSM, bg="#161616", fg="#777777")
-            b.pack(anchor="w", padx=8, pady=(0, 5))
-            self._sam_src_tiles[key] = (t, a, b)
-
-            def _tog(_e=None, k=key, v=var):
-                v.set(not v.get())
-            for w_ in (t, a, b):
-                w_.bind("<Button-1>", _tog)
-            var.trace_add("write", lambda *_: self._sam_src_changed())
-        _src_tile("sam", self.sam_src_sam_var, "SAM 3",
-                  "tracker: prompts, clicks, boxes")
-        _src_tile("ltx", self.sam_src_ltx_var, "LTX Alpha",
-                  "hair, fur, smoke, glass \u00b7 fal")
-        _src_i = tk.Label(cm, text="\u24d8", font=FSM, bg=S, fg="#555555",
-                          cursor="hand2")
-        _src_i.pack(anchor="e")
-        _info_popup(
-            "SAM 3 only \u2014 what you have today.\n\n"
-            "LTX Alpha only \u2014 no prompts needed: the clip goes to\n"
-            "the LTX-2.5 alpha model on fal and a matte comes back,\n"
-            "with hair, fur, smoke, sheer fabric and glass. It picks\n"
-            "the foreground itself, so single-subject shots.\n\n"
-            "Both \u2014 SAM decides WHAT, LTX does the edges: the LTX\n"
-            "matte is limited to a grown, softened SAM mask\n"
-            "(Limit to SAM object).\n\n"
-            "LTX runs on a fal app you deploy once:\n"
-            "fal_ltx_alpha/DEPLOY.md, then the app id on Setup.")(_src_i)
-
-        self.sam_ltx_opts = tk.Frame(cm, bg=S)
-        _o = self.sam_ltx_opts
-        self.sam_ltx_chunk_var = self._combo(_o, "Chunk", list(self.LTX_CHUNKS),
-            default="145", tip="Frames per fal call \u2014 145 is the model's\n"
-            "limit (~6 s at 24 fps). Longer clips are split\n"
-            "and the mattes crossfaded at the seams.", width=8)
-        self.sam_ltx_overlap_var = self._combo(_o, "Overlap",
-            list(self.LTX_OVERLAPS), default="16",
-            tip="Frames shared by neighbouring chunks, blended\n"
-                "across so the seam does not pop.", width=8)
-        self.sam_ltx_size_var = self._combo(_o, "Max size", list(self.LTX_SIZES),
-            default=self.LTX_SIZES[0],
-            tip="The clip is fitted inside this (never enlarged),\n"
-                "padded to multiples of 32, and the matte resized\n"
-                "back to the plate. 1920\u00d71088 is the model's limit;\n"
-                "smaller is faster and cheaper.", width=12)
-        _sr = tk.Frame(_o, bg=S); _sr.pack(fill="x", pady=2)
-        tk.Label(_sr, text="Seed", font=FSM, bg=S, fg=G, width=12,
-                 anchor="w").pack(side="left")
-        self.sam_ltx_seed_var = tk.StringVar(value="42")
-        tk.Entry(_sr, textvariable=self.sam_ltx_seed_var, width=8, bg="#0D0D0D",
-                 fg=W, font=FSM, bd=0, insertbackground=W).pack(side="left",
-                                                                padx=4)
-        _lr = tk.Frame(_o, bg=S); _lr.pack(fill="x", pady=2)
-        tk.Label(_lr, text="Limit to SAM", font=FSM, bg=S, fg=G, width=12,
-                 anchor="w").pack(side="left")
-        self.sam_ltx_limit_var = tk.IntVar(value=0)
-        tk.Scale(_lr, from_=0, to=200, orient="horizontal",
-                 variable=self.sam_ltx_limit_var, bg=S, fg=W, troughcolor="#222",
-                 highlightthickness=0, bd=0, showvalue=True, length=150,
-                 font=FSM).pack(side="left", padx=4)
-        tk.Label(_lr, text="px grow (0 = off)", font=FSM, bg=S,
-                 fg="#555555").pack(side="left")
-        self.sam_ltx_note = tk.Label(_o, text="", font=FSM, bg=S, fg="#777777",
-                                     anchor="w", wraplength=330, justify="left")
-        self.sam_ltx_note.pack(fill="x", pady=(2, 0))
-        self.ltx_app_lbl = tk.Label(_o, text="", font=FSM, bg=S, fg="#777777",
-                                    anchor="w", wraplength=330, justify="left")
-        self.ltx_app_lbl.pack(fill="x")
-        self.sam_ltx_preview_btn = self._mkbtn(
-            _o, "Preview LTX Alpha on this frame", self._sam_preview_ltx,
-            bg="#2A0A0A", fg="#CC4444")
-        tk.Label.configure(self.sam_ltx_preview_btn._lbl, width=0)
-        self.sam_ltx_preview_btn.pack(fill="x", pady=(6, 0))
-        self.sam_fal_panel = tk.Label(_o, text="", font=FM, bg="#0D0D0D", fg=G,
-                                      anchor="w", justify="left", padx=10,
-                                      pady=6, wraplength=330)
-        self._sam_fal_state = {}
-        for _v in (self.sam_ltx_chunk_var, self.sam_ltx_overlap_var,
-                   self.sam_ltx_size_var):
-            _v.trace_add("write", lambda *_: self._ltx_update_note())
         self._sam_src_changed()
+
 
         c3 = self._card(lf, "Output")
 
@@ -37513,8 +37518,27 @@ def cs_convert(a, src, dst):
                 self.sam_fal_panel.pack(fill="x", pady=(6, 0))
                 self._ltx_refresh_state()
                 self._ltx_update_note()
+                # Limit to SAM only means something with SAM on
+                lr = self.__dict__.get("_sam_ltx_limit_row")
+                if lr is not None:
+                    if sv.get():
+                        lr.pack(fill="x", pady=2, before=self.sam_ltx_note)
+                    else:
+                        lr.pack_forget()
             else:
                 opts.pack_forget()
+        # Only the relevant controls below the switch: the prompts /
+        # objects / mask parameters belong to SAM.
+        po = self.__dict__.get("_sam_prompts_outer")
+        if po is not None:
+            try:
+                if sv.get():
+                    po.pack(fill="x", padx=16, pady=(4, 0),
+                            after=self._sam_src_card)
+                else:
+                    po.pack_forget()
+            except Exception:
+                pass
         try:
             self.sam_btn.configure(text=self._sam_run_label())
             # LTX needs no prompt: a loaded folder is enough to run
