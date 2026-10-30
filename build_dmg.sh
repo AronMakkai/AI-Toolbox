@@ -98,10 +98,31 @@ DIR="$(cd "$(dirname "$0")/../Resources" && pwd)"
 export PATH="$HOME/miniconda3/bin:$HOME/anaconda3/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 
 CANDIDATES=()
+# 1. the Python that ran the app last time (ai_toolbox.py writes it)
+[ -f "$HOME/.ai_toolbox/python" ] && CANDIDATES+=("$(cat "$HOME/.ai_toolbox/python")")
+# 2. an activated conda env, if launched from such a Terminal
 [ -n "$CONDA_PREFIX" ] && CANDIDATES+=("$CONDA_PREFIX/bin/python3")
+# 3. every conda env on this Mac (named envs first -- that is where a
+#    "studio" / "ai" env with torch lives -- then the base envs)
+for root in "$HOME/miniconda3" "$HOME/anaconda3" "$HOME/miniforge3" \
+            "$HOME/mambaforge" "$HOME/opt/miniconda3" "$HOME/opt/anaconda3" \
+            "/opt/miniconda3" "/opt/anaconda3" "/opt/homebrew/Caskroom/miniconda/base" \
+            "/opt/homebrew/Caskroom/miniforge/base"; do
+    for e in "$root"/envs/*/bin/python3; do
+        [ -x "$e" ] && CANDIDATES+=("$e")
+    done
+done
+for e in "$HOME/.conda/envs"/*/bin/python3; do
+    [ -x "$e" ] && CANDIDATES+=("$e")
+done
+for root in "$HOME/miniconda3" "$HOME/anaconda3" "$HOME/miniforge3" \
+            "$HOME/mambaforge" "$HOME/opt/miniconda3" "$HOME/opt/anaconda3" \
+            "/opt/miniconda3" "/opt/anaconda3"; do
+    CANDIDATES+=("$root/bin/python3")
+done
+# 4. the app's own installs and the system ones
 CANDIDATES+=(
-    "$HOME/miniconda3/bin/python3"
-    "$HOME/anaconda3/bin/python3"
+    "$HOME/RifeApp/venv/bin/python3"
     "/opt/homebrew/bin/python3"
     "/usr/local/bin/python3"
     "$(command -v python3 || true)"
@@ -118,7 +139,7 @@ for c in "${CANDIDATES[@]}"; do
 done
 
 if [ -z "$PYTHON" ]; then
-    osascript -e 'display dialog "Studio Toolbox could not find a Python install with torch, opencv-python, numpy and Pillow already installed.\n\nActivate the conda environment this app was set up with, then relaunch from Terminal:\n\n  conda activate <your-env>\n  open /Applications/Studio-Toolbox.app" with title "Studio Toolbox — Python not found" buttons {"OK"} default button 1 with icon caution'
+    osascript -e 'display dialog "Studio Toolbox could not find a Python with torch, opencv-python, numpy and Pillow installed.\n\nEither install one (Terminal):\n\n  conda create -y -n studio python=3.13\n  conda activate studio\n  pip install torch opencv-python numpy pillow OpenEXR\n\nor, if you already have such an environment, launch once from a Terminal where it is active:\n\n  conda activate <your-env>\n  open /Applications/Studio-Toolbox.app\n\nAfter one successful launch the app remembers that Python and starts from the Dock." with title "Studio Toolbox — Python not found" buttons {"OK"} default button 1 with icon caution'
     exit 1
 fi
 
