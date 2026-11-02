@@ -1,7 +1,7 @@
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 import numpy as np, os, sys
 S=1024
-P=os.environ.get("ICON_OUT", os.getcwd()+"/")
+P=os.environ.get("ICON_OUT", os.path.dirname(os.path.abspath(__file__))+"/")
 RED=(204,68,68,255); RED2=(236,92,80,255); DARK=(20,20,22,255); WHITE=(240,240,244,255)
 FONT="/usr/share/fonts/truetype/google-fonts/Poppins-Bold.ttf"
 def tile():

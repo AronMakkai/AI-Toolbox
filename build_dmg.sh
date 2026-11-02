@@ -207,7 +207,8 @@ ln -s /Applications "$DMG_STAGE/Applications"
 # What a colleague needs beside the app: the install notes (with the
 # xattr / chmod commands that let an unsigned app run) and a
 # double-clickable script that runs them. Both live in dmg/ in the
-# repo so they are versioned with the build script.
+# repo so they are versioned with the build script -- and nothing
+# else goes in there (the icon generator lives in tools/).
 if [ -d "$DIR/dmg" ]; then
     cp "$DIR/dmg/"* "$DMG_STAGE/"
     chmod +x "$DMG_STAGE/"*.command 2>/dev/null || true
