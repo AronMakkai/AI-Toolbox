@@ -21,6 +21,7 @@ Studio Toolbox is a VFX processing suite featuring:
 - **Batch** — Tick *Batch: all shots in this folder* in Upscale, Detail, Expansion or MOV→EXR and Run applies the tab's settings to every shot under the picked folder, one version folder with a subfolder per shot
 - **Paint Studio** — Per-frame hand painting and smudging
 - **Fix Missing Frames** — rebuild dropped, black or held frames with RIFE or Wan VACE
+- **Pipeline** — Save MOV→EXR → Fix Missing Frames → Expansion Studio (→ Lens Studio) as a preset and run it from the command line without opening the UI: `python pipeline.py run --preset NAME --input shot.mov`
 - Plus: MOV ↔ EXR conversion and SAM 3 segmentation
 
 ## Getting Started

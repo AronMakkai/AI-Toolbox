@@ -20372,5 +20372,246 @@ class TestBatchShots(unittest.TestCase):
                 self.assertIn(f'"{key}")', inspect.getsource(getattr(App, tab)))
 
 
+class TestPipeline(unittest.TestCase):
+    """The pipeline: a preset is the four tabs' settings under a name;
+    a run feeds one input through MOV -> EXR, Fix Missing Frames,
+    Expansion Studio and (optionally) Lens Studio in that order, each
+    step's output the next one's input, driven by the tabs' own Run
+    buttons; pipeline.py runs a preset from the command line without
+    the window."""
+
+    class V:
+        def __init__(self, v=""): self.v = v
+        def get(self): return self.v
+        def set(self, v): self.v = v
+
+    def _stub(self, tmp):
+        app = App.__new__(App)
+        app._PROJECT_VAR_TYPES = (self.V,)
+        app.log = lambda *a, **k: None
+        app.setstatus = lambda *a, **k: None
+        app.exr_depth_var = self.V("16")
+        app.ff_cs_var = self.V("Auto")
+        app.usc_cs_out_var = self.V("ACES")
+        app.organic_effect_var = self.V("Bloom")
+        app.sam_other_var = self.V("no")
+        pending = []
+        app.after = lambda ms, fn=None, *a: pending.append(fn)
+        app.pending = pending
+        app.calls = []
+        app.exr_file = None
+        app.ff_input = None
+        app.ff_faults = []
+        app.ff_is_movie = False
+        app._usc_frames = None
+        app.organic_frames = []
+        app._e_running = app._ff_busy = app._usc_running = app._organic_running = False
+        app._adw_output_root = lambda folder: os.path.join(tmp, "ADW")
+        app._ff_output_name = lambda p: "FF_" + os.path.basename(str(p).rstrip(os.sep))
+
+        def later(flag, then=None):
+            def _f():
+                setattr(app, flag, False)
+                if then:
+                    then()
+            pending.append(_f)
+
+        def write(folder, n=2):
+            os.makedirs(folder, exist_ok=True)
+            for i in range(n):
+                open(os.path.join(folder, f"f.{i:04d}.exr"), "w").close()
+            return folder
+
+        def e_accept(p):
+            app.calls.append(("exr", p)); app.exr_file = p
+        def erun():
+            app._e_running = True
+            later("_e_running", lambda: write(os.path.join(os.path.dirname(app.exr_file), "EXR")))
+        def ff_accept(p):
+            app.calls.append(("ff", p)); app.ff_input = p
+        def ff_scan():
+            app._ff_busy = True
+            later("_ff_busy")
+        def ff_fix():
+            app.calls.append(("fix", app.ff_input)); app._ff_busy = True
+            out = os.path.join(os.path.dirname(app.ff_input), "FF_" + os.path.basename(app.ff_input))
+            later("_ff_busy", lambda: write(out))
+        def usc_accept(p):
+            app.calls.append(("usc", p)); app._usc_frames = ["a", "b"]
+        def usc_run():
+            app._usc_running = True
+            later("_usc_running", lambda: write(os.path.join(tmp, "ADW", "EXPAND_v02")))
+        def org_load(p, interactive=False, _movie=None):
+            app.calls.append(("organic", p)); app.organic_frames = ["a"]
+        def org_run():
+            app._organic_running = True
+            later("_organic_running", lambda: write(os.path.join(tmp, "ADW", "Lens_Studio_v01")))
+        app._e_accept, app._erun = e_accept, erun
+        app._ff_accept, app._ff_scan_start, app._ff_fix_start = ff_accept, ff_scan, ff_fix
+        app._usc_accept, app._usc_run = usc_accept, usc_run
+        app._organic_load_folder, app._organic_run = org_load, org_run
+        return app
+
+    def _drain(self, app, limit=200):
+        n = 0
+        while app.pending and n < limit:
+            fn = app.pending.pop(0)
+            if fn:
+                fn()
+            n += 1
+
+    def test_steps_in_order_and_lens_optional(self):
+        self.assertEqual([k for k, _n, _p in App.PIPELINE_STEPS],
+                         ["exr", "fixframes", "upscale", "organic"])
+        self.assertEqual(App.PIPELINE_OPTIONAL, ("organic",))
+        self.assertEqual([p for _k, _n, p in App.PIPELINE_STEPS],
+                         ["exr", "ff", "usc", "organic"])
+
+    def test_preset_roundtrip_holds_the_four_tabs_settings(self):
+        import tempfile
+        tmp = tempfile.mkdtemp()
+        app = self._stub(tmp)
+        app.pipe_name_var = self.V("ignored")      # not a module var
+        with unittest.mock.patch.object(App, "PIPELINE_DIR", os.path.join(tmp, "presets")):
+            self._roundtrip(app, tmp)
+
+    def _roundtrip(self, app, tmp):
+        p = app._pipeline_preset_save("Show A", ["exr", "upscale"])
+        self.assertEqual(p, os.path.join(tmp, "presets", "Show A.json"))
+        d = App._pipeline_preset_read(p)
+        self.assertEqual(d["steps"], ["exr", "upscale"])
+        self.assertEqual(d["modules"]["exr"]["vars"], {"exr_depth_var": "16"})
+        self.assertEqual(d["modules"]["fixframes"]["vars"], {"ff_cs_var": "Auto"})
+        self.assertEqual(d["modules"]["upscale"]["vars"], {"usc_cs_out_var": "ACES"})
+        self.assertEqual(d["modules"]["organic"]["vars"], {"organic_effect_var": "Bloom"})
+        self.assertNotIn("sam", str(d["modules"]))
+        self.assertEqual(App._pipeline_list(), ["Show A"])
+        app.exr_depth_var.set("32"); app.organic_effect_var.set("Halation")
+        app._pipeline_preset_apply(d)
+        self.assertEqual(app.exr_depth_var.get(), "16")
+        self.assertEqual(app.organic_effect_var.get(), "Bloom")
+        self.assertEqual(App._pipeline_preset_path("x"),
+                         os.path.join(tmp, "presets", "x.json"))
+        self.assertEqual(App._pipeline_preset_path(p), p)
+
+    def test_newest_version_folder(self):
+        import tempfile
+        tmp = tempfile.mkdtemp()
+        for n in ("EXPAND_v01", "EXPAND_v03", "EXPAND_v02", "LENS_v09", "EXPAND_vX"):
+            os.makedirs(os.path.join(tmp, n))
+        self.assertEqual(App._pipeline_newest(tmp, "EXPAND"), os.path.join(tmp, "EXPAND_v03"))
+        self.assertIsNone(App._pipeline_newest(tmp, "DETAIL"))
+        self.assertIsNone(App._pipeline_newest("/nope", "EXPAND"))
+
+    def test_a_movie_runs_every_step_each_feeding_the_next(self):
+        import tempfile
+        tmp = tempfile.mkdtemp()
+        app = self._stub(tmp)
+        mov = os.path.join(tmp, "shot.mov"); open(mov, "w").close()
+        app.ff_faults = [(3, 4)]
+        done = []
+        app._pipeline_run({"name": "p", "steps": ["exr", "fixframes", "upscale", "organic"],
+                           "modules": {}}, mov, on_done=lambda ok, o: done.append((ok, o)))
+        self.assertTrue(app._pipeline_active)
+        self.assertTrue(app._slow_notice_heard)
+        self._drain(app)
+        self.assertEqual(done[0][0], True)
+        out = done[0][1]
+        exr = os.path.join(tmp, "EXR")
+        self.assertEqual(out["exr"], exr)
+        self.assertEqual(out["fixframes"], os.path.join(tmp, "FF_EXR"))
+        self.assertEqual(out["upscale"], os.path.join(tmp, "ADW", "EXPAND_v02"))
+        self.assertEqual(out["organic"], os.path.join(tmp, "ADW", "Lens_Studio_v01"))
+        self.assertEqual(app.calls, [("exr", mov), ("ff", exr), ("fix", exr),
+                                     ("usc", out["fixframes"]), ("organic", out["upscale"])])
+        self.assertFalse(app._pipeline_active)
+        self.assertIsNone(app._pipeline_state)
+
+    def test_a_frame_folder_skips_exr_and_a_clean_scan_skips_the_fix(self):
+        import tempfile
+        tmp = tempfile.mkdtemp()
+        app = self._stub(tmp)
+        seq = os.path.join(tmp, "plate"); os.makedirs(seq)
+        done = []
+        app._pipeline_run({"name": "p", "steps": ["exr", "fixframes", "upscale"],
+                           "modules": {}}, seq, on_done=lambda ok, o: done.append((ok, o)))
+        self._drain(app)
+        self.assertTrue(done[0][0])
+        self.assertEqual(done[0][1]["exr"], seq)
+        self.assertEqual(done[0][1]["fixframes"], seq)
+        self.assertEqual(app.calls, [("ff", seq), ("usc", seq)])
+
+    def test_explicit_steps_override_the_preset_and_lens_is_off_unless_asked(self):
+        import tempfile
+        tmp = tempfile.mkdtemp()
+        app = self._stub(tmp)
+        seq = os.path.join(tmp, "plate"); os.makedirs(seq)
+        done = []
+        app._pipeline_run({"name": "p", "steps": ["exr", "fixframes", "upscale", "organic"],
+                           "modules": {}}, seq, steps=["upscale"],
+                          on_done=lambda ok, o: done.append((ok, o)))
+        self._drain(app)
+        self.assertEqual(list(done[0][1]), ["upscale"])
+        self.assertEqual(app.calls, [("usc", seq)])
+
+    def test_a_step_that_does_not_start_or_write_stops_the_run(self):
+        import tempfile
+        tmp = tempfile.mkdtemp()
+        app = self._stub(tmp)
+        seq = os.path.join(tmp, "plate"); os.makedirs(seq)
+        app._usc_run = lambda: None          # never sets _usc_running
+        done, logs = [], []
+        app._pipeline_run({"name": "p", "steps": ["upscale", "organic"], "modules": {}},
+                          seq, on_log=logs.append, on_done=lambda ok, o: done.append((ok, o)))
+        self._drain(app)
+        self.assertEqual(done, [(False, {})])
+        self.assertTrue(any("did not start" in m for m in logs))
+        self.assertNotIn(("organic", seq), app.calls)
+        self.assertFalse(app._pipeline_active)
+        # One at a time.
+        app2 = self._stub(tmp)
+        app2._pipeline_run({"name": "p", "steps": ["upscale"], "modules": {}}, seq)
+        with self.assertRaises(RuntimeError):
+            app2._pipeline_run({"name": "p", "steps": ["upscale"], "modules": {}}, seq)
+        with self.assertRaises(FileNotFoundError):
+            self._stub(tmp)._pipeline_run({"name": "p", "steps": ["upscale"],
+                                           "modules": {}}, os.path.join(tmp, "nope"))
+
+    def test_nothing_opens_finder_while_a_pipeline_runs(self):
+        app = App.__new__(App)
+        opened = []
+        import subprocess
+        real = subprocess.run
+        subprocess.run = lambda *a, **k: opened.append(a)
+        try:
+            app._pipeline_active = True
+            app._reveal("/x")
+            self.assertEqual(opened, [])
+        finally:
+            subprocess.run = real
+        self.assertFalse(App._pipeline_active)
+
+    def test_the_tab_exists_and_the_cli_parses(self):
+        import inspect
+        self.assertIn('("Pipeline",           "pipeline")', inspect.getsource(App._tabbar))
+        self.assertIn("self._tab_pipeline()", inspect.getsource(App._build))
+        body = inspect.getsource(App._tab_pipeline)
+        for s in ("pipe_name_var", "pipe_step_vars", "Save preset",
+                  "Run pipeline", "pipe_cmd_lbl", "pipe_log_txt"):
+            self.assertIn(s, body)
+        self.assertIn("pipeline.py", inspect.getsource(App._pipeline_cmd))
+        import importlib.util
+        here = os.path.dirname(os.path.abspath(App.__module__ and __import__("ai_toolbox").__file__))
+        spec = importlib.util.spec_from_file_location("pipeline_cli", os.path.join(here, "pipeline.py"))
+        cli = importlib.util.module_from_spec(spec); spec.loader.exec_module(cli)
+        self.assertEqual(cli.STEP_KEYS, ("exr", "fixframes", "upscale", "organic"))
+        with self.assertRaises(SystemExit):
+            cli.main(["run"])                # --preset and --input are required
+        with unittest.mock.patch.object(App, "PIPELINE_DIR", tempfile.mkdtemp()):
+            with self.assertRaises(SystemExit) as cm:
+                cli.main(["run", "--preset", "p", "--input", "/nope/none"])
+            self.assertIn("no preset 'p'", str(cm.exception))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

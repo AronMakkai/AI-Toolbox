@@ -410,6 +410,7 @@ class App(tk.Tk):
         self._tab_smudge()
         self._tab_organic()
         self._tab_sam()
+        self._tab_pipeline()
         self._viewer_info_attach_all()
         # Range sync map for playback
         if not hasattr(self, "_range_synced"):
@@ -760,6 +761,7 @@ class App(tk.Tk):
             ("Lens Studio",        "organic"),
             ("Paint Studio",       "smudge"),
             ("Fix Missing Frames", "fixframes"),
+            ("Pipeline",           "pipeline"),
             ("SAM 3 — Segment",    "sam"),
         ]:
             b = tk.Label(self.bar, text=lbl, font=FSM, bg=BG, fg=G,
@@ -3021,13 +3023,16 @@ class App(tk.Tk):
         w.see("end")
         w.configure(state="disabled")
 
-    @staticmethod
-    def _reveal(path):
+    def _reveal(self, path):
         """Open a folder or file in the OS's file manager -- Finder,
         Explorer, or a Linux file manager via xdg-open. The single
         cross-platform replacement for every `subprocess.run(["open",
         path])` call that was scattered through this file: "open" is
-        macOS-only, and Windows has no equivalent binary at all."""
+        macOS-only, and Windows has no equivalent binary at all.
+        Nothing opens while a pipeline runs (the CLI, or the Pipeline
+        tab): a Finder window per step is not what a batch wants."""
+        if self.__dict__.get("_pipeline_active") or self._pipeline_active:
+            return
         try:
             if sys.platform == "darwin":
                 subprocess.run(["open", path])
@@ -25406,6 +25411,531 @@ def cs_convert(a, src, dst):
         if base.startswith(cls.FF_PREFIX):
             return base
         return cls.FF_PREFIX + base
+
+    # ══ Pipeline: MOV→EXR → Fix Missing Frames → Expansion Studio (→ Lens) ══
+    # A preset is the four tabs' settings saved under a name; a run
+    # feeds one input through the steps in order, each step's output
+    # becoming the next one's input, driven by the same Run buttons the
+    # tabs have -- so a preset renders exactly what the tabs would.
+    # Presets live as JSON in ~/.ai_toolbox/presets/ and can be run
+    # without the UI from pipeline.py (python pipeline.py run --preset
+    # NAME --input clip.mov), which is how other pipeline tools call it.
+    PIPELINE_STEPS = (("exr", "MOV → EXR", "exr"),
+                      ("fixframes", "Fix Missing Frames", "ff"),
+                      ("upscale", "Expansion Studio", "usc"),
+                      ("organic", "Lens Studio", "organic"))
+    PIPELINE_OPTIONAL = ("organic",)
+    PIPELINE_DIR = os.path.expanduser("~/.ai_toolbox/presets")
+    _pipeline_active = False
+    _pipeline_state = None
+
+    @classmethod
+    def _pipeline_preset_path(cls, name):
+        """A preset's file: a path as given, or NAME.json in the presets
+        folder."""
+        if str(name).lower().endswith(".json") and os.path.sep in str(name):
+            return str(name)
+        if os.path.isfile(str(name)):
+            return str(name)
+        base = os.path.basename(str(name))
+        if not base.lower().endswith(".json"):
+            base += ".json"
+        return os.path.join(cls.PIPELINE_DIR, base)
+
+    @classmethod
+    def _pipeline_list(cls):
+        try:
+            return sorted(os.path.splitext(f)[0]
+                          for f in os.listdir(cls.PIPELINE_DIR)
+                          if f.lower().endswith(".json"))
+        except Exception:
+            return []
+
+    @classmethod
+    def _pipeline_preset_read(cls, name):
+        import json
+        with open(cls._pipeline_preset_path(name), encoding="utf-8") as fh:
+            d = json.load(fh)
+        if not isinstance(d, dict) or "modules" not in d:
+            raise ValueError("not a pipeline preset")
+        return d
+
+    def _pipeline_preset_collect(self, name, steps=None):
+        """The four tabs' settings as a preset dict: every tk.Variable
+        of each module, the way Save Project snapshots a tab."""
+        import time
+        steps = list(steps or [k for k, _n, _p in self.PIPELINE_STEPS])
+        d = {"version": 1, "kind": "pipeline-preset", "name": name,
+             "app": globals().get("APP_NAME", "AI-Toolbox"),
+             "saved": time.strftime("%Y-%m-%d %H:%M:%S"),
+             "steps": steps, "modules": {}}
+        for key, _label, prefix in self.PIPELINE_STEPS:
+            d["modules"][key] = {"vars": self._project_collect_vars(prefix)}
+        return d
+
+    def _pipeline_preset_save(self, name, steps=None):
+        import json
+        os.makedirs(self.PIPELINE_DIR, exist_ok=True)
+        d = self._pipeline_preset_collect(name, steps)
+        p = self._pipeline_preset_path(name)
+        with open(p, "w", encoding="utf-8") as fh:
+            json.dump(d, fh, indent=1)
+        return p
+
+    def _pipeline_preset_apply(self, preset):
+        """The preset's settings into the tabs (no inputs touched)."""
+        for key, _label, _prefix in self.PIPELINE_STEPS:
+            m = (preset.get("modules") or {}).get(key) or {}
+            self._project_restore_vars(m.get("vars") or {})
+
+    @staticmethod
+    def _pipeline_newest(root, prefix):
+        """The newest <prefix>_vNN folder under root, or None."""
+        import re
+        try:
+            cands = [(int(m.group(1)), f) for f in os.listdir(root)
+                     for m in [re.match(r"^" + re.escape(prefix) + r"_v(\d+)$", f)]
+                     if m and os.path.isdir(os.path.join(root, f))]
+        except Exception:
+            return None
+        if not cands:
+            return None
+        return os.path.join(root, max(cands)[1])
+
+    @staticmethod
+    def _pipeline_count(folder, exts=(".exr", ".png", ".tif", ".tiff", ".dpx")):
+        try:
+            return sum(1 for f in os.listdir(folder)
+                       if os.path.splitext(f)[1].lower() in exts)
+        except Exception:
+            return 0
+
+    def _pipeline_run(self, preset, inp, steps=None, on_log=None, on_done=None):
+        """Run `preset` on `inp` (a movie, or a frame folder) through its
+        steps. Asynchronous: drives the tabs' own Run buttons and polls
+        their running flags on the Tk loop; on_done(ok, outputs) at the
+        end, outputs = {step: folder}. Only one pipeline at a time."""
+        if self._pipeline_state is not None:
+            raise RuntimeError("A pipeline is already running.")
+        steps = [s for s in (steps or preset.get("steps")
+                             or [k for k, _n, _p in self.PIPELINE_STEPS])
+                 if s in {k for k, _n, _p in self.PIPELINE_STEPS}]
+        if not steps:
+            raise ValueError("no steps")
+        inp = os.path.abspath(str(inp))
+        if not os.path.exists(inp):
+            raise FileNotFoundError(inp)
+        self._pipeline_preset_apply(preset)
+        self._slow_notice_heard = True       # no popups on a pipeline
+        self._pipeline_active = True
+        st = dict(steps=steps, i=0, cur=inp, outputs={}, ok=True,
+                  on_log=on_log, on_done=on_done, err=None)
+        self._pipeline_state = st
+        self._pipeline_log(f"Pipeline '{preset.get('name', '?')}': "
+                           + " → ".join(self._pipeline_label(s) for s in steps)
+                           + f"\n  input: {inp}")
+        self.after(50, self._pipeline_step)
+
+    def _pipeline_label(self, key):
+        for k, n, _p in self.PIPELINE_STEPS:
+            if k == key:
+                return n
+        return key
+
+    def _pipeline_log(self, msg):
+        st = self._pipeline_state
+        if st and st.get("on_log"):
+            try:
+                st["on_log"](msg)
+            except Exception:
+                pass
+        try:
+            w = self.__dict__.get("pipe_log_txt")
+            if w is not None:
+                self.log(w, msg, "hi" if msg.startswith(("Pipeline", "✓", "─"))
+                         else "err" if msg.startswith(("✖", "Error")) else "dim")
+        except Exception:
+            pass
+
+    def _pipeline_finish(self, ok, err=None):
+        st = self._pipeline_state
+        if st is None:
+            return
+        if err:
+            self._pipeline_log(f"✖ {err}")
+        self._pipeline_log("✓ Pipeline done." if ok else "✖ Pipeline stopped.")
+        for k, v in st["outputs"].items():
+            self._pipeline_log(f"  {self._pipeline_label(k)} → {v}")
+        self._pipeline_state = None
+        self._pipeline_active = False
+        try:
+            self.setstatus("Pipeline done" if ok else "Pipeline failed",
+                           GR if ok else RB)
+        except Exception:
+            pass
+        if st.get("on_done"):
+            try:
+                st["on_done"](ok, dict(st["outputs"]))
+            except Exception:
+                pass
+
+    def _pipeline_step(self):
+        """Start the next step; _pipeline_wait polls it to its end."""
+        st = self._pipeline_state
+        if st is None:
+            return
+        if st["i"] >= len(st["steps"]):
+            return self._pipeline_finish(True)
+        key = st["steps"][st["i"]]
+        cur = st["cur"]
+        self._pipeline_log(f"── {st['i'] + 1}/{len(st['steps'])} "
+                           f"{self._pipeline_label(key)}: {os.path.basename(cur)}")
+        try:
+            if key == "exr":
+                if os.path.isdir(cur):
+                    self._pipeline_log("  already a frame folder — skipped")
+                    return self._pipeline_next(cur)
+                self._e_accept(cur)
+                if not self.exr_file:
+                    raise RuntimeError("MOV → EXR did not accept the input")
+                self._erun()
+                if not self._e_running:
+                    raise RuntimeError("MOV → EXR did not start")
+                st["busy"] = lambda: self._e_running
+                st["result"] = lambda: self._pipeline_exr_out(cur)
+            elif key == "fixframes":
+                self._ff_accept(cur)
+                if not self.ff_input:
+                    raise RuntimeError("Fix Missing Frames did not accept the input")
+                self._ff_scan_start()
+                if not self._ff_busy:
+                    raise RuntimeError("the scan did not start")
+                st["busy"] = lambda: self._ff_busy
+                st["result"] = lambda: self._pipeline_ff_after_scan(cur)
+            elif key == "upscale":
+                self._usc_accept(cur)
+                if not getattr(self, "_usc_frames", None):
+                    raise RuntimeError("Expansion Studio did not accept the input")
+                self._usc_run()
+                if not self._usc_running:
+                    raise RuntimeError("Expansion Studio did not start")
+                root = self._adw_output_root(cur)
+                st["busy"] = lambda: self._usc_running
+                st["result"] = lambda: self._pipeline_newest(root, "EXPAND")
+            elif key == "organic":
+                self._organic_load_folder(cur)
+                if not self.organic_frames:
+                    raise RuntimeError("Lens Studio did not accept the input")
+                self._organic_run()
+                if not self._organic_running:
+                    raise RuntimeError("Lens Studio did not start")
+                root = self._adw_output_root(cur)
+                st["busy"] = lambda: self._organic_running
+                st["result"] = lambda: self._pipeline_newest(root, self.LENS_OUT_NAME)
+            else:
+                raise RuntimeError(f"unknown step {key}")
+        except Exception as ex:
+            return self._pipeline_finish(False, f"{self._pipeline_label(key)}: {ex}")
+        self.after(500, self._pipeline_wait)
+
+    def _pipeline_exr_out(self, movie):
+        out = os.path.join(os.path.dirname(movie), "EXR")
+        return out if self._pipeline_count(out) else None
+
+    def _pipeline_ff_after_scan(self, folder):
+        """Scan finished: nothing to fix means the input goes on as it
+        is; faults mean the fix runs and its FF_ folder is the result
+        (a second wait, started here)."""
+        st = self._pipeline_state
+        if not getattr(self, "ff_faults", None):
+            self._pipeline_log("  no faults found — passed through")
+            return folder
+        self._pipeline_log(f"  {len(self.ff_faults)} fault span(s) — fixing")
+        self._ff_fix_start()
+        if not self._ff_busy:
+            raise RuntimeError("the fix did not start (fal.ai key?)")
+        src = self.ff_input
+        out = os.path.join(os.path.dirname(str(src).rstrip(os.sep)),
+                           self._ff_output_name(src))
+        if self.ff_is_movie:
+            out = os.path.splitext(out)[0] + "_frames"
+        st["busy"] = lambda: self._ff_busy
+        st["result"] = lambda: out if self._pipeline_count(out) else None
+        return self._PIPELINE_WAIT_MORE
+
+    _PIPELINE_WAIT_MORE = object()
+
+    def _pipeline_wait(self):
+        st = self._pipeline_state
+        if st is None:
+            return
+        try:
+            if st["busy"]():
+                self.after(500, self._pipeline_wait)
+                return
+            res = st["result"]()
+        except Exception as ex:
+            return self._pipeline_finish(False, str(ex))
+        if res is self._PIPELINE_WAIT_MORE:
+            self.after(500, self._pipeline_wait)
+            return
+        if not res:
+            return self._pipeline_finish(
+                False, f"{self._pipeline_label(st['steps'][st['i']])}: "
+                       "no output was written (see its tab's log)")
+        self._pipeline_next(res)
+
+    def _pipeline_next(self, out):
+        st = self._pipeline_state
+        key = st["steps"][st["i"]]
+        st["outputs"][key] = out
+        self._pipeline_log(f"  → {out}")
+        st["cur"] = out
+        st["i"] += 1
+        self.after(50, self._pipeline_step)
+
+    # ── Pipeline tab: presets, a run button, and the command line ──
+    def _tab_pipeline(self):
+        p = self._frame("pipeline")
+        lf, rf = self._two_col(p, "", "", lw=440)
+        lf, _bottom = self._scroll_column(lf)
+        self.pipe_input = None
+
+        hdr = tk.Frame(lf, bg=BG)
+        hdr.pack(fill="x", padx=16, pady=(14, 0))
+        tk.Label(hdr, text="Pipeline — Presets",
+                 font=("Futura", 14), bg=BG, fg=W).pack(anchor="w")
+        tk.Label(lf, text=(
+            "Runs MOV → EXR, Fix Missing Frames, Expansion Studio and "
+            "(optionally) Lens Studio one after another, each step feeding "
+            "the next. A preset is those tabs' settings saved under a "
+            "name; other pipeline tools run a preset from the command "
+            "line without opening this window."),
+            font=FM, bg=BG, fg=G, wraplength=350, justify="left",
+            anchor="w").pack(anchor="w", padx=16, pady=(2, 8))
+
+        # Preset ------------------------------------------------------
+        c = self._card(lf, "Preset")
+        row = tk.Frame(c, bg=S)
+        row.pack(fill="x", pady=(2, 4))
+        tk.Label(row, text="Name", font=FSM, bg=S, fg=G, width=8,
+                 anchor="w").pack(side="left")
+        self.pipe_name_var = tk.StringVar(value="")
+        tk.Entry(row, textvariable=self.pipe_name_var, font=FSM, bg=S2,
+                 fg=W, insertbackground=W, relief="flat",
+                 highlightthickness=1, highlightbackground=BD
+                 ).pack(side="left", fill="x", expand=True)
+        self.pipe_presets_lb = tk.Listbox(
+            c, height=5, bg=S2, fg=W, font=FSM, bd=0, highlightthickness=1,
+            highlightbackground=BD, selectbackground="#333333",
+            selectforeground=W, activestyle="none", exportselection=False)
+        self.pipe_presets_lb.pack(fill="x", pady=(2, 4))
+        self.pipe_presets_lb.bind("<<ListboxSelect>>", self._pipeline_pick)
+        tk.Label(c, text=("Saved presets — click one to load it into the "
+                          "tabs. They live in ~/.ai_toolbox/presets."),
+                 font=FSM, bg=S, fg=G, wraplength=350, justify="left",
+                 anchor="w").pack(anchor="w", pady=(0, 4))
+        br = tk.Frame(c, bg=S)
+        br.pack(fill="x", pady=(2, 2))
+        self._mkbtn(br, "Save preset", self._pipeline_save_click,
+                    bg="#0D1A0D", fg="#66CC66").pack(side="left", padx=(0, 4))
+        self._mkbtn(br, "Delete", self._pipeline_delete_click
+                    ).pack(side="left", padx=(0, 4))
+        self._mkbtn(br, "Open folder",
+                    lambda: (os.makedirs(self.PIPELINE_DIR, exist_ok=True),
+                             self._reveal(self.PIPELINE_DIR))
+                    ).pack(side="left")
+
+        # Steps -------------------------------------------------------
+        c = self._card(lf, "Steps (in this order)")
+        self.pipe_step_vars = {}
+        for key, label, _prefix in self.PIPELINE_STEPS:
+            v = tk.BooleanVar(value=key not in self.PIPELINE_OPTIONAL)
+            self.pipe_step_vars[key] = v
+            tk.Checkbutton(c, text=label + ("  (optional)" if key in
+                                            self.PIPELINE_OPTIONAL else ""),
+                           variable=v, font=FSM, bg=S, fg=W, selectcolor=BD,
+                           activebackground=S, activeforeground=W,
+                           highlightthickness=0, bd=0, cursor="hand2",
+                           anchor="w").pack(anchor="w")
+        tk.Label(c, text=("Set each step up on its own tab (colour, model, "
+                          "fal.ai key, Lens effect…), then save. A step is "
+                          "skipped when it has nothing to do: a frame folder "
+                          "input skips MOV → EXR, a clean scan skips the "
+                          "fix."),
+                 font=FSM, bg=S, fg=G, wraplength=350, justify="left",
+                 anchor="w").pack(anchor="w", pady=(4, 0))
+
+        # Run ---------------------------------------------------------
+        c = self._card(lf, "Run here")
+        self.pipe_path_lbl = tk.Label(c, text="No input chosen", font=FSM,
+                                      bg=S, fg=G, anchor="w", wraplength=350,
+                                      justify="left")
+        self.pipe_path_lbl.pack(anchor="w", pady=(0, 4))
+        br = tk.Frame(c, bg=S)
+        br.pack(fill="x")
+        self._mkbtn(br, "Movie…", self._pipeline_pick_movie
+                    ).pack(side="left", padx=(0, 4))
+        self._mkbtn(br, "Frame folder…", self._pipeline_pick_folder
+                    ).pack(side="left", padx=(0, 4))
+        self.pipe_run_btn = self._mkbtn(br, "Run pipeline",
+                                        self._pipeline_run_click,
+                                        bg="#1A0808", fg="#CC4444")
+        self.pipe_run_btn.pack(side="left")
+
+        # Command line ------------------------------------------------
+        c = self._card(lf, "From the command line")
+        self.pipe_cmd_lbl = tk.Label(c, text="", font=FM, bg=S2, fg=W,
+                                     anchor="w", wraplength=350,
+                                     justify="left", padx=8, pady=6)
+        self.pipe_cmd_lbl.pack(fill="x")
+        tk.Label(c, text=("pipeline.py sits next to ai_toolbox.py. Run it "
+                          "with the same Python the app uses (the one in "
+                          "~/.ai_toolbox/python). It prints the log, writes "
+                          "--json with the output folders, and exits 0 on "
+                          "success, 1 on failure. `pipeline.py list` names "
+                          "the presets."),
+                 font=FSM, bg=S, fg=G, wraplength=350, justify="left",
+                 anchor="w").pack(anchor="w", pady=(4, 0))
+        self._mkbtn(c, "Copy command", self._pipeline_copy_cmd
+                    ).pack(anchor="w", pady=(6, 0))
+        self.pipe_name_var.trace_add("write", lambda *_: self._pipeline_cmd_refresh())
+
+        self.pipe_log_txt = self._logw(rf, "Pipeline log")
+        self._pipeline_refresh()
+        self._pipeline_cmd_refresh()
+
+    def _pipeline_refresh(self):
+        lb = self.pipe_presets_lb
+        lb.delete(0, "end")
+        for n in self._pipeline_list():
+            lb.insert("end", n)
+
+    def _pipeline_cmd(self):
+        name = (self.pipe_name_var.get() or "NAME").strip()
+        py = sys.executable or "python3"
+        root = os.path.dirname(os.path.abspath(__file__))
+        inp = self.__dict__.get("pipe_input") or "/path/to/shot.mov"
+        q = lambda s: '"' + s + '"' if " " in s else s
+        return (f"{q(py)} {q(os.path.join(root, 'pipeline.py'))} run "
+                f"--preset {q(name)} --input {q(inp)}")
+
+    def _pipeline_cmd_refresh(self):
+        try:
+            self.pipe_cmd_lbl.configure(text=self._pipeline_cmd())
+        except Exception:
+            pass
+
+    def _pipeline_copy_cmd(self):
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(self._pipeline_cmd())
+            self.setstatus("Command copied", GR)
+        except Exception:
+            pass
+
+    def _pipeline_steps_chosen(self):
+        return [k for k, _n, _p in self.PIPELINE_STEPS
+                if self.pipe_step_vars[k].get()]
+
+    def _pipeline_pick(self, _e=None):
+        sel = self.pipe_presets_lb.curselection()
+        if not sel:
+            return
+        name = self.pipe_presets_lb.get(sel[0])
+        try:
+            d = self._pipeline_preset_read(name)
+        except Exception as ex:
+            self.log(self.pipe_log_txt, f"Could not read {name}: {ex}", "err")
+            return
+        self.pipe_name_var.set(name)
+        self._pipeline_preset_apply(d)
+        for k, v in self.pipe_step_vars.items():
+            v.set(k in (d.get("steps") or []))
+        self.log(self.pipe_log_txt, f"Loaded preset '{name}' into the tabs "
+                 "(" + ", ".join(self._pipeline_label(s)
+                                 for s in d.get("steps") or []) + ")", "ok")
+
+    def _pipeline_save_click(self):
+        name = self.pipe_name_var.get().strip()
+        if not name:
+            messagebox.showinfo("Pipeline", "Give the preset a name first.")
+            return
+        steps = self._pipeline_steps_chosen()
+        if not steps:
+            messagebox.showinfo("Pipeline", "Tick at least one step.")
+            return
+        try:
+            p = self._pipeline_preset_save(name, steps)
+        except Exception as ex:
+            messagebox.showerror("Pipeline", f"Could not save the preset:\n{ex}")
+            return
+        self._pipeline_refresh()
+        self.log(self.pipe_log_txt, "Saved " + p, "ok")
+        self._pipeline_cmd_refresh()
+
+    def _pipeline_delete_click(self):
+        name = self.pipe_name_var.get().strip()
+        p = self._pipeline_preset_path(name) if name else ""
+        if not name or not os.path.isfile(p):
+            return
+        if not messagebox.askyesno("Pipeline", f"Delete preset '{name}'?"):
+            return
+        try:
+            os.remove(p)
+        except Exception as ex:
+            messagebox.showerror("Pipeline", str(ex))
+            return
+        self._pipeline_refresh()
+        self.log(self.pipe_log_txt, "Deleted " + p, "dim")
+
+    def _pipeline_set_input(self, path):
+        if not path:
+            return
+        self.pipe_input = path
+        self.pipe_path_lbl.configure(text=path, fg=W)
+        self._pipeline_cmd_refresh()
+
+    def _pipeline_pick_movie(self):
+        self._pipeline_set_input(filedialog.askopenfilename(
+            title="Movie to run the pipeline on",
+            filetypes=[("Movies", "*.mov *.mp4 *.mxf *.avi *.mkv"),
+                       ("All files", "*")]))
+
+    def _pipeline_pick_folder(self):
+        self._pipeline_set_input(filedialog.askdirectory(
+            title="Frame folder to run the pipeline on"))
+
+    def _pipeline_run_click(self):
+        if self._pipeline_state is not None:
+            messagebox.showinfo("Pipeline", "A pipeline is already running.")
+            return
+        if not self.pipe_input:
+            messagebox.showinfo("Pipeline", "Choose a movie or frame folder first.")
+            return
+        steps = self._pipeline_steps_chosen()
+        if not steps:
+            messagebox.showinfo("Pipeline", "Tick at least one step.")
+            return
+        name = self.pipe_name_var.get().strip() or "current settings"
+        # What runs is the tabs as they are now, with the ticked steps:
+        # the saved preset is the same thing written down.
+        preset = self._pipeline_preset_collect(name, steps)
+        self.pipe_run_btn.configure(state="disabled")
+
+        def done(ok, outputs):
+            try:
+                self.pipe_run_btn.configure(state="normal")
+            except Exception:
+                pass
+            if ok and outputs:
+                last = list(outputs.values())[-1]
+                self._reveal(last)
+        try:
+            self._pipeline_run(preset, self.pipe_input, steps, on_done=done)
+        except Exception as ex:
+            self.pipe_run_btn.configure(state="normal")
+            messagebox.showerror("Pipeline", str(ex))
 
     def _tab_sam(self):
         p = self._frame("sam")
