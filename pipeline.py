@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
-"""Run an AI-Toolbox / Studio Toolbox pipeline preset without the UI.
+"""Run an AI-Toolbox / Studio Toolbox batch preset without the UI.
 
-A preset is the MOV -> EXR, Fix Missing Frames, Expansion Studio and
-Lens Studio tabs' settings saved under a name from the Pipeline tab
-(~/.ai_toolbox/presets/NAME.json). This runs one input -- a movie or a
-frame folder -- through the preset's steps, one after another, each
-step's output folder feeding the next, exactly as the tabs would.
+A preset is saved from the Batch tab: which modules are ticked (Fix
+Missing Frames, Upscale Studio, Detail Studio, Expansion Studio, Lens
+Studio) plus every setting of those tabs, as one JSON file -- either
+~/.ai_toolbox/presets/NAME.json or a file saved anywhere with "Save
+as…". This runs one input -- a movie or a frame folder -- through the
+ticked modules in order, each one's output folder feeding the next,
+exactly as the tabs would. A movie is converted by MOV -> EXR first.
 
     python pipeline.py list
-    python pipeline.py show --preset NAME
-    python pipeline.py run --preset NAME --input shot.mov [--steps exr fixframes upscale organic]
+    python pipeline.py show --preset NAME-or-file.json
+    python pipeline.py run --preset NAME-or-file.json --input shot.mov
+                           [--steps fixframes upstudio detail upscale organic]
                            [--json result.json] [--quiet]
 
 Exit code 0 when every step wrote its output, 1 otherwise. --json
@@ -28,7 +31,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
-STEP_KEYS = ("exr", "fixframes", "upscale", "organic")
+STEP_KEYS = ("exr", "fixframes", "upstudio", "detail", "upscale", "organic")
 
 
 def _app_class():

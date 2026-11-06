@@ -13,7 +13,7 @@ AI-Toolbox is a comprehensive VFX processing suite featuring:
 - **Colourspaces** — Every module has the same Input colour / Output colour dropdowns (Auto / Same as input, Scene-linear Rec.709, Display sRGB, Display Rec.709, Display PQ / Rec.2020, Working ACEScg, Archive ACES2065-1) with a ⓘ explaining each
 - **Batch** — Tick *Batch: all shots in this folder* in Upscale, Detail, Expansion or MOV→EXR and Run applies the tab's settings to every shot under the picked folder, one version folder with a subfolder per shot
 - **Paint Studio** — Per-frame hand painting and smudging
-- **Pipeline** — Save MOV→EXR → Fix Missing Frames → Expansion Studio (→ Lens Studio) as a preset and run it from the command line without opening the UI: `python pipeline.py run --preset NAME --input shot.mov`
+- **Batch** — Tick Fix Missing Frames / Upscale Studio / Detail Studio / Expansion Studio / Lens Studio, save the tabs' settings as a preset file, and run it from the command line without opening the UI: `python pipeline.py run --preset NAME-or-file.json --input shot.mov`
 - Plus: MOV ↔ EXR conversion, temporal smoothing, segmentation, and more
 
 ## Getting Started
