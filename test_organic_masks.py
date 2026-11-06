@@ -20393,6 +20393,8 @@ class TestPipeline(unittest.TestCase):
         app.exr_depth_var = self.V("16")
         app.ff_cs_var = self.V("Auto")
         app.usc_cs_out_var = self.V("ACES")
+        app.ups_fac_var = self.V("2")
+        app.det_fac_var = self.V("4")
         app.organic_effect_var = self.V("Bloom")
         app.sam_other_var = self.V("no")
         pending = []
@@ -20403,7 +20405,9 @@ class TestPipeline(unittest.TestCase):
         app.ff_input = None
         app.ff_faults = []
         app.ff_is_movie = False
-        app._usc_frames = None
+        app._usc_frames = app._ups_frames = app._det_frames = None
+        app._ups_running = app._det_running = False
+        app._batch_d = {"upstudio": {"var": self.V(True)}}
         app.organic_frames = []
         app._e_running = app._ff_busy = app._usc_running = app._organic_running = False
         app._adw_output_root = lambda folder: os.path.join(tmp, "ADW")
@@ -20446,6 +20450,18 @@ class TestPipeline(unittest.TestCase):
         def org_run():
             app._organic_running = True
             later("_organic_running", lambda: write(os.path.join(tmp, "ADW", "Lens_Studio_v01")))
+        def ups_accept(p):
+            app.calls.append(("ups", p)); app._ups_frames = ["a"]
+        def ups_run():
+            app._ups_running = True
+            later("_ups_running", lambda: write(os.path.join(tmp, "ADW", "UPSCALE_v01")))
+        def det_accept(p):
+            app.calls.append(("det", p)); app._det_frames = ["a"]
+        def det_run():
+            app._det_running = True
+            later("_det_running", lambda: write(os.path.join(tmp, "ADW", "DETAIL_v01")))
+        app._ups_accept, app._ups_run = ups_accept, ups_run
+        app._det_accept, app._det_run = det_accept, det_run
         app._e_accept, app._erun = e_accept, erun
         app._ff_accept, app._ff_scan_start, app._ff_fix_start = ff_accept, ff_scan, ff_fix
         app._usc_accept, app._usc_run = usc_accept, usc_run
@@ -20460,12 +20476,15 @@ class TestPipeline(unittest.TestCase):
                 fn()
             n += 1
 
-    def test_steps_in_order_and_lens_optional(self):
+    def test_modules_in_order_and_exr_is_automatic(self):
         self.assertEqual([k for k, _n, _p in App.PIPELINE_STEPS],
-                         ["exr", "fixframes", "upscale", "organic"])
-        self.assertEqual(App.PIPELINE_OPTIONAL, ("organic",))
+                         ["exr", "fixframes", "upstudio", "detail", "upscale", "organic"])
+        self.assertEqual(App.PIPELINE_AUTO, ("exr",))
         self.assertEqual([p for _k, _n, p in App.PIPELINE_STEPS],
-                         ["exr", "ff", "usc", "organic"])
+                         ["exr", "ff", "ups", "det", "usc", "organic"])
+        self.assertEqual([n for _k, n, _p in App.PIPELINE_STEPS][1:],
+                         ["Fix Missing Frames", "Upscale Studio", "Detail Studio",
+                          "Expansion Studio", "Lens Studio"])
 
     def test_preset_roundtrip_holds_the_four_tabs_settings(self):
         import tempfile
@@ -20483,6 +20502,8 @@ class TestPipeline(unittest.TestCase):
         self.assertEqual(d["modules"]["exr"]["vars"], {"exr_depth_var": "16"})
         self.assertEqual(d["modules"]["fixframes"]["vars"], {"ff_cs_var": "Auto"})
         self.assertEqual(d["modules"]["upscale"]["vars"], {"usc_cs_out_var": "ACES"})
+        self.assertEqual(d["modules"]["upstudio"]["vars"], {"ups_fac_var": "2"})
+        self.assertEqual(d["modules"]["detail"]["vars"], {"det_fac_var": "4"})
         self.assertEqual(d["modules"]["organic"]["vars"], {"organic_effect_var": "Bloom"})
         self.assertNotIn("sam", str(d["modules"]))
         self.assertEqual(App._pipeline_list(), ["Show A"])
@@ -20503,27 +20524,35 @@ class TestPipeline(unittest.TestCase):
         self.assertIsNone(App._pipeline_newest(tmp, "DETAIL"))
         self.assertIsNone(App._pipeline_newest("/nope", "EXPAND"))
 
-    def test_a_movie_runs_every_step_each_feeding_the_next(self):
+    def test_a_movie_runs_every_module_each_feeding_the_next(self):
         import tempfile
         tmp = tempfile.mkdtemp()
         app = self._stub(tmp)
         mov = os.path.join(tmp, "shot.mov"); open(mov, "w").close()
         app.ff_faults = [(3, 4)]
         done = []
-        app._pipeline_run({"name": "p", "steps": ["exr", "fixframes", "upscale", "organic"],
+        # The ticks, in any order; MOV -> EXR is not a tick but leads.
+        app._pipeline_run({"name": "p", "steps": ["organic", "upscale", "detail",
+                                                  "upstudio", "fixframes"],
                            "modules": {}}, mov, on_done=lambda ok, o: done.append((ok, o)))
         self.assertTrue(app._pipeline_active)
         self.assertTrue(app._slow_notice_heard)
+        self.assertFalse(app._batch["upstudio"]["var"].get())   # no batch roots
         self._drain(app)
         self.assertEqual(done[0][0], True)
         out = done[0][1]
         exr = os.path.join(tmp, "EXR")
+        self.assertEqual(list(out), ["exr", "fixframes", "upstudio", "detail",
+                                     "upscale", "organic"])
         self.assertEqual(out["exr"], exr)
         self.assertEqual(out["fixframes"], os.path.join(tmp, "FF_EXR"))
+        self.assertEqual(out["upstudio"], os.path.join(tmp, "ADW", "UPSCALE_v01"))
+        self.assertEqual(out["detail"], os.path.join(tmp, "ADW", "DETAIL_v01"))
         self.assertEqual(out["upscale"], os.path.join(tmp, "ADW", "EXPAND_v02"))
         self.assertEqual(out["organic"], os.path.join(tmp, "ADW", "Lens_Studio_v01"))
         self.assertEqual(app.calls, [("exr", mov), ("ff", exr), ("fix", exr),
-                                     ("usc", out["fixframes"]), ("organic", out["upscale"])])
+                                     ("ups", out["fixframes"]), ("det", out["upstudio"]),
+                                     ("usc", out["detail"]), ("organic", out["upscale"])])
         self.assertFalse(app._pipeline_active)
         self.assertIsNone(app._pipeline_state)
 
@@ -20533,7 +20562,7 @@ class TestPipeline(unittest.TestCase):
         app = self._stub(tmp)
         seq = os.path.join(tmp, "plate"); os.makedirs(seq)
         done = []
-        app._pipeline_run({"name": "p", "steps": ["exr", "fixframes", "upscale"],
+        app._pipeline_run({"name": "p", "steps": ["fixframes", "upscale"],
                            "modules": {}}, seq, on_done=lambda ok, o: done.append((ok, o)))
         self._drain(app)
         self.assertTrue(done[0][0])
@@ -20551,8 +20580,10 @@ class TestPipeline(unittest.TestCase):
                            "modules": {}}, seq, steps=["upscale"],
                           on_done=lambda ok, o: done.append((ok, o)))
         self._drain(app)
-        self.assertEqual(list(done[0][1]), ["upscale"])
+        self.assertEqual(list(done[0][1]), ["exr", "upscale"])
         self.assertEqual(app.calls, [("usc", seq)])
+        with self.assertRaises(ValueError):          # nothing ticked
+            self._stub(tmp)._pipeline_run({"name": "p", "steps": ["exr"], "modules": {}}, seq)
 
     def test_a_step_that_does_not_start_or_write_stops_the_run(self):
         import tempfile
@@ -20564,7 +20595,7 @@ class TestPipeline(unittest.TestCase):
         app._pipeline_run({"name": "p", "steps": ["upscale", "organic"], "modules": {}},
                           seq, on_log=logs.append, on_done=lambda ok, o: done.append((ok, o)))
         self._drain(app)
-        self.assertEqual(done, [(False, {})])
+        self.assertEqual(done, [(False, {"exr": seq})])
         self.assertTrue(any("did not start" in m for m in logs))
         self.assertNotIn(("organic", seq), app.calls)
         self.assertFalse(app._pipeline_active)
@@ -20593,18 +20624,20 @@ class TestPipeline(unittest.TestCase):
 
     def test_the_tab_exists_and_the_cli_parses(self):
         import inspect
-        self.assertIn('("Pipeline",           "pipeline")', inspect.getsource(App._tabbar))
+        self.assertIn('("Batch",              "pipeline")', inspect.getsource(App._tabbar))
         self.assertIn("self._tab_pipeline()", inspect.getsource(App._build))
         body = inspect.getsource(App._tab_pipeline)
-        for s in ("pipe_name_var", "pipe_step_vars", "Save preset",
-                  "Run pipeline", "pipe_cmd_lbl", "pipe_log_txt"):
+        for s in ("pipe_name_var", "pipe_step_vars", "Save preset", "Save as…",
+                  "Load file…", "Run batch", "pipe_cmd_lbl", "pipe_log_txt",
+                  "if key in self.PIPELINE_AUTO:"):
             self.assertIn(s, body)
         self.assertIn("pipeline.py", inspect.getsource(App._pipeline_cmd))
         import importlib.util
         here = os.path.dirname(os.path.abspath(App.__module__ and __import__("ai_toolbox").__file__))
         spec = importlib.util.spec_from_file_location("pipeline_cli", os.path.join(here, "pipeline.py"))
         cli = importlib.util.module_from_spec(spec); spec.loader.exec_module(cli)
-        self.assertEqual(cli.STEP_KEYS, ("exr", "fixframes", "upscale", "organic"))
+        self.assertEqual(cli.STEP_KEYS, ("exr", "fixframes", "upstudio", "detail",
+                                         "upscale", "organic"))
         with self.assertRaises(SystemExit):
             cli.main(["run"])                # --preset and --input are required
         with unittest.mock.patch.object(App, "PIPELINE_DIR", tempfile.mkdtemp()):
