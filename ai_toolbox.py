@@ -32095,12 +32095,41 @@ def cs_convert(a, src, dst):
                         fg="#555555", cursor="hand2")
         _csi.pack(side="left", padx=(6, 0))
         self._tooltip(self.CS_OUT_TIP)(_csi)
+        # The effect as a layer of the SOURCE EXR rather than a new
+        # image: comp gets the untouched plate as the main image, the
+        # render in a "lens" layer, and every other channel the plate
+        # carried (BlowMask, alpha, cryptomattes...) untouched.
+        _lyrow = tk.Frame(_obottom, bg=BG)
+        _lyrow.pack(fill="x", padx=16, pady=(4, 0))
+        self.organic_layer_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(_lyrow,
+            text=f"Effect as EXR layer \u201c{self.LENS_LAYER}\u201d, "
+                 "source stays main",
+            bg=BG, fg=W, variable=self.organic_layer_var,
+            selectcolor="#2A2A14", activebackground=BG, activeforeground=W,
+            font=FSM, highlightthickness=0, bd=0).pack(side="left")
+        _lyi = tk.Label(_lyrow, text="\u24d8", font=FSM, bg=BG,
+                        fg="#555555", cursor="hand2")
+        _lyi.pack(side="left", padx=(6, 0))
+        self._tooltip(
+            "Off: each output EXR is the rendered image\n"
+            "(R, G, B) in the Output colour chosen above.\n\n"
+            "On: each output EXR is a COPY of the source\n"
+            "frame -- R, G, B untouched, plus every other\n"
+            "channel it had (BlowMask, A, mattes...) --\n"
+            f"with the render added as {self.LENS_LAYER}.R/G/B.\n"
+            "The layer is written in the source's own\n"
+            "colourspace so the two line up in comp;\n"
+            "Output colour is ignored. Needs EXR in and\n"
+            "EXR out; the Rec.709 MOV shows the layer.")(_lyi)
         self.organic_out_lbl = tk.Label(_obottom, text="", font=FSM, bg=BG,
                                         fg="#777777", anchor="w")
         self.organic_out_lbl.pack(fill="x", padx=16, pady=(2, 0))
         self.organic_fmt_var.trace_add(
             "write", lambda *_: self._organic_out_refresh_label())
         self.organic_cs_out_var.trace_add(
+            "write", lambda *_: self._organic_out_refresh_label())
+        self.organic_layer_var.trace_add(
             "write", lambda *_: self._organic_out_refresh_label())
         self._organic_out_refresh_label()
 
@@ -32838,9 +32867,99 @@ def cs_convert(a, src, dst):
         if lbl is None:
             return
         try:
-            lbl.configure(text="Writes \u2192 " + self._organic_out_space())
+            if self._organic_layer_mode():
+                k = self._organic_in_key() or "linear"
+                lbl.configure(
+                    text=f"Writes \u2192 source + {self.LENS_LAYER} layer, "
+                         f"{self._cs_name(k).replace('Scene-linear ', 'lin ')}")
+            else:
+                lbl.configure(text="Writes \u2192 " + self._organic_out_space())
         except Exception:
             pass
+
+    LENS_LAYER = "lens"
+
+    def _organic_layer_mode(self, fmt=None):
+        """True when the render goes out as a layer of the source EXR
+        (the tick, and an EXR Write format)."""
+        v = self.__dict__.get("organic_layer_var")
+        if v is None or not v.get():
+            return False
+        if fmt is None:
+            f = self.__dict__.get("organic_fmt_var")
+            fmt = f.get() if f is not None else self.ORGANIC_FORMATS[0]
+        return str(fmt).startswith("EXR")
+
+    @classmethod
+    def _organic_write_layered(cls, dst, src_exr, rgb, half=True, layer=None):
+        """The source EXR copied whole -- header, data window and every
+        channel's bytes exactly as they are (R, G, B, A, BlowMask,
+        mattes...) -- with `rgb` added as <layer>.R/G/B. `rgb` must
+        already be in the source's colourspace and its size. An
+        existing <layer> in the source is replaced."""
+        import numpy as np
+        import OpenEXR, Imath
+        layer = layer or cls.LENS_LAYER
+        f = OpenEXR.InputFile(src_exr)
+        hdr = f.header()
+        dw = hdr["dataWindow"]
+        w = dw.max.x - dw.min.x + 1
+        h = dw.max.y - dw.min.y + 1
+        a = np.ascontiguousarray(np.asarray(rgb, np.float32))
+        if a.shape[:2] != (h, w):
+            f.close()
+            raise ValueError(f"render is {a.shape[1]}x{a.shape[0]}, source "
+                             f"data window {w}x{h}")
+        names = [n for n in hdr["channels"] if not n.startswith(layer + ".")]
+        data = {n: f.channel(n) for n in names}     # bytes in their own type
+        f.close()
+        pt = Imath.PixelType(Imath.PixelType.HALF if half
+                             else Imath.PixelType.FLOAT)
+        cast = np.float16 if half else np.float32
+        chans = {n: hdr["channels"][n] for n in names}
+        for i, c in enumerate("RGB"):
+            n = f"{layer}.{c}"
+            chans[n] = Imath.Channel(pt)
+            data[n] = a[:, :, i].astype(cast).tobytes()
+        hdr = dict(hdr)
+        hdr["channels"] = chans
+        try:
+            out = OpenEXR.OutputFile(dst, hdr)
+        except Exception:
+            # Some header attributes the reader hands back cannot go
+            # out again (preview images, odd custom types); keep the
+            # ones that matter and drop the rest.
+            keep = ("channels", "compression", "dataWindow", "displayWindow",
+                    "lineOrder", "pixelAspectRatio", "screenWindowCenter",
+                    "screenWindowWidth", "chromaticities", "whiteLuminance",
+                    "acesImageContainerFlag", "framesPerSecond",
+                    "timeCode", "owner", "comments")
+            hdr = {k: v for k, v in hdr.items() if k in keep}
+            out = OpenEXR.OutputFile(dst, hdr)
+        out.writePixels(data)
+        out.close()
+        return dst
+
+    @staticmethod
+    def _exr_read_layer(path, layer):
+        """<layer>.R/G/B of an EXR as float32 HxWx3, or None when the
+        layer is not there."""
+        import numpy as np
+        import OpenEXR, Imath
+        f = OpenEXR.InputFile(path)
+        try:
+            hdr = f.header()
+            names = [f"{layer}.{c}" for c in "RGB"]
+            if any(n not in hdr["channels"] for n in names):
+                return None
+            dw = hdr["dataWindow"]
+            w = dw.max.x - dw.min.x + 1
+            h = dw.max.y - dw.min.y + 1
+            pt = Imath.PixelType(Imath.PixelType.FLOAT)
+            return np.stack([np.frombuffer(f.channel(n, pt), np.float32)
+                             .reshape(h, w) for n in names], axis=-1)
+        finally:
+            f.close()
 
     def _organic_pick_movie(self):
         p = filedialog.askopenfilename(
@@ -34046,6 +34165,13 @@ def cs_convert(a, src, dst):
         _cs_in = getattr(self, "_organic_source_cs", None)
         _aces = bool(self._organic_source_aces) and not _enc and not _pq
         _out_key = self._organic_cs_out_key(_fmt)
+        # Layer mode: the file IS the source, so what the folder is
+        # tagged as -- and the space the layer is written in -- is the
+        # source's, whatever Output colour says.
+        _layer = self._organic_layer_mode(_fmt)
+        if _layer:
+            _out_key = self._organic_in_key() or "linear"
+        _layer_warned = False
         # ...and the Expansion adjustment, for the same reason.
         _exp_gain = self._organic_exp_gain()
         if abs(_exp_gain - 1.0) > 1e-6:
@@ -34058,7 +34184,10 @@ def cs_convert(a, src, dst):
         self._adw_write_colorspace(out_dir, *self._cs_sidecar(_out_key))
         self.after(0, lambda f=_fmt, k=_out_key: self.log(
             self.organic_log_txt,
-            f"Writing {f} \u2014 {self._cs_name(k)}.", "hi"))
+            (f"Writing {f} \u2014 source frames with the render as layer "
+             f"\u201c{self.LENS_LAYER}\u201d ({self._cs_name(k)}, as the "
+             "source); every other channel is kept." if _layer else
+             f"Writing {f} \u2014 {self._cs_name(k)}."), "hi"))
         try:
             for n, i in enumerate(range(v0, v1)):
                 if self._organic_cancel:
@@ -34070,8 +34199,21 @@ def cs_convert(a, src, dst):
                 out = self._organic_apply_stack(lin, params,
                     seed=self._organic_frame_seed(i))
                 stem = self._organic_out_stem(self.organic_frames, i)
-                dst = self._organic_write_frame(
-                    os.path.join(out_dir, stem), out, _fmt, cs=_out_key)
+                if _layer and src.lower().endswith(".exr"):
+                    dst = self._organic_write_layered(
+                        os.path.join(out_dir, stem) + ".exr", src,
+                        self._cs_from_lin709(out, _out_key),
+                        half=("16-bit" in _fmt))
+                else:
+                    if _layer and not _layer_warned:
+                        _layer_warned = True
+                        self.after(0, lambda: self.log(
+                            self.organic_log_txt,
+                            "Layer mode needs an EXR source \u2014 this "
+                            "frame is not one, so it is written as a "
+                            "plain render.", "err"))
+                    dst = self._organic_write_frame(
+                        os.path.join(out_dir, stem), out, _fmt, cs=_out_key)
                 written.append(os.path.basename(dst))
                 frac = (n + 1) / total
                 self.after(0, lambda p=frac, k=n+1:
@@ -34095,7 +34237,8 @@ def cs_convert(a, src, dst):
                     and self.organic_out_mov_var.get()):
                 self._adw_rec709_mov(out_dir, self.LENS_OUT_NAME,
                                      log_w=self.organic_log_txt,
-                                     key=_out_key, frames=written)
+                                     key=_out_key, frames=written,
+                                     layer=self.LENS_LAYER if _layer else None)
             self.after(0, lambda: self._organic_after_run_sendto(out_dir))
             try:
                 self._reveal(out_dir)
@@ -34182,12 +34325,13 @@ def cs_convert(a, src, dst):
             return False
 
     def _adw_rec709_mov(self, out_dir, name, fps=24.0, log_w=None, key=None,
-                        frames=None):
+                        frames=None, layer=None):
         """A Rec.709 ProRes 422 HQ preview beside whatever a module
         wrote -- ACEScg EXRs AND a movie you can play. Every frame is
         read back, taken from the folder's colourspace (the sidecar,
         or `key`) to Display Rec.709, and encoded with BT.709 tags.
-        Returns the movie path, or None."""
+        `layer`: show that EXR layer (<layer>.R/G/B) instead of R/G/B
+        where a frame has it. Returns the movie path, or None."""
         import numpy as np
         import tempfile, shutil as _sh
 
@@ -34212,8 +34356,12 @@ def cs_convert(a, src, dst):
             try:
                 for k, f in enumerate(frames):
                     pth = os.path.join(out_dir, f)
+                    a = None
                     if pth.lower().endswith(".exr"):
-                        a = self._ff_read_frame(pth)
+                        if layer:
+                            a = self._exr_read_layer(pth, layer)
+                        if a is None:
+                            a = self._ff_read_frame(pth)
                     else:
                         a = np.asarray(Image.open(pth).convert("RGB"),
                                        np.float32) / 255.0
