@@ -19877,6 +19877,8 @@ class TestLensStudioCancelRender(unittest.TestCase):
             LENS_OUT_NAME = App.LENS_OUT_NAME
             organic_log_txt = None
             _organic_cs_out_key = lambda s, fmt=None: "linear"
+            _organic_layer_mode = lambda s, fmt=None: False
+            LENS_LAYER = App.LENS_LAYER
             _cs_sidecar = App._cs_sidecar
             _cs_name = App._cs_name
         st = S()
@@ -20644,6 +20646,95 @@ class TestPipeline(unittest.TestCase):
             with self.assertRaises(SystemExit) as cm:
                 cli.main(["run", "--preset", "p", "--input", "/nope/none"])
             self.assertIn("no preset 'p'", str(cm.exception))
+
+
+class TestLensLayerOutput(unittest.TestCase):
+    """Lens Studio's "Effect as EXR layer" tick: the output EXR is the
+    source frame -- every channel, bytes untouched -- plus the render as
+    lens.R/G/B in the source's colourspace; the Rec.709 MOV shows the
+    layer; PNG out or a non-EXR source falls back to a plain render."""
+
+    def _src(self, path, w=8, h=6):
+        import numpy as np, OpenEXR, Imath
+        rng = np.random.default_rng(3)
+        planes = {"R": rng.random((h, w)) * 4, "G": rng.random((h, w)),
+                  "B": rng.random((h, w)), "A": np.ones((h, w)),
+                  "BlowMask": (rng.random((h, w)) > 0.5).astype(np.float32),
+                  "crypto00.red": rng.random((h, w))}
+        hdr = OpenEXR.Header(w, h)
+        half = Imath.PixelType(Imath.PixelType.HALF)
+        flt = Imath.PixelType(Imath.PixelType.FLOAT)
+        hdr["channels"] = {k: Imath.Channel(flt if k == "BlowMask" else half)
+                           for k in planes}
+        hdr["pixelAspectRatio"] = 2.0
+        f = OpenEXR.OutputFile(path, hdr)
+        f.writePixels({k: v.astype(np.float32 if k == "BlowMask" else np.float16)
+                       .tobytes() for k, v in planes.items()})
+        f.close()
+        return planes
+
+    def _raw(self, path):
+        import OpenEXR
+        f = OpenEXR.InputFile(path)
+        hdr = f.header()
+        d = {n: (f.channel(n), hdr["channels"][n].type.v) for n in hdr["channels"]}
+        f.close()
+        return hdr, d
+
+    def test_layered_write_keeps_every_source_channel_and_adds_lens(self):
+        import tempfile, numpy as np
+        tmp = tempfile.mkdtemp()
+        src = os.path.join(tmp, "plate.0001.exr")
+        self._src(src)
+        shdr, sraw = self._raw(src)
+        rgb = np.random.default_rng(5).random((6, 8, 3)).astype(np.float32) * 3
+        dst = App._organic_write_layered(os.path.join(tmp, "out.exr"), src, rgb)
+        dhdr, draw = self._raw(dst)
+        for n, (b, ty) in sraw.items():
+            self.assertEqual(draw[n], (b, ty), n)          # bytes and type as they were
+        self.assertEqual(sorted(draw), sorted(list(sraw) + ["lens.R", "lens.G", "lens.B"]))
+        self.assertEqual(float(dhdr["pixelAspectRatio"]), 2.0)
+        self.assertEqual(dhdr["dataWindow"], shdr["dataWindow"])
+        got = App._exr_read_layer(dst, "lens")
+        self.assertEqual(got.shape, (6, 8, 3))
+        np.testing.assert_allclose(got, rgb, rtol=2e-3, atol=2e-3)   # half
+        self.assertIsNone(App._exr_read_layer(src, "lens"))
+        # 32-bit float layer is exact, and an existing lens layer is replaced.
+        rgb2 = rgb * 0.5
+        dst2 = App._organic_write_layered(os.path.join(tmp, "out2.exr"), dst, rgb2,
+                                          half=False)
+        np.testing.assert_array_equal(App._exr_read_layer(dst2, "lens"), rgb2)
+        self.assertEqual(sorted(self._raw(dst2)[1]), sorted(draw))
+        with self.assertRaises(ValueError):
+            App._organic_write_layered(os.path.join(tmp, "bad.exr"), src, rgb[:3])
+
+    def test_layer_mode_needs_the_tick_and_an_exr_format(self):
+        class V:
+            def __init__(self, v): self.v = v
+            def get(self): return self.v
+        app = App.__new__(App)
+        self.assertFalse(app._organic_layer_mode())
+        app.organic_layer_var = V(True)
+        app.organic_fmt_var = V("EXR 16-bit half")
+        self.assertTrue(app._organic_layer_mode())
+        self.assertFalse(app._organic_layer_mode("PNG 8-bit"))
+        app.organic_fmt_var = V("PNG 16-bit")
+        self.assertFalse(app._organic_layer_mode())
+        self.assertEqual(App.LENS_LAYER, "lens")
+
+    def test_the_render_writes_the_layer_in_the_sources_space(self):
+        import inspect
+        w = inspect.getsource(App._organic_run_worker)
+        self.assertIn("_layer = self._organic_layer_mode(_fmt)", w)
+        self.assertIn('_out_key = self._organic_in_key() or "linear"', w)
+        self.assertIn("self._organic_write_layered(", w)
+        self.assertIn("self._cs_from_lin709(out, _out_key)", w)
+        self.assertIn("Layer mode needs an EXR source", w)
+        self.assertIn("layer=self.LENS_LAYER if _layer else None", w)
+        ui = inspect.getsource(App._tab_organic)
+        self.assertIn("organic_layer_var", ui)
+        self.assertIn("Effect as EXR layer", ui)
+        self.assertIn("layer=None", inspect.getsource(App._adw_rec709_mov).split('"""')[0])
 
 
 if __name__ == "__main__":

@@ -187,6 +187,11 @@ prefixes. Use this table before searching.
 - `pipeline.py` (repo root) is the CLI: `list`, `show --preset NAME|file.json`, `run --preset NAME|file.json --input PATH [--steps ...] [--json FILE] [--quiet]`; it builds `App(modules=["pipeline"])`, withdraws it, runs the preset and exits 0/1. It is still a Tk program: it needs the app's Python (the launcher writes it to `~/.ai_toolbox/python`) and a logged-in desktop session on the Mac. Tests: `TestPipeline`.
 - Not done: packaging the batch runner as its own app/DMG — Aron said "it is not done yet".
 
+## Lens Studio: effect as an EXR layer (8 Nov 2026)
+- Tick "Effect as EXR layer “lens”, source stays main" (`organic_layer_var`; `_organic_layer_mode(fmt)` = tick + an EXR Write format; `LENS_LAYER = "lens"`). Each output EXR is then a copy of the source frame — header, data window and every channel's bytes untouched (R, G, B, A, BlowMask, mattes…) — plus the render as `lens.R/G/B` (`_organic_write_layered(dst, src, rgb, half, layer)`; an existing `lens` layer is replaced; header attributes that cannot be re-written are dropped on a second attempt).
+- The layer is written in the SOURCE's colourspace (`_organic_in_key()`), so Output colour is ignored and the folder sidecar is the source's key; the worker converts with `_cs_from_lin709(out, key)`. The plate's own values are not touched by the Expansion adjustment (that only feeds the render). A non-EXR source frame falls back to a plain render with one log line.
+- `_adw_rec709_mov(..., layer=)` + `_exr_read_layer(path, layer)`: the "+ Rec.709 MOV" shows the lens layer in this mode. Tests: `TestLensLayerOutput`.
+
 ## Colour handling
 
 - Every studio has an "Input colour" choice: Auto, display-encoded
