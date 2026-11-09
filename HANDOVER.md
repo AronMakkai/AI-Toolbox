@@ -161,6 +161,10 @@ prefixes. Use this table before searching.
 - The layer is written in the SOURCE's colourspace (`_organic_in_key()`), so Output colour is ignored and the folder sidecar is the source's key; the worker converts with `_cs_from_lin709(out, key)`. The plate's own values are not touched by the Expansion adjustment (that only feeds the render). A non-EXR source frame falls back to a plain render with one log line.
 - `_adw_rec709_mov(..., layer=)` + `_exr_read_layer(path, layer)`: the "+ Rec.709 MOV" shows the lens layer in this mode. Tests: `TestLensLayerOutput`.
 
+## The Python the app runs with (9 Nov 2026)
+- `PYTHON_NEEDS = ("torch","cv2","numpy","PIL","OpenEXR")`; `_python_missing()` checks by spec. `_remember_python()` writes `~/.ai_toolbox/python` ONLY when nothing is missing — a `python ai_toolbox.py` from a bare conda base used to overwrite it, after which the Dock app launched with a Python that could not read EXRs ("Lens Studio does not load EXRs any more"). The studio launcher (`build_dmg.sh`) checks the same five modules.
+- A missing OpenEXR is said plainly: `_exr_module_missing(ex)` + `_exr_missing_warn(log_w)` (log line with the pip command every time, one dialog per session, none in pipeline mode); `__main__` warns at startup when OpenEXR is absent; Lens Studio's `_organic_load_linear` fallback uses it. Tests: `TestPythonNeedsOpenEXR`.
+
 ## Colour handling
 
 - Every studio has an "Input colour" choice: Auto, display-encoded
