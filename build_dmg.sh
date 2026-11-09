@@ -132,14 +132,14 @@ PYTHON=""
 for c in "${CANDIDATES[@]}"; do
     [ -z "$c" ] && continue
     [ -x "$c" ] || continue
-    if "$c" -c "import torch, cv2, numpy, PIL" >/dev/null 2>&1; then
+    if "$c" -c "import torch, cv2, numpy, PIL, OpenEXR" >/dev/null 2>&1; then
         PYTHON="$c"
         break
     fi
 done
 
 if [ -z "$PYTHON" ]; then
-    osascript -e 'display dialog "Studio Toolbox could not find a Python with torch, opencv-python, numpy and Pillow installed.\n\nEither install one (Terminal):\n\n  conda create -y -n studio python=3.13\n  conda activate studio\n  pip install torch opencv-python numpy pillow OpenEXR\n\nor, if you already have such an environment, launch once from a Terminal where it is active:\n\n  conda activate <your-env>\n  open /Applications/Studio-Toolbox.app\n\nAfter one successful launch the app remembers that Python and starts from the Dock." with title "Studio Toolbox — Python not found" buttons {"OK"} default button 1 with icon caution'
+    osascript -e 'display dialog "Studio Toolbox could not find a Python with torch, opencv-python, numpy, Pillow and OpenEXR installed.\n\nEither install one (Terminal):\n\n  conda create -y -n studio python=3.13\n  conda activate studio\n  pip install torch opencv-python numpy pillow OpenEXR\n\nor, if you already have such an environment, launch once from a Terminal where it is active:\n\n  conda activate <your-env>\n  open /Applications/Studio-Toolbox.app\n\nAfter one successful launch the app remembers that Python and starts from the Dock." with title "Studio Toolbox — Python not found" buttons {"OK"} default button 1 with icon caution'
     exit 1
 fi
 
