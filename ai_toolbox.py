@@ -3025,6 +3025,39 @@ class App(tk.Tk):
         w.see("end")
         w.configure(state="disabled")
 
+    @staticmethod
+    def _exr_module_missing(ex):
+        """True when an exception is "there is no OpenEXR module here"
+        rather than a bad file."""
+        m = str(ex)
+        return isinstance(ex, ImportError) or "OpenEXR" in m and (
+            "No module" in m or "halted" in m or "import" in m.lower())
+
+    _exr_missing_warned = False
+
+    def _exr_missing_warn(self, log_w=None):
+        """Say, once and plainly, that this Python cannot read EXRs and
+        how to fix it -- in the module's log and a dialog -- instead of
+        a quiet 8-bit fallback that shows a black frame."""
+        fix = f"{sys.executable} -m pip install OpenEXR"
+        msg = ("This Python has no OpenEXR module, so EXR files cannot "
+               f"be read.\n\nRunning: {sys.executable}\n\nFix (Terminal):\n"
+               f"  {fix}\n\nor start the app with the Python that has it "
+               "(cat ~/.ai_toolbox/python shows the last good one).")
+        if log_w is not None:
+            try:
+                self.log(log_w, "EXR read failed: no OpenEXR module in "
+                         f"{sys.executable} \u2014 run: {fix}", "err")
+            except Exception:
+                pass
+        if self._exr_missing_warned or self._pipeline_active:
+            return
+        self._exr_missing_warned = True
+        try:
+            messagebox.showerror("EXR files cannot be read", msg)
+        except Exception:
+            pass
+
     def _reveal(self, path):
         """Open a folder or file in the OS's file manager -- Finder,
         Explorer, or a Linux file manager via xdg-open. The single
@@ -22774,8 +22807,11 @@ def cs_convert(a, src, dst):
                     arr = np.maximum(self._aces_to_lin709(arr), 0.0)
                 return arr
             except Exception as ex:
-                self.log(self.organic_log_txt,
-                    f"EXR read failed ({ex}); falling back to 8-bit.", "err")
+                if self._exr_module_missing(ex):
+                    self._exr_missing_warn(self.organic_log_txt)
+                else:
+                    self.log(self.organic_log_txt,
+                        f"EXR read failed ({ex}); falling back to 8-bit.", "err")
         img = self._pv_frame(path).convert("RGB")
         arr = np.asarray(img, dtype=np.float32) / 255.0
         # undo the display curve -> linear
@@ -40433,11 +40469,35 @@ print("EXR write complete")
         threading.Thread(target=go, daemon=True).start()
 
 
+# What a Python must have for the app to be whole: the launcher checks
+# the same list, and a Python missing any of it is never remembered as
+# "the one" -- a `python ai_toolbox.py` from a bare conda base used to
+# be written to ~/.ai_toolbox/python, and from then on the Dock app
+# started with a Python that could not read EXRs.
+PYTHON_NEEDS = ("torch", "cv2", "numpy", "PIL", "OpenEXR")
+
+
+def _python_missing(mods=PYTHON_NEEDS):
+    """Names from `mods` this Python cannot import (by spec, no import)."""
+    import importlib.util
+    out = []
+    for m in mods:
+        try:
+            if importlib.util.find_spec(m) is None:
+                out.append(m)
+        except Exception:
+            out.append(m)
+    return out
+
+
 def _remember_python():
     """Note which Python ran the app, so the macOS launcher can find it
     next time without an activated conda env: the .app's launcher reads
-    ~/.ai_toolbox/python first."""
+    ~/.ai_toolbox/python first. Only a Python with everything in
+    PYTHON_NEEDS is written; a lesser one leaves the file alone."""
     try:
+        if _python_missing():
+            return
         d = os.path.expanduser("~/.ai_toolbox")
         os.makedirs(d, exist_ok=True)
         with open(os.path.join(d, "python"), "w", encoding="utf-8") as fh:
@@ -40448,4 +40508,8 @@ def _remember_python():
 
 if __name__ == "__main__":
     _remember_python()
-    App().mainloop()
+    _app = App()
+    if "OpenEXR" in _python_missing():
+        # Said up front, not discovered as a black frame in Lens Studio.
+        _app.after(1200, _app._exr_missing_warn)
+    _app.mainloop()

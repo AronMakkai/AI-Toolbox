@@ -20812,5 +20812,54 @@ class TestLensLayerOutput(unittest.TestCase):
         self.assertIn("layer=None", inspect.getsource(App._adw_rec709_mov).split('"""')[0])
 
 
+import ai_toolbox  # noqa: E402
+
+
+class TestPythonNeedsOpenEXR(unittest.TestCase):
+    """A Python without OpenEXR must never become the remembered one
+    (the Dock app would then start unable to read EXRs), and a missing
+    module is said plainly instead of a silent 8-bit fallback."""
+
+    def test_remember_python_skips_a_python_missing_a_module(self):
+        import tempfile, unittest.mock as um
+        home = tempfile.mkdtemp()
+        with um.patch.dict(os.environ, {"HOME": home}):
+            with um.patch.object(ai_toolbox, "_python_missing", lambda *a: ["OpenEXR"]):
+                ai_toolbox._remember_python()
+                self.assertFalse(os.path.exists(os.path.join(home, ".ai_toolbox", "python")))
+            with um.patch.object(ai_toolbox, "_python_missing", lambda *a: []):
+                ai_toolbox._remember_python()
+                self.assertEqual(open(os.path.join(home, ".ai_toolbox", "python")).read(),
+                                 sys.executable)
+        self.assertIn("OpenEXR", ai_toolbox.PYTHON_NEEDS)
+        self.assertIn("torch", ai_toolbox.PYTHON_NEEDS)
+        self.assertEqual(ai_toolbox._python_missing(("os", "sys")), [])
+        self.assertEqual(ai_toolbox._python_missing(("no_such_module_xyz",)),
+                         ["no_such_module_xyz"])
+
+    def test_missing_openexr_is_named_not_hidden(self):
+        self.assertTrue(App._exr_module_missing(ImportError("No module named 'OpenEXR'")))
+        self.assertTrue(App._exr_module_missing(
+            Exception("import of OpenEXR halted; None in sys.modules")))
+        self.assertFalse(App._exr_module_missing(Exception("bad header")))
+        logs = []
+        app = App.__new__(App)
+        app.log = lambda w, m, tag="dim": logs.append((m, tag))
+        shown = []
+        import unittest.mock as um
+        with um.patch.object(ai_toolbox.messagebox, "showerror",
+                             lambda *a, **k: shown.append(a)):
+            app._exr_missing_warn("logw")
+            app._exr_missing_warn("logw")
+        self.assertEqual(len(shown), 1)                 # the dialog once
+        self.assertEqual(len(logs), 2)                  # the log every time
+        self.assertIn("pip install OpenEXR", logs[0][0])
+        self.assertEqual(logs[0][1], "err")
+        import inspect
+        src = inspect.getsource(App._organic_load_linear)
+        self.assertIn("self._exr_module_missing(ex)", src)
+        self.assertIn("self._exr_missing_warn(self.organic_log_txt)", src)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
