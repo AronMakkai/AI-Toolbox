@@ -21600,6 +21600,41 @@ class TestPipeline(unittest.TestCase):
             subprocess.run = real
         self.assertFalse(App._pipeline_active)
 
+    def test_the_settings_view_shows_each_module_and_marks_changes(self):
+        import tempfile
+        tmp = tempfile.mkdtemp()
+        app = self._stub(tmp)
+        lines = []
+        class T:
+            def configure(self, **k): pass
+            def delete(self, *a): pass
+            def insert(self, _w, text, tag=None): lines.append((text, tag))
+        class F:
+            def winfo_children(self): return []
+        app.pipe_view_txt = T()
+        app.pipe_open_btns = F()
+        app._mkbtn = lambda *a, **k: type("B", (), {"pack": lambda *a, **k: None})()
+        app.pipe_step_vars = {"fixframes": self.V(True), "upstudio": self.V(False),
+                              "detail": self.V(False), "upscale": self.V(True),
+                              "organic": self.V(False)}
+        app.pipe_loaded = {"name": "Show A", "modules": {
+            "upscale": {"vars": {"usc_cs_out_var": "ACEScg"}},
+            "fixframes": {"vars": {"ff_cs_var": "Auto"}}}}
+        app._pipeline_view_refresh()
+        text = "".join(t for t, _ in lines)
+        self.assertIn("Fix Missing Frames\n", text)
+        self.assertIn("Expansion Studio\n", text)
+        self.assertNotIn("Lens Studio", text)
+        self.assertIn("   cs: Auto\n", text)                   # unchanged, pretty key
+        self.assertIn(" \u25cf cs out: ", text)                # moved since the load
+        self.assertIn("(preset: ACEScg)", text)
+        self.assertIn("1 setting(s) changed", text)
+        self.assertEqual(App._pipeline_pretty_key("_usc_scale_var", "usc"), "scale")
+        self.assertEqual(App._pipeline_pretty_key("ups_cs_out_var", "ups"), "cs out")
+        src = inspect_src = __import__("inspect").getsource(App.show)
+        self.assertIn('if key == "pipeline"', src)
+        del inspect_src
+
     def test_the_tab_exists_and_the_cli_parses(self):
         import inspect
         self.assertIn('("Batch",              "pipeline")', inspect.getsource(App._tabbar))
