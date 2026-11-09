@@ -812,6 +812,8 @@ class App(tk.Tk):
             self.after(150, self._det_reset_sash)
         if key == "exr":
             self.after(150, self._exr_reset_sash)
+        if key == "pipeline" and self.__dict__.get("pipe_view_txt") is not None:
+            self.after(50, self._pipeline_view_refresh)
         if key == "sam" and hasattr(self, "_sam_status_dot"):
             proc = getattr(self, "_sam_server", None)
             if proc is None or proc.poll() is not None:
@@ -25985,9 +25987,115 @@ def cs_convert(a, src, dst):
             "write", lambda *_: (self.__dict__.update(pipe_preset_file=None),
                                  self._pipeline_cmd_refresh()))
 
+        # Right: what the preset holds, module by module, as the tabs
+        # stand NOW -- a loaded preset's values with anything changed
+        # since marked -- then the log.
+        vh = tk.Frame(rf, bg=BG)
+        vh.pack(fill="x", padx=16, pady=(10, 2))
+        self.pipe_view_lbl = tk.Label(vh, text="Preset settings", font=FSM,
+                                      bg=BG, fg=G)
+        self.pipe_view_lbl.pack(side="left")
+        self._mkbtn(vh, "Refresh", self._pipeline_view_refresh
+                    ).pack(side="right")
+        self.pipe_open_btns = tk.Frame(vh, bg=BG)
+        self.pipe_open_btns.pack(side="right", padx=(0, 8))
+        vf = tk.Frame(rf, bg=S2, highlightthickness=1, highlightbackground=BD,
+                      highlightcolor=BD)
+        vf.pack(fill="both", expand=True, padx=16, pady=(0, 4))
+        self.pipe_view_txt = tk.Text(vf, bg=S2, fg=G, font=FM, bd=0,
+                                     highlightthickness=0, wrap="none",
+                                     state="disabled", padx=8, pady=6)
+        self.pipe_view_txt.pack(fill="both", expand=True, side="left")
+        self._mk_scrollbar(vf, self.pipe_view_txt).pack(side="right", fill="y")
+        self.pipe_view_txt.tag_configure("mod", foreground=W,
+                                         font=("Futura", 12))
+        self.pipe_view_txt.tag_configure("key", foreground=G)
+        self.pipe_view_txt.tag_configure("val", foreground="#CCCCCC")
+        self.pipe_view_txt.tag_configure("chg", foreground="#E0A030")
+        self.pipe_view_txt.tag_configure("dim", foreground="#444444")
+        self.pipe_loaded = None
+        for v in self.pipe_step_vars.values():
+            v.trace_add("write", lambda *_: self._pipeline_view_refresh())
         self.pipe_log_txt = self._logw(rf, "Batch log")
         self._pipeline_refresh()
         self._pipeline_cmd_refresh()
+        self._pipeline_view_refresh()
+
+    @staticmethod
+    def _pipeline_pretty_key(name, prefix):
+        """ups_cs_out_var -> "cs out"; _usc_scale_var -> "scale"."""
+        k = name.lstrip("_")
+        if k.startswith(prefix + "_"):
+            k = k[len(prefix) + 1:]
+        if k.endswith("_var"):
+            k = k[:-4]
+        return k.replace("_", " ")
+
+    def _pipeline_view_refresh(self):
+        """Fill the settings view: for every ticked module, each of its
+        settings as the tab holds it now; where a preset is loaded and
+        the tab has moved away from it, the line is marked and shows
+        the preset's value too. The buttons jump to a module's tab."""
+        txt = self.__dict__.get("pipe_view_txt")
+        if txt is None:
+            return
+        loaded = self.__dict__.get("pipe_loaded") or {}
+        lmods = loaded.get("modules") or {}
+        steps = self._pipeline_steps_chosen()
+        try:
+            now = self._pipeline_preset_collect("view", steps)
+        except Exception:
+            return
+        txt.configure(state="normal")
+        txt.delete("1.0", "end")
+        for w in self.pipe_open_btns.winfo_children():
+            w.destroy()
+        changed = 0
+        if not steps:
+            txt.insert("end", "Tick a module to see its settings.\n", "dim")
+        for key, label, prefix in self.PIPELINE_STEPS:
+            if key not in steps:
+                continue
+            vars_now = (now["modules"].get(key) or {}).get("vars") or {}
+            vars_was = (lmods.get(key) or {}).get("vars")
+            txt.insert("end", f"{label}\n", "mod")
+            if not vars_now:
+                txt.insert("end", "   (no settings)\n", "dim")
+            for name in sorted(vars_now):
+                v = vars_now[name]
+                if isinstance(v, str) and len(v) > 72:
+                    v = v[:69] + "\u2026"
+                k = self._pipeline_pretty_key(name, prefix)
+                if vars_was is not None and name in vars_was \
+                        and vars_was[name] != v:
+                    changed += 1
+                    txt.insert("end", f" \u25cf {k}: ", "chg")
+                    txt.insert("end", f"{v}", "chg")
+                    txt.insert("end", f"   (preset: {vars_was[name]})\n", "dim")
+                else:
+                    txt.insert("end", f"   {k}: ", "key")
+                    txt.insert("end", f"{v}\n", "val")
+            txt.insert("end", "\n")
+            self._mkbtn(self.pipe_open_btns, label.replace(" Studio", ""),
+                        lambda k=key: self.show(k)).pack(side="left", padx=2)
+        if loaded:
+            name = loaded.get("name") or "preset"
+            txt.insert("end", (
+                f"Loaded: {name} \u2014 "
+                + (f"{changed} setting(s) changed on the tabs since; "
+                   "Save preset writes them back." if changed else
+                   "the tabs match it.")) + "\n", "dim")
+        else:
+            txt.insert("end", "No preset loaded \u2014 this is what Save "
+                              "preset would write.\n", "dim")
+        txt.configure(state="disabled")
+        try:
+            self.pipe_view_lbl.configure(
+                text="Preset settings" + (f" \u2014 {changed} changed"
+                                          if changed else ""),
+                fg="#E0A030" if changed else G)
+        except Exception:
+            pass
 
     def _pipeline_refresh(self):
         lb = self.pipe_presets_lb
@@ -26024,11 +26132,14 @@ def cs_convert(a, src, dst):
                 if k in self.pipe_step_vars and self.pipe_step_vars[k].get()]
 
     def _pipeline_load_preset(self, d, name):
-        """A preset (dict) into the tabs, the ticks and the name box."""
+        """A preset (dict) into the tabs, the ticks and the name box;
+        remembered so the settings view can show what moved."""
         self.pipe_name_var.set(name)
         self._pipeline_preset_apply(d)
+        self.pipe_loaded = d
         for k, v in self.pipe_step_vars.items():
             v.set(k in (d.get("steps") or []))
+        self._pipeline_view_refresh()
         self.log(self.pipe_log_txt, f"Loaded preset '{name}' into the tabs "
                  "(" + ", ".join(self._pipeline_label(s)
                                  for s in d.get("steps") or []
@@ -26055,7 +26166,9 @@ def cs_convert(a, src, dst):
             return
         self.pipe_preset_file = p
         self.log(self.pipe_log_txt, "Saved " + p, "ok")
+        self.pipe_loaded = self._pipeline_preset_read(p)
         self._pipeline_cmd_refresh()
+        self._pipeline_view_refresh()
 
     def _pipeline_load_file_click(self):
         p = filedialog.askopenfilename(
@@ -26103,7 +26216,9 @@ def cs_convert(a, src, dst):
             return
         self._pipeline_refresh()
         self.log(self.pipe_log_txt, "Saved " + p, "ok")
+        self.pipe_loaded = self._pipeline_preset_read(p)
         self._pipeline_cmd_refresh()
+        self._pipeline_view_refresh()
 
     def _pipeline_delete_click(self):
         name = self.pipe_name_var.get().strip()
