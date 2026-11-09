@@ -21600,6 +21600,46 @@ class TestPipeline(unittest.TestCase):
             subprocess.run = real
         self.assertFalse(App._pipeline_active)
 
+    def test_model_tiles_and_lens_controls_travel_with_the_preset(self):
+        """Expansion's model selection is plain Python (_usc_sel), Lens
+        Studio's effect controls are og_* not organic_*: both must be in
+        the preset, or a loaded preset renders with the wrong model."""
+        import tempfile
+        tmp = tempfile.mkdtemp()
+        app = self._stub(tmp)
+        app._usc_sel = {"tonemap": False, "topaz": True, "wan_vace": False}
+        app._usc_view_pref = "topaz"
+        app._usc_render_model = lambda: "topaz"
+        app._ups_sel = {"esrgan": True, "seedvr": False, "flashvsr": False}
+        app._ups_view_pref = None
+        app._ups_render_model = lambda: "esrgan"
+        app.og_bl_int = self.V(0.42)
+        app._organic_fx_mute = {"bloom": True, "veil": False}
+        app._organic_fx_solo = {"bloom": False, "veil": False}
+        calls = []
+        app._usc_models_changed = lambda: calls.append("usc")
+        app._usc_redraw_tiles = lambda: calls.append("usc_draw")
+        app._organic_fx_sync = lambda: calls.append("fx")
+        d = app._pipeline_preset_collect("p")
+        self.assertEqual(d["modules"]["upscale"]["state"],
+                         {"models": {"tonemap": False, "topaz": True, "wan_vace": False},
+                          "render": "topaz"})
+        self.assertEqual(d["modules"]["upstudio"]["state"]["render"], "esrgan")
+        self.assertEqual(d["modules"]["organic"]["vars"]["og_bl_int"], 0.42)
+        self.assertEqual(d["modules"]["organic"]["state"],
+                         {"solo": {}, "mute": {"bloom": True}})
+        self.assertEqual(app._pipeline_prefixes("organic"), ("organic", "og"))
+        # Scramble, apply, and the tabs are back where the preset says.
+        app._usc_sel.update(tonemap=True, topaz=False); app._usc_view_pref = None
+        app.og_bl_int.set(1.0); app._organic_fx_mute["bloom"] = False
+        app._pipeline_preset_apply(d)
+        self.assertEqual(app._usc_sel, {"tonemap": False, "topaz": True, "wan_vace": False})
+        self.assertEqual(app._usc_view_pref, "topaz")
+        self.assertEqual(app.og_bl_int.get(), 0.42)
+        self.assertTrue(app._organic_fx_mute["bloom"])
+        self.assertEqual(calls, ["usc", "usc_draw", "fx"])
+        self.assertEqual(App._pipeline_pretty_key("og_bl_int", ("organic", "og")), "bl int")
+
     def test_the_settings_view_shows_each_module_and_marks_changes(self):
         import tempfile
         tmp = tempfile.mkdtemp()

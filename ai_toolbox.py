@@ -36091,6 +36091,12 @@ def cs_convert(a, src, dst):
                       ("upscale", "Expansion Studio", "usc"),
                       ("organic", "Lens Studio", "organic"))
     PIPELINE_AUTO = ("exr",)                  # not a tick: runs on a movie
+    # Settings a module keeps outside <prefix>_* tk Variables: more
+    # prefixes (Lens Studio's effect controls are og_*), and state
+    # that is plain Python (the model tiles' selection), handled by
+    # _pipeline_state_collect/_apply.
+    PIPELINE_EXTRA_PREFIXES = {"organic": ("og",)}
+    PIPELINE_MODEL_TILES = {"upstudio": "ups", "detail": "det", "upscale": "usc"}
     PIPELINE_DEFAULT_ON = ("fixframes", "upscale")
     PIPELINE_OPTIONAL = ("organic",)          # kept for older presets
     PIPELINE_DIR = os.path.expanduser("~/.ai_toolbox/presets")
@@ -36138,8 +36144,79 @@ def cs_convert(a, src, dst):
              "saved": time.strftime("%Y-%m-%d %H:%M:%S"),
              "steps": steps, "modules": {}}
         for key, _label, prefix in self.PIPELINE_STEPS:
-            d["modules"][key] = {"vars": self._project_collect_vars(prefix)}
+            v = {}
+            for pre in self._pipeline_prefixes(key):
+                v.update(self._project_collect_vars(pre))
+            m = {"vars": v}
+            extra = self._pipeline_state_collect(key)
+            if extra:
+                m["state"] = extra
+            d["modules"][key] = m
         return d
+
+    def _pipeline_prefixes(self, key):
+        for k, _n, p in self.PIPELINE_STEPS:
+            if k == key:
+                return (p,) + tuple(self.PIPELINE_EXTRA_PREFIXES.get(key, ()))
+        return ()
+
+    def _pipeline_state_collect(self, key):
+        """A module's settings that are not tk Variables: which model
+        tiles are selected and which one Run renders (Upscale, Detail,
+        Expansion); Lens Studio's solo/mute per effect."""
+        d = {}
+        tiles = self.PIPELINE_MODEL_TILES.get(key)
+        if tiles:
+            sel = self.__dict__.get(f"_{tiles}_sel")
+            if isinstance(sel, dict):
+                d["models"] = {m: bool(v) for m, v in sel.items()}
+                pref = self.__dict__.get(f"_{tiles}_view_pref")
+                fn = getattr(self, f"_{tiles}_render_model", None)
+                try:
+                    d["render"] = pref or (fn() if fn else None)
+                except Exception:
+                    d["render"] = pref
+        if key == "organic":
+            for nm in ("solo", "mute"):
+                v = self.__dict__.get(f"_organic_fx_{nm}")
+                if isinstance(v, dict):
+                    d[nm] = {k: bool(x) for k, x in v.items() if x}
+        return d
+
+    def _pipeline_state_apply(self, key, d):
+        if not d:
+            return
+        tiles = self.PIPELINE_MODEL_TILES.get(key)
+        if tiles and isinstance(d.get("models"), dict):
+            sel = self.__dict__.get(f"_{tiles}_sel")
+            if isinstance(sel, dict):
+                for m in list(sel):
+                    sel[m] = bool(d["models"].get(m, False))
+                for m, on in d["models"].items():
+                    if m in sel:
+                        sel[m] = bool(on)
+                r = d.get("render")
+                setattr(self, f"_{tiles}_view_pref",
+                        r if r and sel.get(r) else None)
+                for fn in (f"_{tiles}_models_changed", f"_{tiles}_redraw_tiles"):
+                    f = getattr(self, fn, None)
+                    if f:
+                        try:
+                            f()
+                        except Exception:
+                            pass
+        if key == "organic":
+            for nm in ("solo", "mute"):
+                cur = self.__dict__.get(f"_organic_fx_{nm}")
+                if isinstance(cur, dict) and isinstance(d.get(nm), dict):
+                    for k in list(cur):
+                        cur[k] = bool(d[nm].get(k, False))
+            f = getattr(self, "_organic_fx_sync", None)
+            if f:
+                try:
+                    f()
+                except Exception:
+                    pass
 
     def _pipeline_preset_save(self, name, steps=None):
         import json
@@ -36155,6 +36232,7 @@ def cs_convert(a, src, dst):
         for key, _label, _prefix in self.PIPELINE_STEPS:
             m = (preset.get("modules") or {}).get(key) or {}
             self._project_restore_vars(m.get("vars") or {})
+            self._pipeline_state_apply(key, m.get("state") or {})
 
     @staticmethod
     def _pipeline_newest(root, prefix):
@@ -36534,10 +36612,13 @@ def cs_convert(a, src, dst):
 
     @staticmethod
     def _pipeline_pretty_key(name, prefix):
-        """ups_cs_out_var -> "cs out"; _usc_scale_var -> "scale"."""
+        """ups_cs_out_var -> "cs out"; _usc_scale_var -> "scale".
+        `prefix` may be one prefix or a tuple of them."""
         k = name.lstrip("_")
-        if k.startswith(prefix + "_"):
-            k = k[len(prefix) + 1:]
+        for p in ((prefix,) if isinstance(prefix, str) else prefix):
+            if k.startswith(p + "_"):
+                k = k[len(p) + 1:]
+                break
         if k.endswith("_var"):
             k = k[:-4]
         return k.replace("_", " ")
@@ -36567,8 +36648,22 @@ def cs_convert(a, src, dst):
         for key, label, prefix in self.PIPELINE_STEPS:
             if key not in steps:
                 continue
-            vars_now = (now["modules"].get(key) or {}).get("vars") or {}
-            vars_was = (lmods.get(key) or {}).get("vars")
+            mnow = now["modules"].get(key) or {}
+            mwas = lmods.get(key) or {}
+            vars_now = dict(mnow.get("vars") or {})
+            vars_was = mwas.get("vars")
+            # The plain-Python state reads as settings too (\u2605 lines).
+            for sk, sv in sorted((mnow.get("state") or {}).items()):
+                if isinstance(sv, dict):
+                    sv = ", ".join(k for k, on in sv.items() if on) or "none"
+                vars_now["\u2605" + sk] = sv
+            if vars_was is not None:
+                vars_was = dict(vars_was)
+                for sk, sv in (mwas.get("state") or {}).items():
+                    if isinstance(sv, dict):
+                        sv = ", ".join(k for k, on in sv.items() if on) or "none"
+                    vars_was["\u2605" + sk] = sv
+            prefixes = self._pipeline_prefixes(key)
             txt.insert("end", f"{label}\n", "mod")
             if not vars_now:
                 txt.insert("end", "   (no settings)\n", "dim")
@@ -36576,7 +36671,7 @@ def cs_convert(a, src, dst):
                 v = vars_now[name]
                 if isinstance(v, str) and len(v) > 72:
                     v = v[:69] + "\u2026"
-                k = self._pipeline_pretty_key(name, prefix)
+                k = self._pipeline_pretty_key(name, prefixes)
                 if vars_was is not None and name in vars_was \
                         and vars_was[name] != v:
                     changed += 1
