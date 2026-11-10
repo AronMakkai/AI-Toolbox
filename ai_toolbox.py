@@ -21646,6 +21646,29 @@ def cs_convert(a, src, dst):
             "colourspace so the two line up in comp;\n"
             "Output colour is ignored. Needs EXR in and\n"
             "EXR out; the Rec.709 MOV shows the layer.")(_lyi)
+        _sdrow = tk.Frame(_obottom, bg=BG)
+        _sdrow.pack(fill="x", padx=16, pady=(2, 0))
+        self.organic_seed_shot_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(_sdrow, text="Vary seeds per shot",
+            bg=BG, fg=W, variable=self.organic_seed_shot_var,
+            selectcolor="#2A2A14", activebackground=BG, activeforeground=W,
+            font=FSM, highlightthickness=0, bd=0,
+            command=lambda: self._organic_mark_stale()).pack(side="left")
+        _sdi = tk.Label(_sdrow, text="\u24d8", font=FSM, bg=BG,
+                        fg="#555555", cursor="hand2")
+        _sdi.pack(side="left", padx=(6, 0))
+        self._tooltip(
+            "Smudges, scratches and the bloom noise are\n"
+            "seeded, and a seed is fixed per look -- so a\n"
+            "batch of shots all wore the same dirt.\n\n"
+            "On: each shot shifts every seed by a number\n"
+            "taken from its own folder, so no two shots\n"
+            "match, a re-render of a shot is identical,\n"
+            "and the preview shows the render's seeds.\n"
+            "The plate and its Expansion / Fix outputs\n"
+            "count as the same shot.\n\n"
+            "Off: the seed sliders are used as they are,\n"
+            "the same on every shot.")(_sdi)
         self.organic_out_lbl = tk.Label(_obottom, text="", font=FSM, bg=BG,
                                         fg="#777777", anchor="w")
         self.organic_out_lbl.pack(fill="x", padx=16, pady=(2, 0))
@@ -22177,6 +22200,13 @@ def cs_convert(a, src, dst):
             grain_chroma=self.og_grain_chr.get(),
             grain_filmic=self.og_grain_filmic.get(),
             global_gain=self.og_global_gain.get())
+        # Each shot its own dirt: the seed sliders are a base, and the
+        # shot adds a stable offset (see _organic_shot_offset) so a
+        # batch of ten shots does not wear the same ten smudges.
+        off = self._organic_shot_offset()
+        if off:
+            for k in self._ORGANIC_SEED_KEYS:
+                p[k] = self._organic_seed_for(p.get(k, 1), off)
         if raw:
             return p
         for fx, _lbl, gates in self._ORGANIC_FX:
@@ -22196,8 +22226,57 @@ def cs_convert(a, src, dst):
         """Per-frame grain seed. Derived from the frame index so the
         pattern moves, and from a fixed base so a re-render of the same
         frame is identical -- which matters for a retake of part of a
-        sequence."""
-        return self._ORGANIC_GRAIN_SEED * 7919 + int(idx)
+        sequence. The shot's offset keeps two shots' grain apart."""
+        return (self._ORGANIC_GRAIN_SEED * 7919 + int(idx)
+                + self._organic_shot_offset() * 100003)
+
+    # ── Per-shot seeds ──────────────────────────────────────────────
+    # Smudges and scratches are "on the glass": fixed per look, which
+    # is right within a shot and wrong across a batch, where every shot
+    # came out wearing the identical dirt. With the tick on (default),
+    # the shot derives an offset from where it lives -- the folder path
+    # with the pipeline's generic folders (ADW, EXPAND_v02, EXR, FF_*)
+    # stripped, so the plate, its Expansion output and its Fix output
+    # all count as the same shot -- and every seed is shifted by it.
+    # Stable: a re-render of the same shot is identical; the preview
+    # shows the same seeds the render uses.
+    _ORGANIC_SEED_KEYS = ("smudge_seed", "scratch_seed", "bloom_noi_seed")
+    _ORGANIC_GENERIC_DIR = __import__("re").compile(
+        r"^(ADW|EXR|FF_.*|.*_v\d+|.*_frames|.*_EXR|Lens_Studio.*)$",
+        __import__("re").I)
+
+    def _organic_shot_key(self):
+        """What identifies the shot being worked on, or ""."""
+        st = self.__dict__.get("_pipeline_state")
+        path = (st.get("input") if st else None) \
+            or self.__dict__.get("_organic_src_movie") \
+            or self.__dict__.get("organic_folder") or ""
+        if not path:
+            return ""
+        parts = [p for p in os.path.normpath(str(path)).split(os.sep) if p]
+        if parts and os.path.splitext(parts[-1])[1].lower() in (
+                ".mov", ".mp4", ".mxf", ".avi", ".mkv"):
+            parts[-1] = os.path.splitext(parts[-1])[0]
+        while parts and self._ORGANIC_GENERIC_DIR.match(parts[-1]):
+            parts.pop()
+        return "/".join(parts)
+
+    def _organic_shot_offset(self):
+        """0 with the tick off or no shot loaded; else 1..996, stable
+        for the shot."""
+        v = self.__dict__.get("organic_seed_shot_var")
+        if v is None or not v.get():
+            return 0
+        key = self._organic_shot_key()
+        if not key:
+            return 0
+        import hashlib
+        return int(hashlib.md5(key.encode("utf-8")).hexdigest()[:8], 16) % 996 + 1
+
+    @staticmethod
+    def _organic_seed_for(base, offset):
+        """A seed slider's value shifted by the shot, kept in 1..999."""
+        return (int(base) - 1 + int(offset)) % 999 + 1
 
     def _organic_pick_folder(self):
         folder = filedialog.askdirectory(title="Choose an image sequence folder")
@@ -23715,6 +23794,15 @@ def cs_convert(a, src, dst):
              f"\u201c{self.LENS_LAYER}\u201d ({self._cs_name(k)}, as the "
              "source); every other channel is kept." if _layer else
              f"Writing {f} \u2014 {self._cs_name(k)}."), "hi"))
+        _off = self._organic_shot_offset()
+        if _off:
+            _sk = self._organic_shot_key().rsplit("/", 1)[-1]
+            self.after(0, lambda: self.log(
+                self.organic_log_txt,
+                f"Seeds for shot \u201c{_sk}\u201d: smudge "
+                f"{params.get('smudge_seed')}, scratches "
+                f"{params.get('scratch_seed')}, bloom noise "
+                f"{params.get('bloom_noi_seed')} (sliders + {_off}).", "dim"))
         try:
             for n, i in enumerate(range(v0, v1)):
                 if self._organic_cancel:
@@ -25809,7 +25897,7 @@ def cs_convert(a, src, dst):
                 pass
         self._slow_notice_heard = True       # no popups on a pipeline
         self._pipeline_active = True
-        st = dict(steps=steps, i=0, cur=inp, outputs={}, ok=True,
+        st = dict(steps=steps, i=0, cur=inp, input=inp, outputs={}, ok=True,
                   on_log=on_log, on_done=on_done, err=None)
         self._pipeline_state = st
         self._pipeline_log(f"Pipeline '{preset.get('name', '?')}': "

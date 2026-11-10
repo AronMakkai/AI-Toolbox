@@ -19878,6 +19878,7 @@ class TestLensStudioCancelRender(unittest.TestCase):
             organic_log_txt = None
             _organic_cs_out_key = lambda s, fmt=None: "linear"
             _organic_layer_mode = lambda s, fmt=None: False
+            _organic_shot_offset = lambda s: 0
             LENS_LAYER = App.LENS_LAYER
             _cs_sidecar = App._cs_sidecar
             _cs_name = App._cs_name
@@ -20859,6 +20860,80 @@ class TestPythonNeedsOpenEXR(unittest.TestCase):
         src = inspect.getsource(App._organic_load_linear)
         self.assertIn("self._exr_module_missing(ex)", src)
         self.assertIn("self._exr_missing_warn(self.organic_log_txt)", src)
+
+
+class TestLensSeedsPerShot(unittest.TestCase):
+    """Smudge / scratch / bloom-noise seeds shift per shot so a batch
+    does not render identical dirt on every shot; the shift is stable,
+    the plate and its pipeline outputs count as one shot, and the tick
+    turns it off."""
+
+    class V:
+        def __init__(self, v): self.v = v
+        def get(self): return self.v
+        def set(self, v): self.v = v
+
+    def _app(self, on=True):
+        app = App.__new__(App)
+        app.organic_seed_shot_var = self.V(on)
+        return app
+
+    def test_shot_key_strips_the_pipelines_generic_folders(self):
+        app = self._app()
+        for folder, key in (
+                ("/jobs/showA/sh010/plate", "jobs/showA/sh010/plate"),
+                ("/jobs/showA/sh010/plate/ADW/EXPAND_v02", "jobs/showA/sh010/plate"),
+                ("/jobs/showA/sh010/EXR", "jobs/showA/sh010"),
+                ("/jobs/showA/sh010/FF_EXR", "jobs/showA/sh010"),
+                ("/jobs/showA/sh010/ADW/Lens_Studio_v03", "jobs/showA/sh010"),
+                ("/jobs/showA/sh010/sh010_frames", "jobs/showA/sh010")):
+            app.organic_folder = folder
+            self.assertEqual(app._organic_shot_key(), key, folder)
+        app.organic_folder = "/x/EXR"
+        app._organic_src_movie = "/jobs/showA/sh020/sh020_plate.mov"
+        self.assertEqual(app._organic_shot_key(), "jobs/showA/sh020/sh020_plate")
+        app._pipeline_state = {"input": "/jobs/showA/sh030/sh030.mov"}
+        self.assertEqual(app._organic_shot_key(), "jobs/showA/sh030/sh030")
+        app._pipeline_state = None
+        app._organic_src_movie = None
+        app.organic_folder = None
+        self.assertEqual(app._organic_shot_key(), "")
+        self.assertEqual(app._organic_shot_offset(), 0)
+
+    def test_offsets_differ_between_shots_and_hold_for_a_shot(self):
+        app = self._app()
+        offs = {}
+        for sh in ("sh010", "sh020", "sh030", "sh040", "sh050"):
+            app.organic_folder = f"/jobs/showA/{sh}/plate"
+            offs[sh] = app._organic_shot_offset()
+            self.assertTrue(1 <= offs[sh] <= 996)
+            self.assertEqual(offs[sh], app._organic_shot_offset())
+            app.organic_folder = f"/jobs/showA/{sh}/plate/ADW/EXPAND_v01"
+            self.assertEqual(offs[sh], app._organic_shot_offset())   # same shot
+        self.assertEqual(len(set(offs.values())), 5)
+        self.assertEqual(App._organic_seed_for(1, 0), 1)
+        self.assertEqual(App._organic_seed_for(999, 1), 1)
+        self.assertEqual(App._organic_seed_for(5, 10), 15)
+        app = self._app(on=False)
+        app.organic_folder = "/jobs/showA/sh010/plate"
+        self.assertEqual(app._organic_shot_offset(), 0)
+        self.assertEqual(App._ORGANIC_SEED_KEYS,
+                         ("smudge_seed", "scratch_seed", "bloom_noi_seed"))
+
+    def test_params_and_grain_carry_the_shot_offset(self):
+        import inspect
+        p = inspect.getsource(App._organic_params)
+        self.assertIn("off = self._organic_shot_offset()", p)
+        self.assertIn("p[k] = self._organic_seed_for(p.get(k, 1), off)", p)
+        self.assertIn("_organic_shot_offset()", inspect.getsource(App._organic_frame_seed))
+        self.assertIn("Seeds for shot", inspect.getsource(App._organic_run_worker))
+        self.assertIn("organic_seed_shot_var", inspect.getsource(App._tab_organic))
+        self.assertIn("input=inp", inspect.getsource(App._pipeline_run))
+        app = self._app()
+        app.organic_folder = "/jobs/showA/sh010/plate"
+        a = app._organic_frame_seed(3)
+        app.organic_folder = "/jobs/showA/sh020/plate"
+        self.assertNotEqual(a, app._organic_frame_seed(3))
 
 
 if __name__ == "__main__":
