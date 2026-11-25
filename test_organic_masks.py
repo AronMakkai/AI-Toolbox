@@ -21912,5 +21912,67 @@ class TestLensSeedsPerShot(unittest.TestCase):
         self.assertNotEqual(a, app._organic_frame_seed(3))
 
 
+class TestSetupInstallsThePython(unittest.TestCase):
+    """Setup & Install covers the Python side: a "Python packages"
+    component that pip-installs what is missing into the Python running
+    the app, ffmpeg from the conda env before Homebrew, and the
+    interpreter's bin on PATH so that ffmpeg is found from the Dock."""
+
+    def test_python_packages_component(self):
+        import inspect
+        self.assertEqual([m for m, _p in App.PYTHON_PACKAGES],
+                         ["OpenEXR", "fal_client", "onnxruntime", "transformers"])
+        self.assertEqual(dict(App.PYTHON_PACKAGES)["fal_client"], "fal-client")
+        ui = inspect.getsource(App._tab_setup)
+        self.assertIn('("python", "Python packages",', ui)
+        det = inspect.getsource(App._setup_detect)
+        self.assertIn('self._step_set("python", ST_MISSING', det)
+        inst = inspect.getsource(App._step_install)
+        self.assertIn('[sys.executable, "-m", "pip", "install"', inst)
+        self.assertIn('if key == "python":', inspect.getsource(App._step_test))
+
+    def test_install_runs_pip_for_the_missing_ones(self):
+        import unittest.mock as um
+        app = App.__new__(App)
+        ran, states = [], []
+        app.setup_log = None
+        app.log = lambda *a, **k: None
+        app.progress = lambda *a, **k: None
+        app.after = lambda ms, fn=None, *a: fn and fn()
+        app._step_set = lambda k, st, d=None: states.append((k, st))
+        app._setup_detect = lambda: states.append(("detect", None))
+        app.runcmd = lambda cmd, lw: (ran.append(cmd), 0)[1]
+        class T:
+            def __init__(self, target, daemon=None): self.t = target
+            def start(self): self.t()
+        with um.patch.object(ai_toolbox, "_python_missing",
+                             lambda mods=None: ["fal_client", "onnxruntime"]), \
+             um.patch.object(ai_toolbox.threading, "Thread", T):
+            app._step_install("python")
+        self.assertEqual(ran, [[sys.executable, "-m", "pip", "install", "--upgrade",
+                                "fal-client", "onnxruntime"]])
+        self.assertIn(("detect", None), states)
+
+    def test_ffmpeg_goes_to_the_conda_env_first(self):
+        import inspect, tempfile
+        src = inspect.getsource(App._step_install)
+        self.assertLess(src.index('"-c", "conda-forge", "ffmpeg"'),
+                        src.index("Installing ffmpeg via Homebrew"))
+        tmp = tempfile.mkdtemp()
+        env = os.path.join(tmp, "mf", "envs", "studio-toolbox")
+        os.makedirs(os.path.join(env, "bin")); os.makedirs(os.path.join(env, "conda-meta"))
+        os.makedirs(os.path.join(tmp, "mf", "bin"))
+        conda = os.path.join(tmp, "mf", "bin", "conda")
+        open(conda, "w").close(); os.chmod(conda, 0o755)
+        import unittest.mock as um
+        with um.patch.dict(os.environ, {"CONDA_EXE": ""}):
+            self.assertEqual(App._conda_env_of(os.path.join(env, "bin", "python3")),
+                             (env, conda))
+            self.assertEqual(App._conda_env_of(os.path.join(tmp, "nope", "bin", "python3")),
+                             (None, None))
+        self.assertIn(os.path.dirname(os.path.abspath(sys.executable)),
+                      os.environ["PATH"].split(os.pathsep))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
