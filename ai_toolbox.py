@@ -6163,9 +6163,28 @@ class App(tk.Tk):
                 "and test again. If it keeps failing, check the account "
                 "has credit at fal.ai/dashboard/billing." % code)
 
+    FAL_KEY_TRUNCATED = (
+        "That is not the whole key: it contains \u201c\u2026\u201d (or another "
+        "character a key never has), which is how fal's dashboard shows a "
+        "key it has shortened. A key can only be copied in full at the "
+        "moment it is created. Go to fal.ai/dashboard/keys, press Add key "
+        "(scope API), and use the Copy button on the box that appears "
+        "\u2014 then paste it here and save.")
+
+    @staticmethod
+    def _fal_key_bad_chars(k):
+        """True when a key holds something no fal key does (an ellipsis
+        from a shortened display, dots, bullets, any non-ASCII)."""
+        k = str(k or "")
+        return (not k.isascii()) or "..." in k or "*" in k
+
     def _fal_save_key(self):
         ent = getattr(self, "_fal_key_entry", None)
         k = self._fal_clean_key(ent.get()) if ent is not None else ""
+        if k and self._fal_key_bad_chars(k):
+            self._fal_dlg_say("\u2716 " + self.FAL_KEY_TRUNCATED, ok=False)
+            self.log(self.setup_log, self.FAL_KEY_TRUNCATED, "err")
+            return
         if not k:
             self._fal_dlg_say("Paste a key first.", ok=False)
             self.log(self.setup_log, "Paste a key first.", "err")
@@ -6496,6 +6515,14 @@ class App(tk.Tk):
             self._fal_dlg_say("Save a key first (step 4).", ok=False)
             self.log(self.setup_log,
                 "No key saved. Do steps 1\u20134 first.", "err")
+            return
+        if self._fal_key_bad_chars(k):
+            # A saved key with an ellipsis in it cannot even be sent
+            # (HTTP headers are latin-1) -- that used to surface as
+            # "Could not reach fal.ai ... Check your network".
+            self._step_set("vace", ST_BROKEN, "Saved key is not a whole key")
+            self._fal_dlg_say("\u2716 " + self.FAL_KEY_TRUNCATED, ok=False)
+            self.log(self.setup_log, self.FAL_KEY_TRUNCATED, "err")
             return
         self._step_set("vace", ST_TESTING, "Testing the key\u2026")
         self._fal_dlg_say("Testing\u2026")
