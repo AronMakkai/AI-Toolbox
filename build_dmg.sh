@@ -82,6 +82,11 @@ else
 fi
 
 cp "$TOOLBOX" "$APP/Contents/Resources/ai_toolbox.py"
+[ -f "$DIR/pipeline.py" ] && cp "$DIR/pipeline.py" "$APP/Contents/Resources/pipeline.py"
+# The one-time Python setup the launcher offers when it finds no
+# usable Python (and the DMG's "Set Up Python.command" runs).
+cp "$DIR/tools/setup_python.sh" "$APP/Contents/Resources/setup_python.sh"
+chmod +x "$APP/Contents/Resources/setup_python.sh"
 
 # ── Launcher ─────────────────────────────────────────────────────────
 # Tries every Python that could plausibly have this app's real
@@ -104,7 +109,10 @@ CANDIDATES=()
 [ -n "$CONDA_PREFIX" ] && CANDIDATES+=("$CONDA_PREFIX/bin/python3")
 # 3. every conda env on this Mac (named envs first -- that is where a
 #    "studio" / "ai" env with torch lives -- then the base envs)
-for root in "$HOME/miniconda3" "$HOME/anaconda3" "$HOME/miniforge3" \
+# The env the app's own setup makes comes right after the remembered one.
+CANDIDATES+=("$HOME/.ai_toolbox/miniforge3/envs/studio-toolbox/bin/python3")
+for root in "$HOME/.ai_toolbox/miniforge3" \
+            "$HOME/miniconda3" "$HOME/anaconda3" "$HOME/miniforge3" \
             "$HOME/mambaforge" "$HOME/opt/miniconda3" "$HOME/opt/anaconda3" \
             "/opt/miniconda3" "/opt/anaconda3" "/opt/homebrew/Caskroom/miniconda/base" \
             "/opt/homebrew/Caskroom/miniforge/base"; do
@@ -139,10 +147,24 @@ for c in "${CANDIDATES[@]}"; do
 done
 
 if [ -z "$PYTHON" ]; then
-    osascript -e 'display dialog "Studio Toolbox could not find a Python with torch, opencv-python, numpy, Pillow and OpenEXR installed.\n\nEither install one (Terminal):\n\n  conda create -y -n studio python=3.13\n  conda activate studio\n  pip install torch opencv-python numpy pillow OpenEXR\n\nor, if you already have such an environment, launch once from a Terminal where it is active:\n\n  conda activate <your-env>\n  open /Applications/Studio-Toolbox.app\n\nAfter one successful launch the app remembers that Python and starts from the Dock." with title "Studio Toolbox — Python not found" buttons {"OK"} default button 1 with icon caution'
+    # Nothing usable on this Mac: offer the one-time setup. It runs in
+    # a Terminal window so the download and install are visible, and
+    # it reopens the app when done.
+    APP_PATH="$(cd "$DIR/../.." && pwd)"
+    CHOICE=$(osascript -e 'display dialog "Studio Toolbox needs a Python with its libraries (torch, OpenCV, OpenEXR…), and none was found on this Mac.\n\nSet it up now? A Terminal window will open and install everything into your home folder (~/.ai_toolbox) — a few GB, 10–20 minutes, no password needed. The app opens by itself when it is done.\n\nIf you already have a conda env with torch, choose Cancel and launch once from a Terminal where that env is active:\n  open /Applications/Studio-Toolbox.app" with title "Studio Toolbox — first-time setup" buttons {"Cancel", "Set up now"} default button "Set up now" with icon note' 2>/dev/null)
+    if [[ "$CHOICE" == *"Set up now"* ]]; then
+        RUN="$HOME/.ai_toolbox/setup_python.command"
+        mkdir -p "$HOME/.ai_toolbox"
+        printf '#!/bin/bash\nexec /bin/bash "%s" "%s"\n' "$DIR/setup_python.sh" "$APP_PATH" > "$RUN"
+        chmod +x "$RUN"
+        open -a Terminal "$RUN"
+    fi
     exit 1
 fi
 
+# The env's bin first on PATH: that is where conda's ffmpeg lives, and
+# the Dock gives the app no shell profile to find it otherwise.
+export PATH="$(dirname "$PYTHON"):$PATH"
 exec "$PYTHON" "$DIR/ai_toolbox.py"
 LAUNCHER
 chmod +x "$APP/Contents/MacOS/$APP_NAME"

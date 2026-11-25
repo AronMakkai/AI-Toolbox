@@ -22,24 +22,24 @@ STUDIO TOOLBOX — INSTALL (macOS)
    or System Settings -> Privacy & Security -> scroll to the
    "Studio-Toolbox was blocked" line -> "Open Anyway".
 
-3. PYTHON (one time)
-   The app runs on a Python that already has its libraries. If you
-   see "Python not found" when you launch it, install Miniconda from
-   https://docs.conda.io/en/latest/miniconda.html (Apple Silicon or
-   Intel to match your Mac), then in Terminal:
+3. PYTHON (one time, automatic)
+   The first time you open the app on a Mac with no Python set up,
+   it asks "Set it up now?". Say yes: a Terminal window installs a
+   private Python with every library into ~/.ai_toolbox (a few GB,
+   10-20 minutes, no password, nothing else on the Mac is touched)
+   and the app opens by itself when it is done. You can also start
+   that setup by double-clicking "Set Up Python.command" here.
 
-        conda create -y -n studio python=3.13
-        conda activate studio
-        pip install torch opencv-python numpy pillow OpenEXR
+   Already have a conda env with torch? Choose Cancel and launch once
+   from a Terminal where that env is active:
         open /Applications/Studio-Toolbox.app
-
-   The app looks in ~/miniconda3 first, so after this it will start
-   from the Dock without Terminal.
+   The app remembers that Python and starts from the Dock after.
 
 4. FIRST RUN — SETUP TAB
    Open the "Setup & Install" tab and press the install buttons for
-   the parts you need. They download into ~/RifeApp:
-      ffmpeg        - needed by everything
+   the parts you need (nothing else to type):
+      Python packages - OpenEXR, fal.ai client, ONNX, Transformers
+      ffmpeg          - needed by everything (already there after step 3)
       Real-ESRGAN   - local upscaler (Upscale Studio, Detail Studio)
       RIFE          - Fix Missing Frames
       SAM 3         - segmentation (asks for a Hugging Face token)
