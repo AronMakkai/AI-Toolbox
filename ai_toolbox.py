@@ -6112,9 +6112,60 @@ class App(tk.Tk):
             return None
         return os.environ.get("FAL_KEY", "") or None
 
+    @staticmethod
+    def _fal_clean_key(k):
+        """A pasted key with the things that come along by accident
+        taken off: quotes, a leading `Key ` or `FAL_KEY=`, and any
+        whitespace or line breaks in the middle (a key wrapped over
+        two lines in an email pastes with one)."""
+        k = "".join(str(k or "").split())
+        k = k.strip("'\"`")
+        for pre in ("export", "FAL_KEY=", "fal_key=", "Key", "Bearer"):
+            if k.startswith(pre):
+                k = k[len(pre):]
+        return k.strip("'\"`=")
+
+    @staticmethod
+    def _fal_explain(code, body, key=""):
+        """(short status, sentence) for a 401/403 from fal -- the reason
+        fal gave, not a guess: "check you copied it whole" sent people
+        re-pasting a perfectly good key when the account was out of
+        credit."""
+        b = (body or "").lower()
+        if any(w in b for w in ("balance", "exhaust", "locked", "billing",
+                                "payment", "credit")):
+            return ("Key is valid — the fal account has no credit",
+                    "The key is fine, but fal says the account is locked or "
+                    "out of credit. Add credit at fal.ai/dashboard/billing, "
+                    "then press Test key again.")
+        if any(w in b for w in ("cloudflare", "error 1010", "access denied",
+                                "<html")):
+            return (f"fal blocked the request (HTTP {code})",
+                    "fal's firewall blocked the request before it looked at "
+                    "the key (HTTP %d). This is usually a VPN or company "
+                    "network: try another network, then Test key again." % code)
+        if any(w in b for w in ("scope", "permission", "not allowed",
+                                "forbidden", "access to")) and code == 403:
+            return ("Key lacks permission (HTTP 403)",
+                    "fal recognised the key but it is not allowed to run "
+                    "models. Create a new key at fal.ai/dashboard/keys with "
+                    "scope API, save it and test again.")
+        if key and ":" not in key:
+            return (f"Key looks incomplete (HTTP {code})",
+                    "fal rejected the key (HTTP %d), and it does not look "
+                    "whole: a fal key is two parts joined by a colon "
+                    "(xxxxxxxx-…:xxxxxxxx…). Copy it again from "
+                    "fal.ai/dashboard/keys — it is only shown once, so "
+                    "create a new one if needed." % code)
+        return (f"Key rejected by fal (HTTP {code})",
+                "fal rejected the key (HTTP %d). Create a new key at "
+                "fal.ai/dashboard/keys (scope API), paste it whole, save "
+                "and test again. If it keeps failing, check the account "
+                "has credit at fal.ai/dashboard/billing." % code)
+
     def _fal_save_key(self):
         ent = getattr(self, "_fal_key_entry", None)
-        k = ent.get().strip() if ent is not None else ""
+        k = self._fal_clean_key(ent.get()) if ent is not None else ""
         if not k:
             self._fal_dlg_say("Paste a key first.", ok=False)
             self.log(self.setup_log, "Paste a key first.", "err")
@@ -6458,22 +6509,29 @@ class App(tk.Tk):
                 req = urllib.request.Request(
                     self.VACE_ENDPOINT_INPAINTING, data=b"{}",
                     headers={"Authorization": f"Key {k}",
-                             "Content-Type": "application/json"})
-                code = None
+                             "Content-Type": "application/json",
+                             "Accept": "application/json",
+                             "User-Agent": "Studio-Toolbox/1.0"})
+                code, body = None, ""
                 try:
                     with urllib.request.urlopen(req, timeout=30) as r:
                         code = r.status
                 except urllib.error.HTTPError as he:
                     code = he.code
+                    try:
+                        body = he.read(2000).decode("utf-8", "replace")
+                    except Exception:
+                        body = ""
                 if code in (401, 403):
-                    self.after(0, lambda: self._step_set("vace", ST_BROKEN,
-                        f"Key rejected by fal (HTTP {code})"))
-                    self.after(0, lambda c2=code: self._fal_dlg_say(
-                        f"\u2716 fal rejected the key (HTTP {c2}). Check you "
-                        "copied it whole, then save it again.", ok=False))
-                    self.after(0, lambda c2=code: self.log(self.setup_log,
-                        f"fal rejected the key (HTTP {c2}). Check you "
-                        "copied it whole.", "err"))
+                    short, why = self._fal_explain(code, body, k)
+                    self.after(0, lambda: self._step_set("vace", ST_BROKEN, short))
+                    self.after(0, lambda: self._fal_dlg_say(
+                        "\u2716 " + why, ok=False))
+                    self.after(0, lambda: self.log(self.setup_log, why, "err"))
+                    if body.strip():
+                        self.after(0, lambda: self.log(
+                            self.setup_log,
+                            "fal said: " + " ".join(body.split())[:300], "dim"))
                 else:
                     self.after(0, lambda: self._step_set("vace", ST_WORKING,
                         "Key works — ADW-Interpolate is ready"))

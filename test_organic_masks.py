@@ -22041,5 +22041,40 @@ class TestRifeWeightsInstallThemselves(unittest.TestCase):
         self.assertNotIn("cp ~/Downloads", src)
 
 
+class TestFalKeyTestSaysWhy(unittest.TestCase):
+    """A 401/403 from fal is explained with fal's own reason (no credit,
+    blocked network, missing scope, incomplete key) instead of "check
+    you copied it whole"; a pasted key is cleaned of quotes, prefixes
+    and line breaks."""
+
+    def test_reasons(self):
+        s, w = App._fal_explain(403, '{"detail":"User is locked. Reason: Exhausted balance."}', "a:b")
+        self.assertIn("no credit", s); self.assertIn("billing", w)
+        s, w = App._fal_explain(403, "<html><title>Attention Required! | Cloudflare</title>", "a:b")
+        self.assertIn("blocked", s); self.assertIn("network", w)
+        s, w = App._fal_explain(403, '{"detail":"Key does not have the required scope"}', "a:b")
+        self.assertIn("permission", s); self.assertIn("scope API", w)
+        s, w = App._fal_explain(401, '{"detail":"Invalid key"}', "abcdef")
+        self.assertIn("incomplete", s); self.assertIn("colon", w)
+        s, w = App._fal_explain(401, "", "a:b")
+        self.assertIn("HTTP 401", s); self.assertIn("fal.ai/dashboard/keys", w)
+
+    def test_pasted_key_is_cleaned(self):
+        for raw in ('  abc-123:def456  ', '"abc-123:def456"', "Key abc-123:def456",
+                    "FAL_KEY=abc-123:def456", 'export FAL_KEY="abc-123:def456"',
+                    "abc-123:def\n456", "abc-123:\tdef456"):
+            self.assertEqual(App._fal_clean_key(raw), "abc-123:def456", raw)
+        self.assertEqual(App._fal_clean_key(""), "")
+
+    def test_the_test_reads_fals_answer(self):
+        import inspect
+        src = inspect.getsource(App._fal_test)
+        self.assertIn("he.read(", src)
+        self.assertIn("self._fal_explain(code, body, k)", src)
+        self.assertIn('"User-Agent"', src)
+        self.assertIn("fal said: ", src)
+        self.assertIn("self._fal_clean_key(", inspect.getsource(App._fal_save_key))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
