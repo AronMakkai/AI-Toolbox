@@ -215,6 +215,14 @@ from tkinter import filedialog, messagebox, ttk
 import subprocess, threading, os, shutil, time, tempfile, sys
 from datetime import datetime
 
+# This Python's own bin folder goes on PATH: a conda env's ffmpeg lives
+# there, and an app launched from the Dock has no shell profile to put
+# it on PATH -- so "ffmpeg" must be findable from the interpreter alone.
+_pybin = os.path.dirname(os.path.abspath(sys.executable))
+if _pybin not in os.environ.get("PATH", "").split(os.pathsep):
+    os.environ["PATH"] = _pybin + os.pathsep + os.environ.get("PATH", "")
+del _pybin
+
 # ── COLOURS ──────────────────────────────────────────────────────────
 BG  = "#0A0A0A"
 S   = "#111111"
@@ -3158,6 +3166,8 @@ class App(tk.Tk):
         # Fix Missing Frames use Real-ESRGAN. The fal.ai-hosted models
         # (Wan, SeedVR2, FlashVSR, Topaz) need no install, only a key.
         _COMP_MODULES = {
+            "python": {"exr","organic","smudge","sam","upscale",
+                      "upstudio","detail","fixframes","pipeline"},
             "ffmpeg": {"exr","organic","smudge","sam","upscale",
                       "upstudio","detail","fixframes"},
             "rife":   {"fixframes"},
@@ -3166,6 +3176,8 @@ class App(tk.Tk):
             "vace":   {"fixframes","upscale","upstudio"},
         }
         for key, name, desc in [
+            ("python", "Python packages",
+                       "OpenEXR, fal.ai client, ONNX Runtime, Transformers — installed into this app's Python"),
             ("ffmpeg", "ffmpeg",     "Video codec — required for EXR export"),
             ("rife",   "RIFE",      "Frame interpolation — used by Fix Missing Frames"),
             ("esrgan", "Real-ESRGAN","AI upscaler — Upscale Studio, Fix Missing Frames  (~65 MB)"),
@@ -4762,7 +4774,55 @@ class App(tk.Tk):
             self._step_install(key)
 
     # ── Fast file-based detection ─────────────────────────────────────
+    # The packages the app needs beyond what the launcher insists on
+    # (PYTHON_NEEDS): module name -> pip name. Installed into
+    # sys.executable, the Python actually running this app, so the
+    # fix lands where the import happens.
+    PYTHON_PACKAGES = (("OpenEXR", "OpenEXR"), ("fal_client", "fal-client"),
+                       ("onnxruntime", "onnxruntime"),
+                       ("transformers", "transformers"))
+
+    @staticmethod
+    def _conda_env_of(python=None):
+        """(prefix, conda_exe) for the conda env `python` lives in, or
+        (None, None). The prefix has a conda-meta/ folder; the conda
+        executable is the env's root's bin/conda, or CONDA_EXE, or the
+        app's own Miniforge."""
+        python = python or sys.executable
+        d = os.path.dirname(os.path.abspath(python))
+        prefix = None
+        for _ in range(3):
+            if os.path.isdir(os.path.join(d, "conda-meta")):
+                prefix = d
+                break
+            d = os.path.dirname(d)
+        if not prefix:
+            return None, None
+        cands = [os.environ.get("CONDA_EXE") or "",
+                 os.path.join(prefix, "bin", "conda"),
+                 os.path.join(os.path.dirname(os.path.dirname(prefix)),
+                              "bin", "conda"),
+                 os.path.expanduser("~/.ai_toolbox/miniforge3/bin/conda")]
+        for root in ("~/miniforge3", "~/miniconda3", "~/anaconda3",
+                     "~/mambaforge", "/opt/homebrew/Caskroom/miniconda/base",
+                     "/opt/miniconda3", "/opt/anaconda3"):
+            cands.append(os.path.expanduser(root + "/bin/conda"))
+        for c in cands:
+            if c and os.path.isfile(c) and os.access(c, os.X_OK):
+                return prefix, c
+        return prefix, None
+
     def _setup_detect(self):
+        # This Python's packages
+        missing = _python_missing([m for m, _p in self.PYTHON_PACKAGES])
+        short = sys.executable.replace(os.path.expanduser("~"), "~")
+        if missing:
+            self._step_set("python", ST_MISSING,
+                "Missing: " + ", ".join(missing) + " — click Install")
+        else:
+            self._step_set("python", ST_DETECTED,
+                "All present in " + short + " — click Test to verify")
+
         # ffmpeg
         ok = subprocess.run(["which", "ffmpeg"], capture_output=True).returncode == 0
         if ok:
@@ -4823,7 +4883,18 @@ class App(tk.Tk):
 
         def go():
             ok, detail = False, ""
-            if key == "ffmpeg":
+            if key == "python":
+                mods = [m for m, _p in self.PYTHON_PACKAGES]
+                r = subprocess.run(
+                    [sys.executable, "-c",
+                     "import " + ", ".join(mods) + "; print('ok')"],
+                    capture_output=True, text=True)
+                ok = r.returncode == 0 and "ok" in r.stdout
+                detail = ("All packages import — " + sys.executable if ok
+                          else "Import failed: " + (r.stderr.strip().splitlines()
+                                                    or ["?"])[-1][:120])
+
+            elif key == "ffmpeg":
                 r = subprocess.run(["ffmpeg", "-version"], capture_output=True, text=True)
                 ok = r.returncode == 0
                 if ok:
@@ -4879,6 +4950,30 @@ class App(tk.Tk):
     def _step_install(self, key):
         self._step_set(key, ST_INSTALLING)
 
+        if key == "python":
+            missing = _python_missing([m for m, _p in self.PYTHON_PACKAGES])
+            pips = [p for m, p in self.PYTHON_PACKAGES if m in missing] or \
+                   [p for _m, p in self.PYTHON_PACKAGES]
+            self.log(self.setup_log,
+                     "Installing " + ", ".join(pips) + " into "
+                     + sys.executable + "\u2026", "hi")
+            self.after(0, lambda: self.progress(None, "Installing Python packages\u2026"))
+
+            def go_pip():
+                code = self.runcmd([sys.executable, "-m", "pip", "install",
+                                    "--upgrade"] + pips, self.setup_log)
+                self.after(0, lambda: self.progress(-1))
+                if code == 0:
+                    self.log(self.setup_log, "Python packages installed \u2713 "
+                             "(restart the app if a module was missing at "
+                             "launch)", "ok")
+                    self.after(0, self._setup_detect)
+                else:
+                    self.after(0, lambda: self._step_set(
+                        "python", ST_BROKEN, "pip install failed \u2014 see log"))
+            threading.Thread(target=go_pip, daemon=True).start()
+            return
+
         if key == "ffmpeg":
             if sys.platform == "win32":
                 # The Homebrew install flow below cannot work here at
@@ -4894,9 +4989,27 @@ class App(tk.Tk):
                 self._step_set("ffmpeg", ST_BROKEN,
                               "Install manually -- see log for options")
                 return
-            self.log(self.setup_log, "Installing ffmpeg via Homebrew…", "hi")
             self.after(0, lambda: self.progress(None, "Installing ffmpeg…"))
             def go_ffmpeg():
+                # First choice: into this Python's conda env, from
+                # conda-forge -- no Homebrew, no password, and the app
+                # finds it because the env's bin is on PATH.
+                prefix, conda = self._conda_env_of()
+                if prefix and conda:
+                    self.log(self.setup_log,
+                             "Installing ffmpeg into the app's conda env "
+                             f"({prefix})\u2026", "hi")
+                    code = self.runcmd([conda, "install", "-y", "-p", prefix,
+                                        "-c", "conda-forge", "ffmpeg"],
+                                       self.setup_log)
+                    if code == 0 and os.path.isfile(os.path.join(prefix, "bin", "ffmpeg")):
+                        self.log(self.setup_log, "ffmpeg installed \u2713", "ok")
+                        self.after(0, self._setup_detect)
+                        self.after(0, lambda: self.progress(-1))
+                        return
+                    self.log(self.setup_log,
+                             "conda install did not work \u2014 trying Homebrew.", "dim")
+                self.log(self.setup_log, "Installing ffmpeg via Homebrew…", "hi")
                 # Find brew at standard locations
                 brew = None
                 for p in ["/opt/homebrew/bin/brew",
