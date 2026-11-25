@@ -21090,6 +21090,26 @@ class TestFalKeyTestSaysWhy(unittest.TestCase):
             self.assertEqual(App._fal_clean_key(raw), "abc-123:def456", raw)
         self.assertEqual(App._fal_clean_key(""), "")
 
+    def test_a_shortened_key_is_refused_with_the_reason(self):
+        self.assertTrue(App._fal_key_bad_chars("abc-123:def4\u2026"))
+        self.assertTrue(App._fal_key_bad_chars("abc-123:def4..."))
+        self.assertTrue(App._fal_key_bad_chars("abc-****:def4"))
+        self.assertFalse(App._fal_key_bad_chars("abc-123:def456"))
+        self.assertIn("Add key", App.FAL_KEY_TRUNCATED)
+        import inspect
+        self.assertIn("self._fal_key_bad_chars(k)", inspect.getsource(App._fal_save_key))
+        t = inspect.getsource(App._fal_test)
+        self.assertLess(t.index("self._fal_key_bad_chars(k)"), t.index("urllib.request.Request("))
+        app = App.__new__(App)
+        said, states = [], []
+        app.setup_log = None
+        app.log = lambda w, m, tag="dim": said.append(m)
+        app._fal_dlg_say = lambda *a, **k: None
+        app._step_set = lambda k, st, d=None: states.append(st)
+        app._fal_get_key = lambda: "abc-123:def4\u2026"
+        app._fal_test()
+        self.assertEqual(said, [App.FAL_KEY_TRUNCATED])
+
     def test_the_test_reads_fals_answer(self):
         import inspect
         src = inspect.getsource(App._fal_test)
