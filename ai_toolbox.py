@@ -5133,6 +5133,53 @@ class App(tk.Tk):
                 "else:\n"
                 "    print('Repo already present.', flush=True)\n"
                 "os.makedirs(TLOG, exist_ok=True)\n"
+                "\n"
+                "# 4 — weights. The author publishes them only on Google\n"
+                "# Drive: (a) a zip already in ~/Downloads is used as it\n"
+                "# is, (b) otherwise gdown fetches it, (c) only if both\n"
+                "# fail does the app ask for a manual download.\n"
+                "import zipfile, glob, tempfile\n"
+                "DRIVE_ID = '" + self.RIFE_WEIGHTS_DRIVE_ID + "'\n"
+                "def install_zip(zp):\n"
+                "    try:\n"
+                "        with zipfile.ZipFile(zp) as z:\n"
+                "            names = z.namelist()\n"
+                "            hit = [n for n in names if os.path.basename(n) == 'flownet.pkl']\n"
+                "            if not hit: return False\n"
+                "            root = os.path.dirname(hit[0])\n"
+                "            n = 0\n"
+                "            for name in names:\n"
+                "                if name.endswith('/') or os.path.dirname(name) != root: continue\n"
+                "                if os.path.basename(name).startswith('.'): continue\n"
+                "                with z.open(name) as src, open(os.path.join(TLOG, os.path.basename(name)), 'wb') as dst:\n"
+                "                    shutil.copyfileobj(src, dst)\n"
+                "                n += 1\n"
+                "        print('Installed %d weight files from %s' % (n, os.path.basename(zp)), flush=True)\n"
+                "        return has_weights()\n"
+                "    except Exception as ex:\n"
+                "        print('Could not use %s: %s' % (zp, ex), flush=True)\n"
+                "        return False\n"
+                "\n"
+                "zips = sorted(glob.glob(os.path.expanduser('~/Downloads/*.zip')), key=os.path.getmtime, reverse=True)\n"
+                "for zp in zips[:40]:\n"
+                "    try:\n"
+                "        if not zipfile.is_zipfile(zp): continue\n"
+                "        with zipfile.ZipFile(zp) as z:\n"
+                "            if not any(os.path.basename(n) == 'flownet.pkl' for n in z.namelist()): continue\n"
+                "    except Exception:\n"
+                "        continue\n"
+                "    print('Found RIFE weights in Downloads: ' + os.path.basename(zp), flush=True)\n"
+                "    if install_zip(zp): sys.exit(0)\n"
+                "\n"
+                "print('Downloading RIFE 4.25 weights from Google Drive…', flush=True)\n"
+                "subprocess.run([VENV_PY,'-m','pip','install','-q','gdown'])\n"
+                "tmp = os.path.join(tempfile.mkdtemp(), 'rife_weights.zip')\n"
+                "r = subprocess.run([VENV_PY,'-m','gdown',DRIVE_ID,'-O',tmp])\n"
+                "if r.returncode != 0:\n"
+                "    r = subprocess.run([VENV_PY,'-m','gdown','https://drive.google.com/uc?id='+DRIVE_ID,'-O',tmp])\n"
+                "if r.returncode == 0 and os.path.exists(tmp) and install_zip(tmp):\n"
+                "    print('RIFE weights installed.', flush=True)\n"
+                "    sys.exit(0)\n"
                 "print('NEEDS_MANUAL_DOWNLOAD', flush=True)\n"
                 "sys.exit(2)\n"
             )
@@ -5943,44 +5990,41 @@ class App(tk.Tk):
         except Exception:
             pass
 
+    # RIFE 4.25 weights (train_log zip) on the author's Google Drive, as
+    # linked from github.com/hzwer/Practical-RIFE.
+    RIFE_WEIGHTS_DRIVE_ID = "1ZKjcbmt1hypiFprJPIKW0Tt0lr_2i7bg"
+
     def _rife_show_manual_instructions(self):
-        """Called after installer exits with code 2: packages+repo done, weights need manual download."""
+        """Installer exit code 2: packages and repo are done but Google
+        Drive refused the automatic weights download (it rate-limits
+        popular files). Two clicks, no Terminal: the download page is
+        opened here, and Install picks the zip up from ~/Downloads."""
         self._step_set("rife", ST_MISSING,
-                       "Packages & repo ready — weights need manual download ↓")
-
+                       "Almost there — download the weights zip, then click Install again")
+        url = ("https://drive.google.com/file/d/"
+               + self.RIFE_WEIGHTS_DRIVE_ID + "/view")
         sep = "─" * 52
-        lines = [
+        for msg, tag in [
+            ("", "dim"), (sep, "hi"),
+            ("  RIFE: one download left", "hi"), (sep, "hi"),
+            ("  Google Drive would not let the app fetch the model", "dim"),
+            ("  weights automatically. Two clicks:", "dim"),
             ("", "dim"),
-            (sep, "hi"),
-            ("  RIFE weights: one-time manual download required", "hi"),
-            (sep, "hi"),
+            ("  1. The download page is opening in your browser —", "dim"),
+            ("     press Download there (the zip goes to Downloads).", "dim"),
+            ("     " + url, "ok"),
             ("", "dim"),
-            ("  The model weights are only on Google Drive.", "dim"),
-            ("  Steps:", "dim"),
-            ("", "dim"),
-            ("  1. Open this link in your browser:", "dim"),
-            ("     https://github.com/hzwer/Practical-RIFE", "ok"),
-            ("", "dim"),
-            ("  2. Find the '4.25' row and click 'Google Drive'", "dim"),
-            ("     Download the zip — it contains a train_log/ folder.", "dim"),
-            ("", "dim"),
-            ("  3. Unzip it. Then run these commands in Terminal:", "dim"),
-            ("", "dim"),
-            ("     mkdir -p ~/RifeApp/practical-RIFE/train_log", "hi"),
-            ("     cp ~/Downloads/train_log/* ~/RifeApp/practical-RIFE/train_log/", "hi"),
-            ("", "dim"),
-            ("  4. If the zip extracted to a folder with a different name,", "dim"),
-            ("     replace 'train_log' above with that folder name.", "dim"),
-            ("", "dim"),
-            ("  5. Come back here and click 'Test Install' to verify.", "dim"),
-            (sep, "hi"),
-            ("", "dim"),
-        ]
-        for msg, tag in lines:
+            ("  2. Come back and click Install on the RIFE row again.", "dim"),
+            ("     The app finds the zip in Downloads and installs it.", "dim"),
+            (sep, "hi"), ("", "dim"),
+        ]:
             self.log(self.setup_log, msg, tag)
-
-        # Open the GitHub page automatically
-        self._open_url("https://github.com/hzwer/Practical-RIFE")
+        try:
+            import webbrowser
+            webbrowser.open(url)
+        except Exception:
+            pass
+        return
 
     def _path_bar(self, parent):
         """Small dark bar showing the current input path."""

@@ -20998,5 +20998,72 @@ class TestSetupInstallsThePython(unittest.TestCase):
                       os.environ["PATH"].split(os.pathsep))
 
 
+class TestRifeWeightsInstallThemselves(unittest.TestCase):
+    """RIFE's weights are only on Google Drive. The installer takes a
+    zip already in ~/Downloads, else fetches it with gdown; only when
+    both fail does the app ask -- and then it opens the page and picks
+    the zip up on the next Install, with no Terminal commands."""
+
+    def _installer(self, home):
+        import unittest.mock as um
+        app = App.__new__(App)
+        app.setup_log = None
+        app.log = lambda *a, **k: None
+        app.progress = lambda *a, **k: None
+        app.after = lambda *a, **k: None
+        app._step_set = lambda *a, **k: None
+        class T:
+            def __init__(self, target=None, daemon=None): pass
+            def start(self): pass
+        with um.patch.dict(os.environ, {"HOME": home}), \
+             um.patch.object(ai_toolbox.threading, "Thread", T):
+            app._step_install("rife")
+            return open(os.path.join(home, "RifeApp", "_install_rife.py")).read()
+
+    def test_installer_script_takes_downloads_then_gdown(self):
+        import tempfile
+        body = self._installer(tempfile.mkdtemp())
+        compile(body, "installer", "exec")
+        self.assertIn("DRIVE_ID = '" + App.RIFE_WEIGHTS_DRIVE_ID + "'", body)
+        self.assertLess(body.index("~/Downloads/*.zip"), body.index("'gdown',DRIVE_ID"))
+        self.assertLess(body.index("'gdown',DRIVE_ID"), body.index("NEEDS_MANUAL_DOWNLOAD"))
+        self.assertNotIn("'--id'", body)
+
+    def test_a_zip_in_downloads_is_installed(self):
+        import tempfile, zipfile, subprocess
+        home = tempfile.mkdtemp()
+        body = self._installer(home)
+        os.makedirs(os.path.join(home, "Downloads"))
+        with zipfile.ZipFile(os.path.join(home, "Downloads", "4.25.zip"), "w") as z:
+            for n in ("flownet.pkl", "RIFE_HDv3.py", "IFNet_HDv3.py"):
+                z.writestr("train_log/" + n, "x")
+            z.writestr("__MACOSX/._junk", "x")
+        with open(os.path.join(home, "Downloads", "broken.zip"), "w") as fh:
+            fh.write("not a zip")
+        head = ("import os, sys, subprocess, shutil\n"
+                "VENV_PY = sys.executable\n"
+                "TLOG = os.path.expanduser('~/RifeApp/practical-RIFE/train_log')\n"
+                "os.makedirs(TLOG, exist_ok=True)\n"
+                "def has_weights():\n"
+                "    return any(f.endswith(('.pkl','.pth')) for f in os.listdir(TLOG))\n")
+        part = os.path.join(home, "part.py")
+        with open(part, "w") as fh:
+            fh.write(head + body[body.index("# 4 — weights"):])
+        r = subprocess.run([sys.executable, part], env={**os.environ, "HOME": home},
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(sorted(os.listdir(os.path.join(
+            home, "RifeApp", "practical-RIFE", "train_log"))),
+            ["IFNet_HDv3.py", "RIFE_HDv3.py", "flownet.pkl"])
+
+    def test_fallback_is_two_clicks_not_terminal_commands(self):
+        import inspect
+        src = inspect.getsource(App._rife_show_manual_instructions)
+        self.assertIn("webbrowser.open(url)", src)
+        self.assertIn("click Install on the RIFE row again", src)
+        self.assertNotIn("mkdir -p", src)
+        self.assertNotIn("cp ~/Downloads", src)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
